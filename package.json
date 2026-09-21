@@ -1,0 +1,14 @@
+{
+  "name": "everything2lego-viewer",
+  "private": true,
+  "scripts": {
+    "build:viewer": "esbuild src/everything2lego/viewer/main.js --bundle --minify --format=iife --outfile=src/everything2lego/viewer/bundle.js",
+    "test:viewer": "node tests/viewer.cjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.56.1",
+    "esbuild": "0.25.0",
+    "lucide": "0.468.0",
+    "three": "0.161.0"
+  }
+}

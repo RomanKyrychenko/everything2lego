@@ -1,0 +1,74 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>everything2lego viewer</title>
+  <style>
+    * { box-sizing: border-box; letter-spacing: 0; }
+    html, body { margin: 0; height: 100%; background: #f1f3f2; color: #202622;
+                 font: 14px -apple-system, BlinkMacSystemFont, sans-serif; }
+    body { display: flex; flex-direction: column; height: 100dvh; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 16px;
+             padding: 16px 24px; background: white; border-bottom: 1px solid #d8dfda; }
+    h1 { font-size: 18px; margin: 0; }
+    header span { color: #65736b; font-size: 12px; }
+    main { display: flex; flex: 1; min-height: 0; }
+    #stage { flex: 1; min-width: 0; min-height: 0; position: relative; }
+    #canvas { width: 100%; height: 100%; display: block; touch-action: none; }
+    #ui { width: 250px; padding: 24px; overflow-y: auto; background: white;
+          border-left: 1px solid #d8dfda; }
+    h2 { font-size: 13px; margin: 24px 0 12px; }
+    #ui h2:first-child { margin-top: 0; }
+    p { line-height: 1.5; }
+    #layer { width: 100%; accent-color: #287a55; margin: 16px 0; }
+    #legend { display: grid; gap: 9px; font-size: 12px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    a, button { color: #245f45; border: 1px solid #c8d5ce; border-radius: 4px;
+                background: white; padding: 8px 10px; text-decoration: none; font: inherit; cursor: pointer;
+                display: inline-flex; gap: 6px; align-items: center; justify-content: center; }
+    a svg, button svg { width: 16px; height: 16px; flex-shrink: 0; }
+    a:hover, button:hover { background: #edf5ef; }
+    label { display: block; margin-top: 12px; }
+    input[type=checkbox] { accent-color: #287a55; }
+    #status { font-size: 12px; line-height: 1.6; color: #526159; }
+    #error { position: absolute; inset: 30%; padding: 24px; background: white; }
+    #error[hidden] { display: none; }
+    @media(max-width: 640px) {
+      header { padding: 12px 16px; } header span { display: none; }
+      main { flex-direction: column; }
+      #ui { width: 100%; height: 240px; flex-shrink: 0; padding: 16px; border-left: 0;
+            border-top: 1px solid #d8dfda; display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+      #ui h2 { margin-top: 0; } #legend { max-height: 90px; overflow-y: auto; }
+    }
+    @media(max-width: 420px) { header .link-label { display: none; } }
+    .sw { display: inline-block; width: 12px; height: 12px; margin-right: 6px;
+          vertical-align: middle; border-radius: 2px; border: 1px solid rgba(255,255,255,0.15); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>everything2lego</h1>
+    <span id="dimensions"></span>
+    <div class="actions"><a href="../model.ldr" download title="Download LDraw model" aria-label="Download LDraw model"><i data-lucide="download"></i><span class="link-label">Model</span></a><a href="../instructions.pdf" download title="Download build guide" aria-label="Download build guide"><i data-lucide="file-text"></i><span class="link-label">Build guide</span></a></div>
+  </header>
+  <main>
+    <div id="stage"><canvas id="canvas" aria-label="Interactive LEGO model"></canvas><p id="error" role="alert" hidden></p></div>
+    <aside id="ui">
+      <section>
+        <h2>Build step <span id="layer-val"></span></h2>
+        <input id="layer" aria-label="Build step" type="range" min="0" max="0" value="0">
+        <div class="actions"><button id="reset" type="button" title="Reset view" aria-label="Reset view"><i data-lucide="rotate-ccw"></i></button><a href="../wanted.xml" download title="Download parts list"><i data-lucide="list"></i>Parts list</a></div>
+        <label><input id="rotate" type="checkbox"> Auto-rotate</label>
+        <p id="status"></p>
+      </section>
+      <section>
+        <h2><span id="brick-count">0</span> parts / <span id="color-count">0</span> colors</h2>
+        <div id="legend"></div>
+      </section>
+    </aside>
+  </main>
+  <!-- SCENE -->
+  <!-- VIEWER -->
+</body>
+</html>

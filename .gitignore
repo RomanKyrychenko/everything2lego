@@ -1,0 +1,33 @@
+.venv*/
+node_modules/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.DS_Store
+out*/
+dist/
+build/
+vendor/
+
+# Third-party datasets we don't own the redistribution rights to.
+data/rebrickable/                       # Rebrickable's own redistribution terms
+examples/house/ASSET_*.png              # stock catalog photos
+examples/house/ASSET_*.avif             # stock catalog photos
+examples/pixellabs-*.glb                # pixellabs marketplace asset
+examples/synth_house/                   # locally-rendered turntable of a mesh
+
+# Local editor / OS clutter.
+*.swp
+*.swo
+*.pyc
+.idea/
+.vscode/
+.env
+.env.*
+.claude/        # Claude Code session state
+
+# Model weights + caches (published externally).
+*.ckpt
+*.safetensors
+*.onnx
+*.pth

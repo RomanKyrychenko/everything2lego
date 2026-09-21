@@ -1,0 +1,3605 @@
+{
+  "_comment": "Auto-imported from Rebrickable via scripts/import_rebrickable.py",
+  "parts": [
+    {
+      "ldraw": "6141.dat",
+      "bl": "6141",
+      "shape": "plate",
+      "footprint": [
+        1,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Round 1 x 1 with Solid Stud",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "54200.dat",
+      "bl": "54200",
+      "shape": "slope",
+      "footprint": [
+        1,
+        1
+      ],
+      "height_units": 2,
+      "name": "Brick Sloped 30\u00b0 1 x 1 x 2/3 (Cheese Slope)",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "2420.dat",
+      "bl": "2420",
+      "shape": "plate",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 1,
+      "name": "Plate 2 x 2 Corner",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "2357.dat",
+      "bl": "2357",
+      "shape": "brick",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick 2 x 2 Corner",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "3794a.dat",
+      "bl": "3794a",
+      "shape": "plate",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 2 with 1 Stud without Groove (Jumper)",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "59900.dat",
+      "bl": "59900",
+      "shape": "brick",
+      "footprint": [
+        1,
+        1
+      ],
+      "height_units": 3,
+      "name": "Cone 1 x 1 [Top Groove]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "3065.dat",
+      "bl": "3065",
+      "shape": "brick",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick 1 x 2 without Bottom Tube",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "4286.dat",
+      "bl": "4286",
+      "shape": "slope",
+      "footprint": [
+        3,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped 33\u00b0 3 x 1",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "2877.dat",
+      "bl": "2877",
+      "shape": "brick",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Special 1 x 2 with Grille",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "85984.dat",
+      "bl": "85984",
+      "shape": "slope",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 2,
+      "name": "Brick Sloped 30\u00b0 1 x 2 x 2/3",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "2654.dat",
+      "bl": "2654",
+      "shape": "plate",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 1,
+      "name": "Plate Round 2 x 2 with Rounded Bottom [Boat Stud]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "4589.dat",
+      "bl": "4589",
+      "shape": "brick",
+      "footprint": [
+        1,
+        1
+      ],
+      "height_units": 3,
+      "name": "Cone 1 x 1 [No Top Groove]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "2540.dat",
+      "bl": "2540",
+      "shape": "plate",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 2 Side Handle [Free Ends]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "32028.dat",
+      "bl": "32028",
+      "shape": "door",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 15,
+      "name": "Plate Special 1 x 2 with Door Rail",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "87580.dat",
+      "bl": "87580",
+      "shape": "plate",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 1,
+      "name": "Plate Special 2 x 2 with Groove and Center Stud (Jumper)",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "44728.dat",
+      "bl": "44728",
+      "shape": "plate",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 1,
+      "name": "Bracket 1 x 2 - 2 x 2",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "15573.dat",
+      "bl": "15573",
+      "shape": "plate",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 2 with 1 Stud with Groove and Inside Stud Holder (Jumper)",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "4081b.dat",
+      "bl": "4081b",
+      "shape": "plate",
+      "footprint": [
+        1,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 1 with Clip Light, Bar Hole [Thick Ring]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "4740.dat",
+      "bl": "4740",
+      "shape": "plate",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 1,
+      "name": "Dish 2 x 2 Inverted [Radar]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "50950.dat",
+      "bl": "50950",
+      "shape": "brick",
+      "footprint": [
+        3,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Curved 3 x 1 No Studs",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "11477.dat",
+      "bl": "11477",
+      "shape": "brick",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Curved 2 x 1 No Studs [1/2 Bow]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "4085c.dat",
+      "bl": "4085c",
+      "shape": "plate",
+      "footprint": [
+        1,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 1 with Clip Vertical [Thick U Clip]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "2555.dat",
+      "bl": "2555",
+      "shape": "tile",
+      "footprint": [
+        1,
+        1
+      ],
+      "height_units": 1,
+      "name": "Tile Special 1 x 1 with Clip and Straight Tips",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "6019.dat",
+      "bl": "6019",
+      "shape": "plate",
+      "footprint": [
+        1,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 1 with Clip Horizontal [Thick U Clip]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "60478.dat",
+      "bl": "60478",
+      "shape": "plate",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 2 with Handle on End [Closed Ends]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "48336.dat",
+      "bl": "48336",
+      "shape": "plate",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 2 [Side Handle Closed Ends]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "2432.dat",
+      "bl": "2432",
+      "shape": "tile",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 1,
+      "name": "Tile Special 1 x 2 with Handle",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "3297.dat",
+      "bl": "3297",
+      "shape": "slope",
+      "footprint": [
+        4,
+        3
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped 33\u00b0 3 x 4",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "30414.dat",
+      "bl": "30414",
+      "shape": "brick",
+      "footprint": [
+        4,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Special 1 x 4 with 4 Studs on One Side",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "3709.dat",
+      "bl": "3709",
+      "shape": "plate",
+      "footprint": [
+        4,
+        2
+      ],
+      "height_units": 1,
+      "name": "Technic Plate 2 x 4 [3 Holes]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "63868.dat",
+      "bl": "63868",
+      "shape": "plate",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 2 with Clip Horizontal on End",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "61409.dat",
+      "bl": "61409",
+      "shape": "slope",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 2,
+      "name": "Brick Sloped 18\u00b0 2 x 1 x 2/3 with 4 Slots / Grate",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "2450.dat",
+      "bl": "2450",
+      "shape": "slope",
+      "footprint": [
+        3,
+        3
+      ],
+      "height_units": 3,
+      "name": "Wedge Plate 3 x 3 Cut Corner",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "60897.dat",
+      "bl": "60897",
+      "shape": "plate",
+      "footprint": [
+        1,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 1 with Clip Vertical [Thick Open O Clip]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "6231.dat",
+      "bl": "6231",
+      "shape": "panel",
+      "footprint": [
+        1,
+        1
+      ],
+      "height_units": 3,
+      "name": "Panel 1 x 1 x 1 Corner",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "99780.dat",
+      "bl": "99780",
+      "shape": "plate",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 1,
+      "name": "Bracket 1 x 2 - 1 x 2 Inverted",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "49668.dat",
+      "bl": "49668",
+      "shape": "plate",
+      "footprint": [
+        1,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 1 with Tooth",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "3659.dat",
+      "bl": "3659",
+      "shape": "brick",
+      "footprint": [
+        4,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Arch 1 x 4",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "2458.dat",
+      "bl": "2458",
+      "shape": "brick",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Special 1 x 2 with Pin",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "4287b.dat",
+      "bl": "4287b",
+      "shape": "slope",
+      "footprint": [
+        3,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped Inverted 34\u00b0 3 x 1 with Internal Stopper",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "99207.dat",
+      "bl": "99207",
+      "shape": "plate",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 1,
+      "name": "Bracket 1 x 2 - 2 x 2 Inverted",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "2444.dat",
+      "bl": "2444",
+      "shape": "plate",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 1,
+      "name": "Plate Special 2 x 2 with 1 Pin Hole [Split Underside Ribs]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "2436.dat",
+      "bl": "2436",
+      "shape": "plate",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 1,
+      "name": "Bracket 1 x 2 - 1 x 4 [Square Corners]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "41770.dat",
+      "bl": "41770",
+      "shape": "slope",
+      "footprint": [
+        4,
+        2
+      ],
+      "height_units": 3,
+      "name": "Wedge Plate 4 x 2 Left",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "41769.dat",
+      "bl": "41769",
+      "shape": "slope",
+      "footprint": [
+        4,
+        2
+      ],
+      "height_units": 3,
+      "name": "Wedge Plate 4 x 2 Right",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "4460b.dat",
+      "bl": "4460b",
+      "shape": "slope",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 9,
+      "name": "Brick Sloped 75\u00b0 2 x 1 x 3 with Hollow Stud",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "12825.dat",
+      "bl": "12825",
+      "shape": "tile",
+      "footprint": [
+        1,
+        1
+      ],
+      "height_units": 1,
+      "name": "Tile Special 1 x 1 with Clip with Rounded Tips",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "43722.dat",
+      "bl": "43722",
+      "shape": "slope",
+      "footprint": [
+        3,
+        2
+      ],
+      "height_units": 3,
+      "name": "Wedge Plate 3 x 2 Right",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "11211.dat",
+      "bl": "11211",
+      "shape": "brick",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Special 1 x 2 with 2 Studs on 1 Side",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "92280.dat",
+      "bl": "92280",
+      "shape": "plate",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 2, Top Clip [Split]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "43723.dat",
+      "bl": "43723",
+      "shape": "slope",
+      "footprint": [
+        3,
+        2
+      ],
+      "height_units": 3,
+      "name": "Wedge Plate 3 x 2 Left",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "15712.dat",
+      "bl": "15712",
+      "shape": "tile",
+      "footprint": [
+        1,
+        1
+      ],
+      "height_units": 1,
+      "name": "Tile Special 1 x 1 with Clip with Rounded Edges",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "4600.dat",
+      "bl": "4600",
+      "shape": "plate",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 1,
+      "name": "Plate Special 2 x 2 with Wheel Holders",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "92593.dat",
+      "bl": "92593",
+      "shape": "plate",
+      "footprint": [
+        4,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 4 with 2 Studs, 3 Bottom Tubes",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "6232.dat",
+      "bl": "6232",
+      "shape": "brick",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Special 2 x 2 with Pin and Axle Hole",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "3063b.dat",
+      "bl": "3063b",
+      "shape": "brick",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Round Corner 2 x 2 Macaroni with Stud Notch",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "2419.dat",
+      "bl": "2419",
+      "shape": "slope",
+      "footprint": [
+        6,
+        3
+      ],
+      "height_units": 3,
+      "name": "Wedge Plate 3 x 6 Cut Corners",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "6215.dat",
+      "bl": "6215",
+      "shape": "brick",
+      "footprint": [
+        3,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Curved 2 x 3",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "2449.dat",
+      "bl": "2449",
+      "shape": "slope",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 9,
+      "name": "Brick Sloped Inverted 75\u00b0 2 x 1 x 3",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "93273.dat",
+      "bl": "93273",
+      "shape": "brick",
+      "footprint": [
+        4,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Curved 4 x 1 Double with No Studs",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "61252.dat",
+      "bl": "61252",
+      "shape": "plate",
+      "footprint": [
+        1,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 1 with Clip Horizontal [Thick Open O Clip]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "2921.dat",
+      "bl": "2921",
+      "shape": "brick",
+      "footprint": [
+        1,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Special 1 x 1 with Handle",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "3176.dat",
+      "bl": "3176",
+      "shape": "plate",
+      "footprint": [
+        3,
+        2
+      ],
+      "height_units": 1,
+      "name": "Plate Special 3 x 2 with Rounded End, Hole",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "60601.dat",
+      "bl": "60601",
+      "shape": "window",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 6,
+      "name": "Glass for Window 1 x 2 x 2 Flat",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "30137.dat",
+      "bl": "30137",
+      "shape": "brick",
+      "footprint": [
+        4,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Special 1 x 4 Palisade [aka Log]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "3738.dat",
+      "bl": "3738",
+      "shape": "plate",
+      "footprint": [
+        8,
+        2
+      ],
+      "height_units": 1,
+      "name": "Technic Plate 2 x 8 [7 Holes]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "4175.dat",
+      "bl": "4175",
+      "shape": "plate",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 2 with Ladder",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "4488.dat",
+      "bl": "4488",
+      "shape": "plate",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 1,
+      "name": "Plate Special 2 x 2 with Wheel Holder",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "30565.dat",
+      "bl": "30565",
+      "shape": "plate",
+      "footprint": [
+        4,
+        4
+      ],
+      "height_units": 1,
+      "name": "Plate Round Corner 4 x 4",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "3245c.dat",
+      "bl": "3245c",
+      "shape": "brick",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick 1 x 2 x 2 with Inside Stud Holder",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "6112.dat",
+      "bl": "6112",
+      "shape": "brick",
+      "footprint": [
+        12,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick 1 x 12",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "47457.dat",
+      "bl": "47457",
+      "shape": "slope",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 2,
+      "name": "Brick Curved 2 x 2 x 2/3 Two Studs and Curved Slope End",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "3048c.dat",
+      "bl": "3048c",
+      "shape": "slope",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped 45\u00b0 2 x 1 Triple with Ovoid Bottom Pin",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "4216.dat",
+      "bl": "4216",
+      "shape": "brick",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Special 1 x 2 with Groove",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "60481.dat",
+      "bl": "60481",
+      "shape": "slope",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 6,
+      "name": "Brick Sloped 65\u00b0 2 x 1 x 2",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "2460.dat",
+      "bl": "2460",
+      "shape": "tile",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 1,
+      "name": "Tile Special 2 x 2 with Top Pin",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "2817.dat",
+      "bl": "2817",
+      "shape": "plate",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 1,
+      "name": "Plate Special 2 x 2 with 2 Pin Holes",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "42022.dat",
+      "bl": "42022",
+      "shape": "brick",
+      "footprint": [
+        6,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Curved 6 x 1",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "99781.dat",
+      "bl": "99781",
+      "shape": "plate",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 1,
+      "name": "Bracket 1 x 2 - 1 x 2",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "51739.dat",
+      "bl": "51739",
+      "shape": "slope",
+      "footprint": [
+        4,
+        2
+      ],
+      "height_units": 3,
+      "name": "Wedge Plate 2 x 4",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "2453a.dat",
+      "bl": "2453a",
+      "shape": "brick",
+      "footprint": [
+        1,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick 1 x 1 x 5 with Blocked Open or Hollow Stud",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "3854.dat",
+      "bl": "3854",
+      "shape": "window",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 9,
+      "name": "Window 1 x 2 x 3 Pane",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "11153.dat",
+      "bl": "11153",
+      "shape": "brick",
+      "footprint": [
+        4,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Curved 4 x 1 No Studs [Stud Holder with Symmetric Ridges]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "4510.dat",
+      "bl": "4510",
+      "shape": "door",
+      "footprint": [
+        8,
+        1
+      ],
+      "height_units": 15,
+      "name": "Plate Special 1 x 8 with Door Rail",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "2465.dat",
+      "bl": "2465",
+      "shape": "brick",
+      "footprint": [
+        16,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick 1 x 16",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "4623.dat",
+      "bl": "4623",
+      "shape": "plate",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 2 with Bar Up [Horizontal Arm 6mm]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "60474.dat",
+      "bl": "60474",
+      "shape": "plate",
+      "footprint": [
+        4,
+        4
+      ],
+      "height_units": 1,
+      "name": "Plate Round 4 x 4 with Pin Hole",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "6157.dat",
+      "bl": "6157",
+      "shape": "plate",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 1,
+      "name": "Plate Special 2 x 2 with Wheels Holder Wide",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "30357.dat",
+      "bl": "30357",
+      "shape": "plate",
+      "footprint": [
+        3,
+        3
+      ],
+      "height_units": 1,
+      "name": "Plate Round Corner 3 x 3",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "60470b.dat",
+      "bl": "60470b",
+      "shape": "plate",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 2 with Clips Horizontal [Open O Clips]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "30237a.dat",
+      "bl": "30237a",
+      "shape": "brick",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Special 1 x 2 with Vertical Clip [Thick U Clip]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "30503.dat",
+      "bl": "30503",
+      "shape": "slope",
+      "footprint": [
+        4,
+        4
+      ],
+      "height_units": 3,
+      "name": "Wedge Plate 4 x 4 Cut Corner",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "30363.dat",
+      "bl": "30363",
+      "shape": "slope",
+      "footprint": [
+        4,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped 18\u00b0 4 x 2",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "3839b.dat",
+      "bl": "3839b",
+      "shape": "plate",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 2 with Handles [Flat Ends / Low Attachment]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "85861.dat",
+      "bl": "85861",
+      "shape": "plate",
+      "footprint": [
+        1,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Round 1 x 1 with Open Stud",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "6223.dat",
+      "bl": "6223",
+      "shape": "brick",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick 2 x 2 without Inside Ridges",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "4871.dat",
+      "bl": "4871",
+      "shape": "slope",
+      "footprint": [
+        4,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped Inverted 45\u00b0 4 x 2 Double with 2 x 2 Recessed",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "14769.dat",
+      "bl": "14769",
+      "shape": "tile",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 1,
+      "name": "Tile Round 2 x 2 with Bottom Stud Holder",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "54383.dat",
+      "bl": "54383",
+      "shape": "slope",
+      "footprint": [
+        6,
+        3
+      ],
+      "height_units": 3,
+      "name": "Wedge Plate 6 x 3 Right",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "30602.dat",
+      "bl": "30602",
+      "shape": "brick",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Curved 2 x 2 with Lip, No Studs",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "54384.dat",
+      "bl": "54384",
+      "shape": "slope",
+      "footprint": [
+        6,
+        3
+      ],
+      "height_units": 3,
+      "name": "Wedge Plate 6 x 3 Left",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "2476a.dat",
+      "bl": "2476a",
+      "shape": "plate",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 1,
+      "name": "Plate Special 2 x 2 with Pin on Bottom",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "6179.dat",
+      "bl": "6179",
+      "shape": "plate",
+      "footprint": [
+        4,
+        4
+      ],
+      "height_units": 1,
+      "name": "Plate Special 4 x 4 with Studs on One Edge [Plain]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "42023.dat",
+      "bl": "42023",
+      "shape": "brick",
+      "footprint": [
+        6,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Curved Inverted 6 x 1",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "88072.dat",
+      "bl": "88072",
+      "shape": "plate",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 2 with Bar Up [Horizontal Arm 5mm]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "85080.dat",
+      "bl": "85080",
+      "shape": "brick",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Round Corner 2 x 2 Macaroni with Stud Notch and Reinforced Underside [New Style]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "60477.dat",
+      "bl": "60477",
+      "shape": "slope",
+      "footprint": [
+        4,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped 18\u00b0 4 x 1",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "3856.dat",
+      "bl": "3856",
+      "shape": "window",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 9,
+      "name": "Window 1 x 2 x 3 Shutter",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "30236.dat",
+      "bl": "30236",
+      "shape": "brick",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Special 1 x 2 with Handle",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "60596.dat",
+      "bl": "60596",
+      "shape": "door",
+      "footprint": [
+        4,
+        1
+      ],
+      "height_units": 18,
+      "name": "Door Frame 1 x 4 x 6 Type 2",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "3942c.dat",
+      "bl": "3942c",
+      "shape": "brick",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 3,
+      "name": "Cone 2 x 2 x 2, Open Stud",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "43337.dat",
+      "bl": "43337",
+      "shape": "panel",
+      "footprint": [
+        4,
+        1
+      ],
+      "height_units": 3,
+      "name": "Panel 1 x 4 x 1 with Rounded Corners [Thick Wall]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "32001.dat",
+      "bl": "32001",
+      "shape": "plate",
+      "footprint": [
+        6,
+        2
+      ],
+      "height_units": 1,
+      "name": "Technic Plate 2 x 6 [5 Holes]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "15672.dat",
+      "bl": "15672",
+      "shape": "slope",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped 45\u00b0 2 x 1 with 2/3 Cutout [New Version]",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "4862.dat",
+      "bl": "4862",
+      "shape": "window",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 6,
+      "name": "Glass for Window 1 x 2 x 2 Plane",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "99206.dat",
+      "bl": "99206",
+      "shape": "plate",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 1,
+      "name": "Plate Special 2 x 2 x 2/3 with Two Studs On Side and Two Raised [Solid Anti-stud]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "6005.dat",
+      "bl": "6005",
+      "shape": "brick",
+      "footprint": [
+        3,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Arch 1 x 3 x 2 Curved Top",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "92947.dat",
+      "bl": "92947",
+      "shape": "brick",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Round 2 x 2 [Grill]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "52107.dat",
+      "bl": "52107",
+      "shape": "brick",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Special 1 x 2 with Studs on 2 Sides",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "3956.dat",
+      "bl": "3956",
+      "shape": "plate",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 1,
+      "name": "Bracket 2 x 2 - 2 x 2",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "11458.dat",
+      "bl": "11458",
+      "shape": "plate",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 2 with Pin Hole on Top",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "2653.dat",
+      "bl": "2653",
+      "shape": "brick",
+      "footprint": [
+        4,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Special 1 x 4 with Groove",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "3046a.dat",
+      "bl": "3046a",
+      "shape": "slope",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped 45\u00b0 2 x 2 Double Concave",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "30000.dat",
+      "bl": "30000",
+      "shape": "brick",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Special 2 x 2 with 2 Pins and Axle Hole",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "6180.dat",
+      "bl": "6180",
+      "shape": "plate",
+      "footprint": [
+        6,
+        4
+      ],
+      "height_units": 1,
+      "name": "Plate Special 4 x 6 with Studs on 3 Edges",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "10247.dat",
+      "bl": "10247",
+      "shape": "plate",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 1,
+      "name": "Plate Special 2 x 2 with 1 Pin Hole [Complete Underside Rib]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "2339.dat",
+      "bl": "2339",
+      "shape": "brick",
+      "footprint": [
+        5,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Arch 1 x 5 x 4 [Continuous Bow]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "48092.dat",
+      "bl": "48092",
+      "shape": "brick",
+      "footprint": [
+        4,
+        4
+      ],
+      "height_units": 3,
+      "name": "Brick Round Corner 4 x 4 Macaroni Wide with 3 Studs",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "2462.dat",
+      "bl": "2462",
+      "shape": "slope",
+      "footprint": [
+        3,
+        3
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged 3 x 3 Facet",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "3581.dat",
+      "bl": "3581",
+      "shape": "brick",
+      "footprint": [
+        1,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Special 1 x 1 x 2 with Shutter Holder",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "87620.dat",
+      "bl": "87620",
+      "shape": "slope",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged 2 x 2 Facet",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "6249.dat",
+      "bl": "6249",
+      "shape": "brick",
+      "footprint": [
+        4,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Special 2 x 4 with Pins",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "60593.dat",
+      "bl": "60593",
+      "shape": "window",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 9,
+      "name": "Window 1 x 2 x 3 Flat Front",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "60475b.dat",
+      "bl": "60475b",
+      "shape": "brick",
+      "footprint": [
+        1,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Special 1 x 1 with Clip Vertical [Open O Clip, Hollow Stud]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "4215b.dat",
+      "bl": "4215b",
+      "shape": "panel",
+      "footprint": [
+        4,
+        1
+      ],
+      "height_units": 9,
+      "name": "Panel 1 x 4 x 3 [Hollow Studs]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "30367b.dat",
+      "bl": "30367b",
+      "shape": "brick",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Round 2 x 2 Dome Top, Blocked Open Stud, Bottom Axle Holder",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "59349.dat",
+      "bl": "59349",
+      "shape": "panel",
+      "footprint": [
+        6,
+        1
+      ],
+      "height_units": 15,
+      "name": "Panel 1 x 6 x 5",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "88930.dat",
+      "bl": "88930",
+      "shape": "brick",
+      "footprint": [
+        4,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Curved 2 x 4 x 2/3 No Studs, with Bottom Tubes",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "3455.dat",
+      "bl": "3455",
+      "shape": "brick",
+      "footprint": [
+        6,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Arch 1 x 6",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "43898.dat",
+      "bl": "43898",
+      "shape": "plate",
+      "footprint": [
+        3,
+        3
+      ],
+      "height_units": 1,
+      "name": "Dish 3 x 3 Inverted [Radar]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "30145.dat",
+      "bl": "30145",
+      "shape": "brick",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick 2 x 2 x 3",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "15207.dat",
+      "bl": "15207",
+      "shape": "panel",
+      "footprint": [
+        4,
+        1
+      ],
+      "height_units": 3,
+      "name": "Panel 1 x 4 x 1 with Rounded Corners [Thin Wall]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "4490.dat",
+      "bl": "4490",
+      "shape": "brick",
+      "footprint": [
+        3,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Arch 1 x 3",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "4859.dat",
+      "bl": "4859",
+      "shape": "slope",
+      "footprint": [
+        4,
+        3
+      ],
+      "height_units": 3,
+      "name": "Wedge Plate 3 x 4 without Stud Notches",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "6106.dat",
+      "bl": "6106",
+      "shape": "slope",
+      "footprint": [
+        6,
+        6
+      ],
+      "height_units": 3,
+      "name": "Wedge Plate 6 x 6 Cut Corner",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "92946.dat",
+      "bl": "92946",
+      "shape": "slope",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped 45\u00b0 2 x 1 with 2/3 Cutout [Original Version]",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "3300.dat",
+      "bl": "3300",
+      "shape": "slope",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped 33\u00b0 2 x 2 Double",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "10201.dat",
+      "bl": "10201",
+      "shape": "plate",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 1,
+      "name": "Bracket 1 x 2 - 1 x 4 [Rounded Corners]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "3308.dat",
+      "bl": "3308",
+      "shape": "brick",
+      "footprint": [
+        8,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Arch 1 x 8 x 2",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "6182.dat",
+      "bl": "6182",
+      "shape": "brick",
+      "footprint": [
+        4,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Arch 1 x 4 x 2",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "60602.dat",
+      "bl": "60602",
+      "shape": "window",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 9,
+      "name": "Glass for Window 1 x 2 x 3 Flat Front",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "30157.dat",
+      "bl": "30157",
+      "shape": "plate",
+      "footprint": [
+        4,
+        2
+      ],
+      "height_units": 1,
+      "name": "Plate Special 2 x 4 with Pins",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "3041.dat",
+      "bl": "3041",
+      "shape": "slope",
+      "footprint": [
+        4,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped 45\u00b0 2 x 4 Double",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "98560.dat",
+      "bl": "98560",
+      "shape": "slope",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 9,
+      "name": "Brick Sloped 75\u00b0 2 x 2 x 3 [Solid Studs]",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "4445.dat",
+      "bl": "4445",
+      "shape": "slope",
+      "footprint": [
+        8,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped 45\u00b0 2 x 8",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "30526.dat",
+      "bl": "30526",
+      "shape": "brick",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Special 1 x 2 with 2 Pins, Round Pin Holes",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "52501.dat",
+      "bl": "52501",
+      "shape": "slope",
+      "footprint": [
+        6,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped Inverted 45\u00b0 6 x 1 Double with 1 x 4 Recessed",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "93274.dat",
+      "bl": "93274",
+      "shape": "plate",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 1,
+      "name": "Bracket 1 x 2 - 2 x 4",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "92950.dat",
+      "bl": "92950",
+      "shape": "brick",
+      "footprint": [
+        6,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Arch 1 x 6 Raised Arch",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "87544.dat",
+      "bl": "87544",
+      "shape": "panel",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 9,
+      "name": "Panel 1 x 2 x 3 [Side Supports / Hollow Studs]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "30165.dat",
+      "bl": "30165",
+      "shape": "brick",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Curved 2 x 2, Two Top Studs",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "6222.dat",
+      "bl": "6222",
+      "shape": "brick",
+      "footprint": [
+        4,
+        4
+      ],
+      "height_units": 3,
+      "name": "Brick Round 4 x 4 with 4 Side Pin Holes and Center Axle Hole",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "93606.dat",
+      "bl": "93606",
+      "shape": "brick",
+      "footprint": [
+        4,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Curved 4 x 2 No Studs",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "6564.dat",
+      "bl": "6564",
+      "shape": "slope",
+      "footprint": [
+        3,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged, Angled 3 x 2 Right",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "14704.dat",
+      "bl": "14704",
+      "shape": "plate",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 2 5.9mm Centre Side Towball Socket",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "6565.dat",
+      "bl": "6565",
+      "shape": "slope",
+      "footprint": [
+        3,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged, Angled 3 x 2 Left",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "3822.dat",
+      "bl": "3822",
+      "shape": "door",
+      "footprint": [
+        3,
+        1
+      ],
+      "height_units": 3,
+      "name": "Door 1 x 3 x 1 Left",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "30044.dat",
+      "bl": "30044",
+      "shape": "window",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 6,
+      "name": "Window 1 x 2 x 2 2/3 with Rounded Top",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "3821.dat",
+      "bl": "3821",
+      "shape": "door",
+      "footprint": [
+        3,
+        1
+      ],
+      "height_units": 3,
+      "name": "Door 1 x 3 x 1 Right",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "88646.dat",
+      "bl": "88646",
+      "shape": "plate",
+      "footprint": [
+        4,
+        3
+      ],
+      "height_units": 1,
+      "name": "Plate Special 3 x 4 with 1 x 4 Center Studs [Plain]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "4590.dat",
+      "bl": "4590",
+      "shape": "plate",
+      "footprint": [
+        4,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 4 Offset with Bar Holes",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "41748.dat",
+      "bl": "41748",
+      "shape": "slope",
+      "footprint": [
+        6,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged, Curved 6 x 2 Left, Inner Ridges",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "4854.dat",
+      "bl": "4854",
+      "shape": "slope",
+      "footprint": [
+        4,
+        4
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped Inverted 45\u00b0 4 x 4 Double with 4 x 2 Recessed",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "41747.dat",
+      "bl": "41747",
+      "shape": "slope",
+      "footprint": [
+        6,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged, Curved 6 x 2 Right, Inner Ridges",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "6191.dat",
+      "bl": "6191",
+      "shape": "brick",
+      "footprint": [
+        4,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Curved 1 x 4 x 1 1/3 No Studs, Lowered Inside Support",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "3582.dat",
+      "bl": "3582",
+      "shape": "window",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 6,
+      "name": "Window 1 x 2 x 2 Shutter",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "11476.dat",
+      "bl": "11476",
+      "shape": "plate",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 2 with Clip Horizontal on Side",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "57895.dat",
+      "bl": "57895",
+      "shape": "window",
+      "footprint": [
+        4,
+        1
+      ],
+      "height_units": 18,
+      "name": "Glass for Window 1 x 4 x 6",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "47397.dat",
+      "bl": "47397",
+      "shape": "slope",
+      "footprint": [
+        12,
+        3
+      ],
+      "height_units": 3,
+      "name": "Wedge Plate 12 x 3 Left",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "47398.dat",
+      "bl": "47398",
+      "shape": "slope",
+      "footprint": [
+        12,
+        3
+      ],
+      "height_units": 3,
+      "name": "Wedge Plate 12 x 3 Right",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "15070.dat",
+      "bl": "15070",
+      "shape": "plate",
+      "footprint": [
+        1,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 1 with Vertical Tooth",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "4588.dat",
+      "bl": "4588",
+      "shape": "brick",
+      "footprint": [
+        1,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Round 1 x 1 with Fins, Open Stud",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "2926.dat",
+      "bl": "2926",
+      "shape": "plate",
+      "footprint": [
+        4,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 4 with Wheels Holder",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "2413.dat",
+      "bl": "2413",
+      "shape": "slope",
+      "footprint": [
+        9,
+        4
+      ],
+      "height_units": 3,
+      "name": "Wedge Plate 4 x 9 without Stud Notches",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "15535.dat",
+      "bl": "15535",
+      "shape": "tile",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 1,
+      "name": "Tile Special Round 2 x 2 with Hole",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "3043.dat",
+      "bl": "3043",
+      "shape": "slope",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped 45\u00b0 2 x 2 Double",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "45677.dat",
+      "bl": "45677",
+      "shape": "slope",
+      "footprint": [
+        4,
+        4
+      ],
+      "height_units": 2,
+      "name": "Brick Wedged, Curved Triple 4 x 4 x 2/3 with 2 Studs",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "50305.dat",
+      "bl": "50305",
+      "shape": "slope",
+      "footprint": [
+        8,
+        3
+      ],
+      "height_units": 3,
+      "name": "Wedge Plate 8 x 3, 22\u00b0 Left",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "43719.dat",
+      "bl": "43719",
+      "shape": "slope",
+      "footprint": [
+        4,
+        4
+      ],
+      "height_units": 3,
+      "name": "Wedge Plate 4 x 4 with 2 x 2 Cutout",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "50304.dat",
+      "bl": "50304",
+      "shape": "slope",
+      "footprint": [
+        8,
+        3
+      ],
+      "height_units": 3,
+      "name": "Wedge Plate 8 x 3, 22\u00b0 Right",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "4595.dat",
+      "bl": "4595",
+      "shape": "brick",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Special 1 x 2 x 2/3 with Studs on Sides",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "11212.dat",
+      "bl": "11212",
+      "shape": "plate",
+      "footprint": [
+        3,
+        3
+      ],
+      "height_units": 1,
+      "name": "Plate 3 x 3",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "14719.dat",
+      "bl": "14719",
+      "shape": "tile",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 1,
+      "name": "Tile 2 x 2 Corner",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "4033.dat",
+      "bl": "4033",
+      "shape": "window",
+      "footprint": [
+        4,
+        1
+      ],
+      "height_units": 9,
+      "name": "Window 1 x 4 x 3 Train with All Studs Hollow",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "11203.dat",
+      "bl": "11203",
+      "shape": "tile",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 1,
+      "name": "Tile Special 2 x 2 Inverted",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "32059.dat",
+      "bl": "32059",
+      "shape": "slope",
+      "footprint": [
+        6,
+        4
+      ],
+      "height_units": 3,
+      "name": "Wedge Plate 4 x 6 Cut Corners",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "44126.dat",
+      "bl": "44126",
+      "shape": "brick",
+      "footprint": [
+        6,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Curved 6 x 2",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "47456.dat",
+      "bl": "47456",
+      "shape": "slope",
+      "footprint": [
+        3,
+        2
+      ],
+      "height_units": 2,
+      "name": "Brick Wedged, Curved 2 x 3 x 2/3 Two Studs, Wing End",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "13965.dat",
+      "bl": "13965",
+      "shape": "brick",
+      "footprint": [
+        3,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Arch 1 x 3 x 3 [Gothic]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "3685.dat",
+      "bl": "3685",
+      "shape": "slope",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 9,
+      "name": "Brick Sloped 75\u00b0 2 x 2 x 3 Double Convex",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "30355.dat",
+      "bl": "30355",
+      "shape": "slope",
+      "footprint": [
+        12,
+        6
+      ],
+      "height_units": 3,
+      "name": "Wedge Plate 6 x 12 Left",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "6003.dat",
+      "bl": "6003",
+      "shape": "plate",
+      "footprint": [
+        6,
+        6
+      ],
+      "height_units": 1,
+      "name": "Plate Round Corner 6 x 6",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "30356.dat",
+      "bl": "30356",
+      "shape": "slope",
+      "footprint": [
+        12,
+        6
+      ],
+      "height_units": 3,
+      "name": "Wedge Plate 6 x 12 Right",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "14417.dat",
+      "bl": "14417",
+      "shape": "plate",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 2 with 5.9mm Centre Side Towball",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "2362a.dat",
+      "bl": "2362a",
+      "shape": "panel",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 9,
+      "name": "Panel 1 x 2 x 3 - Solid Studs",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "52031.dat",
+      "bl": "52031",
+      "shape": "slope",
+      "footprint": [
+        6,
+        4
+      ],
+      "height_units": 2,
+      "name": "Brick Wedged, Curved Triple 4 x 6 x 2/3 with 4 Studs",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "2377.dat",
+      "bl": "2377",
+      "shape": "window",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 6,
+      "name": "Window 1 x 2 x 2 Plane, Solid Studs",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "60608.dat",
+      "bl": "60608",
+      "shape": "window",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 9,
+      "name": "Window 1 x 2 x 3 Pane with Thick Corner Tabs",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "43711.dat",
+      "bl": "43711",
+      "shape": "slope",
+      "footprint": [
+        4,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged, Sloped 4 x 2 Triple Right",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "4034.dat",
+      "bl": "4034",
+      "shape": "window",
+      "footprint": [
+        4,
+        1
+      ],
+      "height_units": 9,
+      "name": "Glass for Train Window 1 x 4 x 3",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "43710.dat",
+      "bl": "43710",
+      "shape": "slope",
+      "footprint": [
+        4,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged, Sloped 4 x 2 Triple Left",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "6259.dat",
+      "bl": "6259",
+      "shape": "brick",
+      "footprint": [
+        4,
+        2
+      ],
+      "height_units": 3,
+      "name": "Cylinder Half 2 x 4 x 4",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "4855.dat",
+      "bl": "4855",
+      "shape": "slope",
+      "footprint": [
+        4,
+        4
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged, Sloped Inverted 4 x 4 Triple [2 Connections between Front Studs]",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "4161.dat",
+      "bl": "4161",
+      "shape": "slope",
+      "footprint": [
+        3,
+        3
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped 33\u00b0 3 x 3",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "30350b.dat",
+      "bl": "30350b",
+      "shape": "tile",
+      "footprint": [
+        3,
+        2
+      ],
+      "height_units": 1,
+      "name": "Tile Special 2 x 3 with 2 Clips [Thick Open O Clips]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "2577.dat",
+      "bl": "2577",
+      "shape": "brick",
+      "footprint": [
+        4,
+        4
+      ],
+      "height_units": 3,
+      "name": "Brick Round Corner 4 x 4 Full Brick",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "4515.dat",
+      "bl": "4515",
+      "shape": "slope",
+      "footprint": [
+        8,
+        6
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped 10\u00b0 6 x 8",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "47458.dat",
+      "bl": "47458",
+      "shape": "slope",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 2,
+      "name": "Brick Wedged, Curved 1 x 2 x 2/3 No Studs, Wing End",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "33243.dat",
+      "bl": "33243",
+      "shape": "brick",
+      "footprint": [
+        3,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Curved 1 x 3 x 2",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "91988.dat",
+      "bl": "91988",
+      "shape": "plate",
+      "footprint": [
+        14,
+        2
+      ],
+      "height_units": 1,
+      "name": "Plate 2 x 14",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "60476.dat",
+      "bl": "60476",
+      "shape": "brick",
+      "footprint": [
+        1,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Special 1 x 1 with Clip Horizontal",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "46212.dat",
+      "bl": "46212",
+      "shape": "brick",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick 1 x 2 x 5 without Side Supports",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "15470.dat",
+      "bl": "15470",
+      "shape": "plate",
+      "footprint": [
+        1,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Round 1 x 1 Swirled Top",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "30562.dat",
+      "bl": "30562",
+      "shape": "panel",
+      "footprint": [
+        4,
+        4
+      ],
+      "height_units": 18,
+      "name": "Panel 4 x 4 x 6 Quarter Cylinder",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "3675.dat",
+      "bl": "3675",
+      "shape": "slope",
+      "footprint": [
+        3,
+        3
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped 33\u00b0 3 x 3 Double Convex",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "13731.dat",
+      "bl": "13731",
+      "shape": "brick",
+      "footprint": [
+        10,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Curved 10 x 1 [Symmetric Inside Ridges]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "4132.dat",
+      "bl": "4132",
+      "shape": "window",
+      "footprint": [
+        4,
+        2
+      ],
+      "height_units": 9,
+      "name": "Window 2 x 4 x 3 Frame with Solid Studs",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "2639.dat",
+      "bl": "2639",
+      "shape": "plate",
+      "footprint": [
+        4,
+        4
+      ],
+      "height_units": 1,
+      "name": "Plate 4 x 4 Corner",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "3861b.dat",
+      "bl": "3861b",
+      "shape": "door",
+      "footprint": [
+        4,
+        1
+      ],
+      "height_units": 15,
+      "name": "Door 1 x 4 x 5 with 4 Panes, Squared Base",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "4133.dat",
+      "bl": "4133",
+      "shape": "window",
+      "footprint": [
+        4,
+        2
+      ],
+      "height_units": 9,
+      "name": "Window 2 x 4 x 3 Pane",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "13547.dat",
+      "bl": "13547",
+      "shape": "brick",
+      "footprint": [
+        4,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Curved Inverted 4 x 1",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "90194.dat",
+      "bl": "90194",
+      "shape": "slope",
+      "footprint": [
+        4,
+        3
+      ],
+      "height_units": 3,
+      "name": "Wedge Plate 3 x 4 with Stud Notches [Reinforced Underside]",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "18674.dat",
+      "bl": "18674",
+      "shape": "plate",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 1,
+      "name": "Plate Special Round 2 x 2 with Center Stud (Jumper Plate)",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "15208.dat",
+      "bl": "15208",
+      "shape": "plate",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 2 with Three Teeth [Tri-Tooth]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "3184.dat",
+      "bl": "3184",
+      "shape": "plate",
+      "footprint": [
+        4,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 4 with Towball",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "15571.dat",
+      "bl": "15571",
+      "shape": "slope",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped 45\u00b0 2 x 1 Triple with Inside Stud Holder",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "41767.dat",
+      "bl": "41767",
+      "shape": "slope",
+      "footprint": [
+        4,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged, Angled 4 x 2 Right",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "14418.dat",
+      "bl": "14418",
+      "shape": "plate",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 2 5.9mm Towball Socket",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "43713.dat",
+      "bl": "43713",
+      "shape": "slope",
+      "footprint": [
+        6,
+        4
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged, Curved Inverted 6 x 4",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "47753.dat",
+      "bl": "47753",
+      "shape": "slope",
+      "footprint": [
+        4,
+        4
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged, Curved 4 x 4 No Top Studs",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "3943b.dat",
+      "bl": "3943b",
+      "shape": "brick",
+      "footprint": [
+        4,
+        4
+      ],
+      "height_units": 3,
+      "name": "Cone 4 x 4 x 2, Axle Hole [Plain]",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "61345.dat",
+      "bl": "61345",
+      "shape": "window",
+      "footprint": [
+        4,
+        1
+      ],
+      "height_units": 6,
+      "name": "Window 1 x 4 x 2 Plane, Hollow Studs, Single Hole Top and Bottom for Glass",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "43712.dat",
+      "bl": "43712",
+      "shape": "slope",
+      "footprint": [
+        6,
+        4
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged, Curved 6 x 4 Triple",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "41768.dat",
+      "bl": "41768",
+      "shape": "slope",
+      "footprint": [
+        4,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged, Angled 4 x 2 Left",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "3066.dat",
+      "bl": "3066",
+      "shape": "brick",
+      "footprint": [
+        4,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick 1 x 4 without Bottom Tubes",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "87609.dat",
+      "bl": "87609",
+      "shape": "plate",
+      "footprint": [
+        6,
+        2
+      ],
+      "height_units": 1,
+      "name": "Plate Special 2 x 6 x 2/3 with 4 Studs on Side, 1 Support Wall on Bottom",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "48183.dat",
+      "bl": "48183",
+      "shape": "slope",
+      "footprint": [
+        4,
+        3
+      ],
+      "height_units": 3,
+      "name": "Wedge Plate 3 x 4 with Stud Notches",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "18677.dat",
+      "bl": "18677",
+      "shape": "plate",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 2 with Pin Hole Underneath",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "87081.dat",
+      "bl": "87081",
+      "shape": "brick",
+      "footprint": [
+        4,
+        4
+      ],
+      "height_units": 3,
+      "name": "Brick Round 4 x 4 Centre Hole",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "88393.dat",
+      "bl": "88393",
+      "shape": "brick",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Special 1 x 2 x 5 with Groove",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "3933.dat",
+      "bl": "3933",
+      "shape": "slope",
+      "footprint": [
+        8,
+        4
+      ],
+      "height_units": 3,
+      "name": "Wedge Plate 8 x 4 Wing Left",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "18649.dat",
+      "bl": "18649",
+      "shape": "plate",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 2 with Handles on Ends",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "3934.dat",
+      "bl": "3934",
+      "shape": "slope",
+      "footprint": [
+        8,
+        4
+      ],
+      "height_units": 3,
+      "name": "Wedge Plate 8 x 4 Wing Right with Stud Notch",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "14716.dat",
+      "bl": "14716",
+      "shape": "brick",
+      "footprint": [
+        1,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick 1 x 1 x 3",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "2345.dat",
+      "bl": "2345",
+      "shape": "panel",
+      "footprint": [
+        3,
+        3
+      ],
+      "height_units": 18,
+      "name": "Panel 3 x 3 x 6 Corner Wall",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "61072.dat",
+      "bl": "61072",
+      "shape": "plate",
+      "footprint": [
+        4,
+        1
+      ],
+      "height_units": 1,
+      "name": "Plate Special 1 x 4 with Angled Tubes",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "99563.dat",
+      "bl": "99563",
+      "shape": "slope",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 3,
+      "name": "Tile Special 1 x 2 with Sloped Walls AKA Money / Gold Bar [Ingot]",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "41862.dat",
+      "bl": "41862",
+      "shape": "plate",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 1,
+      "name": "Plate Special 2 x 2 with Grills",
+      "slope_dir": null
+    },
+    {
+      "ldraw": "30504.dat",
+      "bl": "30504",
+      "shape": "slope",
+      "footprint": [
+        8,
+        8
+      ],
+      "height_units": 3,
+      "name": "Wedge Plate 8 x 8 Cut Corner",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "22388.dat",
+      "bl": "22388",
+      "shape": "slope",
+      "footprint": [
+        1,
+        1
+      ],
+      "height_units": 2,
+      "name": "Brick Sloped 45\u00b0 1 x 1 x 2/3 Quadruple Convex [Pyramid]",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "60219.dat",
+      "bl": "60219",
+      "shape": "slope",
+      "footprint": [
+        6,
+        4
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped Inverted 45\u00b0 6 x 4 Double with 4 x 4 Recessed and 3 Holes",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "4856a.dat",
+      "bl": "4856a",
+      "shape": "slope",
+      "footprint": [
+        6,
+        4
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged, Sloped Inverted 6 x 4 with 2 Stud Connections",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "3939.dat",
+      "bl": "3939",
+      "shape": "slope",
+      "footprint": [
+        6,
+        3
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped 33\u00b0 3 x 6",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "3049c.dat",
+      "bl": "3049c",
+      "shape": "slope",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped 45\u00b0 2 x 1 Double / Inverted with Hollow Bottom",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "32083.dat",
+      "bl": "32083",
+      "shape": "slope",
+      "footprint": [
+        6,
+        4
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped 45\u00b0 6 x 4 Double [aka Train Roof]",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "2625.dat",
+      "bl": "2625",
+      "shape": "slope",
+      "footprint": [
+        7,
+        6
+      ],
+      "height_units": 3,
+      "name": "Wedge Plate 7 x 6 Boat Bow without Stud Notches",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "48933.dat",
+      "bl": "48933",
+      "shape": "slope",
+      "footprint": [
+        4,
+        4
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged, Sloped 4 x 4 Triple, Stud Notches",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "41765.dat",
+      "bl": "41765",
+      "shape": "slope",
+      "footprint": [
+        6,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged, Curved Inverted 6 x 2 Left",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "41764.dat",
+      "bl": "41764",
+      "shape": "slope",
+      "footprint": [
+        6,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged, Curved Inverted 6 x 2 Right",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "30249.dat",
+      "bl": "30249",
+      "shape": "slope",
+      "footprint": [
+        6,
+        1
+      ],
+      "height_units": 15,
+      "name": "Brick Sloped 55\u00b0 1 x 6 x 5",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "2341.dat",
+      "bl": "2341",
+      "shape": "slope",
+      "footprint": [
+        3,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped Inverted 45\u00b0 3 x 1 Double with 2 Completely Open Studs",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "95188.dat",
+      "bl": "95188",
+      "shape": "slope",
+      "footprint": [
+        6,
+        6
+      ],
+      "height_units": 3,
+      "name": "Brick Round Corner 6 x 6 with 33\u00b0 Slope and Facet Cutout",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "72454.dat",
+      "bl": "72454",
+      "shape": "slope",
+      "footprint": [
+        4,
+        4
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped Inverted 45\u00b0 4 x 4 Double with 4 x 2 Recessed, 2 Holes",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "45301.dat",
+      "bl": "45301",
+      "shape": "slope",
+      "footprint": [
+        16,
+        4
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged, Curved 16 x 4 Triple with Inner Ridges",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "47759.dat",
+      "bl": "47759",
+      "shape": "slope",
+      "footprint": [
+        4,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged, Sloped 45\u00b0 2 x 4 Triple",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "3044b.dat",
+      "bl": "3044b",
+      "shape": "slope",
+      "footprint": [
+        2,
+        1
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped 45\u00b0 2 x 1 Double with Ovoid Bottom Pin",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "41750.dat",
+      "bl": "41750",
+      "shape": "slope",
+      "footprint": [
+        8,
+        3
+      ],
+      "height_units": 6,
+      "name": "Brick Wedged, Curved 8 x 3 x 2 Open Left",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "2875.dat",
+      "bl": "2875",
+      "shape": "slope",
+      "footprint": [
+        6,
+        2
+      ],
+      "height_units": 2,
+      "name": "Brick Sloped 45\u00b0 2 x 6 x 2/3",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "41749.dat",
+      "bl": "41749",
+      "shape": "slope",
+      "footprint": [
+        8,
+        3
+      ],
+      "height_units": 6,
+      "name": "Brick Wedged, Curved 8 x 3 x 2 Open Right",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "3936.dat",
+      "bl": "3936",
+      "shape": "slope",
+      "footprint": [
+        4,
+        4
+      ],
+      "height_units": 3,
+      "name": "Wedge Plate 4 x 4 Wing Left",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "3935.dat",
+      "bl": "3935",
+      "shape": "slope",
+      "footprint": [
+        4,
+        4
+      ],
+      "height_units": 3,
+      "name": "Wedge Plate 4 x 4 Wing Right",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "4861.dat",
+      "bl": "4861",
+      "shape": "slope",
+      "footprint": [
+        4,
+        3
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped 45\u00b0 3 x 4 Double / 33\u00b0",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "30505.dat",
+      "bl": "30505",
+      "shape": "slope",
+      "footprint": [
+        3,
+        3
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged 3 x 3 Cut Corner",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "13548.dat",
+      "bl": "13548",
+      "shape": "slope",
+      "footprint": [
+        2,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged, Sloped 45\u00b0 2 x 2 Corner",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "30180.dat",
+      "bl": "30180",
+      "shape": "slope",
+      "footprint": [
+        10,
+        2
+      ],
+      "height_units": 6,
+      "name": "Brick Sloped 45\u00b0 10 x 2 x 2 Double",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "43720.dat",
+      "bl": "43720",
+      "shape": "slope",
+      "footprint": [
+        4,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged, Sloped 45\u00b0 4 x 2 Right",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "43721.dat",
+      "bl": "43721",
+      "shape": "slope",
+      "footprint": [
+        4,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged, Sloped 45\u00b0 4 x 2 Left",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "30283.dat",
+      "bl": "30283",
+      "shape": "slope",
+      "footprint": [
+        6,
+        4
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped Inverted 45\u00b0 6 x 4 Double with 4 x 4 Recessed",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "50956.dat",
+      "bl": "50956",
+      "shape": "slope",
+      "footprint": [
+        10,
+        3
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged, Curved 10 x 3 Right",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "50955.dat",
+      "bl": "50955",
+      "shape": "slope",
+      "footprint": [
+        10,
+        3
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged, Curved 10 x 3 Left",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "50373.dat",
+      "bl": "50373",
+      "shape": "slope",
+      "footprint": [
+        4,
+        3
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged 3 x 4 [Stud Notches]",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "4858.dat",
+      "bl": "4858",
+      "shape": "slope",
+      "footprint": [
+        4,
+        4
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged, Sloped 4 x 4 Taper",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "42061.dat",
+      "bl": "42061",
+      "shape": "slope",
+      "footprint": [
+        12,
+        3
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged, Curved 12 x 3 Left",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "42060.dat",
+      "bl": "42060",
+      "shape": "slope",
+      "footprint": [
+        12,
+        3
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged, Curved 12 x 3 Right",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "58846.dat",
+      "bl": "58846",
+      "shape": "slope",
+      "footprint": [
+        10,
+        10
+      ],
+      "height_units": 3,
+      "name": "Brick Round Corner 10 x 10 with Slope 33\u00b0 Edge, Axle Hole, Facet Cutout",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "64225.dat",
+      "bl": "64225",
+      "shape": "slope",
+      "footprint": [
+        4,
+        3
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged, Curved 4 x 3 No Studs [Plain]",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "64867.dat",
+      "bl": "64867",
+      "shape": "slope",
+      "footprint": [
+        4,
+        4
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged, Sloped 4 x 4 Fractured Polygon Top",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "4509.dat",
+      "bl": "4509",
+      "shape": "slope",
+      "footprint": [
+        6,
+        6
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped 33\u00b0 6 x 6 Double (Train Roof)",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "3042.dat",
+      "bl": "3042",
+      "shape": "slope",
+      "footprint": [
+        3,
+        2
+      ],
+      "height_units": 3,
+      "name": "Brick Sloped 45\u00b0 2 x 3 Double",
+      "slope_dir": "+x"
+    },
+    {
+      "ldraw": "2399.dat",
+      "bl": "2399",
+      "shape": "slope",
+      "footprint": [
+        4,
+        3
+      ],
+      "height_units": 3,
+      "name": "Brick Wedged 3 x 4 [No Stud Notches]",
+      "slope_dir": "+x"
+    }
+  ]
+}

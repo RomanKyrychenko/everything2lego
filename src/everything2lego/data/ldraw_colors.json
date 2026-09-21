@@ -1,0 +1,559 @@
+{
+  "_comment": "Curated solid-color palette with approximate sRGB swatches. code = LDraw color code, bl = BrickLink color id. Part/color availability varies.",
+  "sources": [
+    "https://www.ldraw.org/article/547.html",
+    "https://www.bricklink.com/catalogColors.asp"
+  ],
+  "colors": [
+    {
+      "code": 0,
+      "name": "Black",
+      "bl": 11,
+      "rgb": [
+        27,
+        42,
+        52
+      ]
+    },
+    {
+      "code": 1,
+      "name": "Blue",
+      "bl": 7,
+      "rgb": [
+        0,
+        85,
+        191
+      ]
+    },
+    {
+      "code": 2,
+      "name": "Green",
+      "bl": 6,
+      "rgb": [
+        37,
+        122,
+        62
+      ]
+    },
+    {
+      "code": 3,
+      "name": "Dark Turquoise",
+      "bl": 3,
+      "rgb": [
+        0,
+        143,
+        155
+      ]
+    },
+    {
+      "code": 4,
+      "name": "Red",
+      "bl": 5,
+      "rgb": [
+        201,
+        26,
+        9
+      ]
+    },
+    {
+      "code": 5,
+      "name": "Dark Pink",
+      "bl": 47,
+      "rgb": [
+        200,
+        112,
+        160
+      ]
+    },
+    {
+      "code": 6,
+      "name": "Brown",
+      "bl": 8,
+      "rgb": [
+        88,
+        57,
+        39
+      ]
+    },
+    {
+      "code": 7,
+      "name": "Light Gray",
+      "bl": 9,
+      "rgb": [
+        190,
+        190,
+        190
+      ]
+    },
+    {
+      "code": 10,
+      "name": "Bright Green",
+      "bl": 10,
+      "rgb": [
+        75,
+        159,
+        74
+      ]
+    },
+    {
+      "code": 13,
+      "name": "Pink",
+      "bl": 23,
+      "rgb": [
+        252,
+        151,
+        172
+      ]
+    },
+    {
+      "code": 14,
+      "name": "Yellow",
+      "bl": 3,
+      "rgb": [
+        242,
+        205,
+        55
+      ]
+    },
+    {
+      "code": 15,
+      "name": "White",
+      "bl": 1,
+      "rgb": [
+        255,
+        255,
+        255
+      ]
+    },
+    {
+      "code": 19,
+      "name": "Tan",
+      "bl": 2,
+      "rgb": [
+        228,
+        205,
+        158
+      ]
+    },
+    {
+      "code": 22,
+      "name": "Purple",
+      "bl": 24,
+      "rgb": [
+        129,
+        0,
+        123
+      ]
+    },
+    {
+      "code": 25,
+      "name": "Orange",
+      "bl": 4,
+      "rgb": [
+        254,
+        138,
+        24
+      ]
+    },
+    {
+      "code": 26,
+      "name": "Magenta",
+      "bl": 26,
+      "rgb": [
+        146,
+        57,
+        120
+      ]
+    },
+    {
+      "code": 27,
+      "name": "Lime",
+      "bl": 34,
+      "rgb": [
+        187,
+        233,
+        11
+      ]
+    },
+    {
+      "code": 28,
+      "name": "Dark Tan",
+      "bl": 69,
+      "rgb": [
+        149,
+        138,
+        115
+      ]
+    },
+    {
+      "code": 29,
+      "name": "Bright Pink",
+      "bl": 29,
+      "rgb": [
+        228,
+        173,
+        200
+      ]
+    },
+    {
+      "code": 30,
+      "name": "Medium Lavender",
+      "bl": 30,
+      "rgb": [
+        172,
+        120,
+        186
+      ]
+    },
+    {
+      "code": 31,
+      "name": "Lavender",
+      "bl": 31,
+      "rgb": [
+        225,
+        213,
+        237
+      ]
+    },
+    {
+      "code": 68,
+      "name": "Very Light Orange",
+      "bl": 96,
+      "rgb": [
+        253,
+        195,
+        131
+      ]
+    },
+    {
+      "code": 70,
+      "name": "Reddish Brown",
+      "bl": 88,
+      "rgb": [
+        88,
+        42,
+        18
+      ]
+    },
+    {
+      "code": 71,
+      "name": "Light Bluish Gray",
+      "bl": 86,
+      "rgb": [
+        160,
+        165,
+        169
+      ]
+    },
+    {
+      "code": 72,
+      "name": "Dark Bluish Gray",
+      "bl": 85,
+      "rgb": [
+        108,
+        110,
+        104
+      ]
+    },
+    {
+      "code": 73,
+      "name": "Medium Blue",
+      "bl": 42,
+      "rgb": [
+        90,
+        147,
+        219
+      ]
+    },
+    {
+      "code": 78,
+      "name": "Light Nougat",
+      "bl": 90,
+      "rgb": [
+        246,
+        215,
+        179
+      ]
+    },
+    {
+      "code": 84,
+      "name": "Medium Nougat",
+      "bl": 150,
+      "rgb": [
+        170,
+        125,
+        85
+      ]
+    },
+    {
+      "code": 85,
+      "name": "Dark Purple",
+      "bl": 89,
+      "rgb": [
+        52,
+        43,
+        117
+      ]
+    },
+    {
+      "code": 86,
+      "name": "Light Brown",
+      "bl": 91,
+      "rgb": [
+        123,
+        93,
+        65
+      ]
+    },
+    {
+      "code": 92,
+      "name": "Nougat",
+      "bl": 28,
+      "rgb": [
+        187,
+        128,
+        90
+      ]
+    },
+    {
+      "code": 151,
+      "name": "Very Light Bluish Gray",
+      "bl": 99,
+      "rgb": [
+        200,
+        200,
+        200
+      ]
+    },
+    {
+      "code": 179,
+      "name": "Flat Silver",
+      "bl": 179,
+      "rgb": [
+        137,
+        135,
+        136
+      ]
+    },
+    {
+      "code": 191,
+      "name": "Bright Light Orange",
+      "bl": 110,
+      "rgb": [
+        248,
+        187,
+        61
+      ]
+    },
+    {
+      "code": 212,
+      "name": "Bright Light Blue",
+      "bl": 105,
+      "rgb": [
+        159,
+        195,
+        233
+      ]
+    },
+    {
+      "code": 216,
+      "name": "Rust",
+      "bl": 27,
+      "rgb": [
+        143,
+        76,
+        42
+      ]
+    },
+    {
+      "code": 226,
+      "name": "Bright Light Yellow",
+      "bl": 103,
+      "rgb": [
+        255,
+        236,
+        108
+      ]
+    },
+    {
+      "code": 272,
+      "name": "Dark Blue",
+      "bl": 63,
+      "rgb": [
+        10,
+        52,
+        99
+      ]
+    },
+    {
+      "code": 288,
+      "name": "Dark Green",
+      "bl": 80,
+      "rgb": [
+        24,
+        70,
+        50
+      ]
+    },
+    {
+      "code": 297,
+      "name": "Pearl Gold",
+      "bl": 297,
+      "rgb": [
+        170,
+        127,
+        46
+      ]
+    },
+    {
+      "code": 308,
+      "name": "Dark Brown",
+      "bl": 120,
+      "rgb": [
+        53,
+        33,
+        0
+      ]
+    },
+    {
+      "code": 320,
+      "name": "Dark Red",
+      "bl": 59,
+      "rgb": [
+        114,
+        14,
+        15
+      ]
+    },
+    {
+      "code": 321,
+      "name": "Dark Azure",
+      "bl": 153,
+      "rgb": [
+        7,
+        139,
+        201
+      ]
+    },
+    {
+      "code": 322,
+      "name": "Medium Azure",
+      "bl": 156,
+      "rgb": [
+        104,
+        195,
+        226
+      ]
+    },
+    {
+      "code": 323,
+      "name": "Light Aqua",
+      "bl": 152,
+      "rgb": [
+        211,
+        242,
+        234
+      ]
+    },
+    {
+      "code": 326,
+      "name": "Yellowish Green",
+      "bl": 158,
+      "rgb": [
+        226,
+        249,
+        154
+      ]
+    },
+    {
+      "code": 330,
+      "name": "Olive Green",
+      "bl": 155,
+      "rgb": [
+        155,
+        154,
+        90
+      ]
+    },
+    {
+      "code": 353,
+      "name": "Coral",
+      "bl": 220,
+      "rgb": [
+        255,
+        109,
+        119
+      ]
+    },
+    {
+      "code": 378,
+      "name": "Sand Green",
+      "bl": 48,
+      "rgb": [
+        160,
+        188,
+        172
+      ]
+    },
+    {
+      "code": 379,
+      "name": "Sand Blue",
+      "bl": 55,
+      "rgb": [
+        96,
+        116,
+        161
+      ]
+    },
+    {
+      "code": 462,
+      "name": "Medium Orange",
+      "bl": 31,
+      "rgb": [
+        255,
+        160,
+        47
+      ]
+    },
+    {
+      "code": 484,
+      "name": "Dark Orange",
+      "bl": 68,
+      "rgb": [
+        169,
+        85,
+        0
+      ]
+    },
+    {
+      "code": 1050,
+      "name": "Coral",
+      "bl": 1050,
+      "rgb": [
+        255,
+        105,
+        143
+      ]
+    },
+    {
+      "code": 1103,
+      "name": "Pearl Titanium",
+      "bl": 1103,
+      "rgb": [
+        62,
+        60,
+        57
+      ]
+    },
+    {
+      "code": 9999,
+      "name": "[No Color/Any Color]",
+      "bl": 9999,
+      "rgb": [
+        5,
+        19,
+        29
+      ]
+    }
+  ]
+}
