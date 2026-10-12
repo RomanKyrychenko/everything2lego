@@ -41,7 +41,7 @@ def test_turned_house_voxelises_like_the_square_one():
 
 
 def test_openings_are_found_on_a_turned_house():
-    t = MeshTarget.from_mesh(turned(house(), 9), max_studs=30, n_samples=60000, color_samples=60000)
+    t = MeshTarget.from_mesh(turned(house(), 9), max_studs=30, n_samples=60000, color_samples=60000, seed=7)
     walls = [r for r in RegionDetector().detect(t) if isinstance(r, PlanarRegion) and r.is_vertical]
     found = [p for r in walls for p in openings.find_openings(r, t)]
     assert sorted(p.part.shape for p in found) == ["door", "window", "window"]

@@ -80,11 +80,12 @@ class MeshTarget:
                    max_studs: int = 32,
                    n_samples: int = 100_000,
                    color_samples: int = 120_000,
-                   subvoxels: int = 1, align: bool = True) -> "MeshTarget":
+                   subvoxels: int = 1, align: bool = True,
+                   seed: int | None = None) -> "MeshTarget":
         if align:
             from ..voxelize import align_to_axes
             mesh = align_to_axes(mesh)
-        pts, face_ids = trimesh.sample.sample_surface(mesh, n_samples)
+        pts, face_ids = trimesh.sample.sample_surface(mesh, n_samples, seed=seed)
         normals = np.asarray(mesh.face_normals[face_ids], dtype=np.float32)
         rgb = _sample_mesh_colors(mesh, pts, face_ids)
         # `subvoxels > 1` runs the voxeliser at N× finer occupancy grid

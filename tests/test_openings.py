@@ -13,7 +13,7 @@ from meshes import house
 
 
 def target(mesh, studs=30):
-    return MeshTarget.from_mesh(mesh, max_studs=studs, n_samples=60000, color_samples=60000)
+    return MeshTarget.from_mesh(mesh, max_studs=studs, n_samples=60000, color_samples=60000, seed=7)
 
 
 def front_wall(t):
@@ -40,7 +40,7 @@ def test_plain_wall_has_no_openings():
     assert openings.find_openings(front_wall(t), t) == []
 
 
-def test_blob_is_cut_at_its_neck():
+def test_blob_is_peeled_into_its_rectangles():
     cells = np.zeros((20, 30), dtype=bool)
     cells[2:8, 10:25] = True          # a window
     cells[8, 14:18] = True            # colour bleeding into the gap

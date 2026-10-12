@@ -114,32 +114,72 @@ def _snap(width: int, height: int, bottom: int, wall_height: int
     return (best[1], best[2]) if best else None
 
 
-def _runs(strong: np.ndarray) -> list[tuple[int, int]]:
-    """[start, end) runs of True."""
-    out, start = [], None
-    for i, v in enumerate(list(strong) + [False]):
-        if v and start is None:
-            start = i
-        elif not v and start is not None:
-            out.append((start, i))
-            start = None
-    return out
+def largest_rectangle(mask: np.ndarray) -> tuple[int, int, int, int, int]:
+    """The largest all-True axis-aligned rectangle in a 2-D mask, as
+    (area, u0, u1, y0, y1); the histogram-and-stack method, one pass per
+    row of the first axis."""
+    L, H = mask.shape
+    heights = np.zeros(H, dtype=int)
+    best = (0, 0, 0, 0, 0)
+    for u in range(L):
+        heights = np.where(mask[u], heights + 1, 0)
+        stack: list[int] = []
+        for y in range(H + 1):
+            h = heights[y] if y < H else 0
+            start = y
+            while stack and heights[stack[-1]] >= h:
+                top = stack.pop()
+                start = top
+                width = y - top
+                area = heights[top] * width
+                if area > best[0]:
+                    best = (area, u - heights[top] + 1, u + 1, top, y)
+            stack.append(start)
+            heights[start] = h
+    return best
 
 
-def rectangles(cells: np.ndarray, neck: float = 0.5) -> list[tuple[int, int, int, int]]:
+def rectangles(cells: np.ndarray, min_width: int = 2, min_height: int = 2 * COURSE
+               ) -> list[tuple[int, int, int, int]]:
     """Split one blob of off-colour cells into the rectangles it is made
-    of: two openings whose colours bleed into the gap between them join
-    into one blob, but the gap's columns (or rows) hold far fewer cells
-    than the openings' own, so the blob is cut wherever a column or row
-    falls below `neck` of the peak.  Returns (u0, u1, y0, y1) boxes."""
+    of.  Two openings whose colours bleed into the gap between them join
+    into one blob; peeling off the largest filled rectangle, then the
+    next, recovers each opening and leaves the thin bleed slivers, which
+    are below `min_width` by `min_height` and dropped.  Returns
+    (u0, u1, y0, y1) boxes."""
+    rest = cells.copy()
     out = []
-    cols = cells.sum(axis=1)
-    for u0, u1 in _runs(cols >= neck * cols.max()):
-        sub = cells[u0:u1]
-        rows = sub.sum(axis=0)
-        for y0, y1 in _runs(rows >= neck * rows.max()):
+    while True:
+        area, u0, u1, y0, y1 = largest_rectangle(rest)
+        if area == 0 or (u1 - u0 < min_width and y1 - y0 < min_height):
+            break
+        u0, u1, y0, y1 = _grow(rest, u0, u1, y0, y1)
+        rest[u0:u1, y0:y1] = False
+        if u1 - u0 >= min_width and y1 - y0 >= min_height:
             out.append((u0, u1, y0, y1))
     return out
+
+
+def _grow(cells: np.ndarray, u0: int, u1: int, y0: int, y1: int,
+          fill: float = 0.5) -> tuple[int, int, int, int]:
+    """Extend a core rectangle over its ragged edges: a neighbouring column
+    or row joins while at least `fill` of it, across the rectangle's span,
+    is off-colour.  Sampling leaves an opening's edge cells half coloured,
+    and without this the same window comes out a stud narrower on one run
+    than on the next."""
+    L, H = cells.shape
+    changed = True
+    while changed:
+        changed = False
+        if u0 > 0 and cells[u0 - 1, y0:y1].mean() >= fill:
+            u0 -= 1; changed = True
+        if u1 < L and cells[u1, y0:y1].mean() >= fill:
+            u1 += 1; changed = True
+        if y0 > 0 and cells[u0:u1, y0 - 1].mean() >= fill:
+            y0 -= 1; changed = True
+        if y1 < H and cells[u0:u1, y1].mean() >= fill:
+            y1 += 1; changed = True
+    return u0, u1, y0, y1
 
 
 def find_openings(region: PlanarRegion, target: MeshTarget, *,
@@ -148,8 +188,8 @@ def find_openings(region: PlanarRegion, target: MeshTarget, *,
     """Window frames and doors for the off-colour rectangles on a wall.
 
     Each rectangle of cells whose colour is at least `min_delta_e` (CIE76)
-    from the wall's median colour (blobs cut at their necks, see
-    `rectangles`), at least 2 studs by 2 courses and filled to `min_fill`,
+    from the wall's median colour (blobs peeled into their rectangles,
+    see `rectangles`), at least 2 studs by 2 courses and filled to `min_fill`,
     becomes the frame or door nearest its size, centred on it and aligned
     to the wall's brick courses.
     """
