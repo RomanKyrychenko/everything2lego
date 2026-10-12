@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
 
 from .bricks import Part, catalog, largest_first, parts_by_shape, full_catalog
 from .voxelize import VoxelGrid
@@ -63,17 +64,11 @@ def _level_consistent(col_top: np.ndarray, top_y: int,
     covered by upper bricks (an interior fill) or uniformly at column top
     with a footprint in `top_footprints`. Anything else straddles a step
     edge and is deferred to the relaxed pass."""
-    at_top = False
-    covered = False
-    for dx in range(w):
-        for dz in range(d):
-            ct = col_top[x + dx, z + dz]
-            if ct == top_y:
-                at_top = True
-            elif ct > top_y:
-                covered = True
-            if at_top and covered:
-                return False
+    window = col_top[x:x + w, z:z + d]
+    at_top = bool((window == top_y).any())
+    covered = bool((window > top_y).any())
+    if at_top and covered:
+        return False
     if at_top and not covered:
         if height_units != 3:
             return False
@@ -81,6 +76,39 @@ def _level_consistent(col_top: np.ndarray, top_y: int,
             return True
         return (w, d) in top_footprints
     return True
+
+
+def _windows(a: np.ndarray, w: int, d: int) -> np.ndarray:
+    """Every (w, d) window of a 2-D array, as an array of shape (W-w+1, D-d+1, w, d)."""
+    return sliding_window_view(a, (w, d))
+
+
+def _candidate_starts(voxels: np.ndarray, filled: np.ndarray, y: int, hy: int,
+                      w: int, d: int) -> np.ndarray:
+    """(W-w+1, D-d+1) mask of starts where a (w, hy, d) block is unfilled and
+    one colour.  Computed once per part and layer; `filled` only grows, so
+    a start that fails here can never fit later and the ones that pass are
+    confirmed by `_try_fit` in scan order."""
+    sub = voxels[y:y + hy]
+    free = ~filled[y:y + hy].any(axis=0)
+    column_uniform = (sub == sub[:1]).all(axis=0) & (sub[0] >= 0)
+    base = _windows(sub[0], w, d)
+    return (_windows(free & column_uniform, w, d).all(axis=(2, 3))
+            & (base.min(axis=(2, 3)) == base.max(axis=(2, 3))))
+
+
+def _consistent_starts(col_top: np.ndarray, top_y: int, w: int, d: int,
+                       hy: int, top_footprints: frozenset[tuple[int, int]] | None
+                       ) -> np.ndarray:
+    """`_level_consistent` for every start at once."""
+    windows = _windows(col_top, w, d)
+    at_top = (windows == top_y).any(axis=(2, 3))
+    covered = (windows > top_y).any(axis=(2, 3))
+    top_ok = hy == 3 and (top_footprints is None or (w, d) in top_footprints)
+    bad = at_top & covered
+    if not top_ok:
+        bad |= at_top & ~covered
+    return ~bad
 
 
 def _place_parts(voxels: np.ndarray, filled: np.ndarray,
@@ -91,40 +119,48 @@ def _place_parts(voxels: np.ndarray, filled: np.ndarray,
                  strict_level: bool = False,
                  top_footprints: frozenset[tuple[int, int]] | None = None) -> list[Placement]:
     """Greedy pass: for each part (largest first) and each orientation, walk
-    the scan order and place wherever it fits."""
+    the scan order and place wherever it fits.
+
+    Two parts with the same footprint see the same grid, so the second can
+    place nothing the first did not; each (w, d) is walked once per layer.
+    """
     placements: list[Placement] = []
     H, W, D = voxels.shape
     for y in y_range:
+        if y + hy > H:
+            continue
         top_y = y + hy - 1
+        tried: set[tuple[int, int]] = set()
         for part in largest_first(parts):
             orientations = part.orientations()
             if y % 2:
                 orientations.reverse()
             for w, d in orientations:
-                rot = 0 if (w, d) == part.footprint else 90
-                if y + hy > H:
+                if (w, d) in tried or w > W or d > D:
                     continue
-                xs = list(range(W - w + 1))
-                zs = list(range(D - d + 1))
+                tried.add((w, d))
+                rot = 0 if (w, d) == part.footprint else 90
+                starts = _candidate_starts(voxels, filled, y, hy, w, d)
+                if support is not None:
+                    starts &= _windows(support, w, d).any(axis=(2, 3))
+                if strict_level and col_top is not None:
+                    starts &= _consistent_starts(col_top, top_y, w, d, hy, top_footprints)
+                if not starts.any():
+                    continue
+                xs = np.arange(W - w + 1)
+                zs = np.arange(D - d + 1)
                 if y % 2:
-                    xs = xs[1:] + xs[:1]
-                    zs = zs[1:] + zs[:1]
-                for x in xs:
-                    for z in zs:
-                        if support is not None and not support[x:x + w, z:z + d].any():
-                            continue
-                        if strict_level and col_top is not None and \
-                                not _level_consistent(col_top, top_y, x, z, w, d,
-                                                       height_units=hy,
-                                                       top_footprints=top_footprints):
-                            continue
+                    xs = np.roll(xs, -1)
+                    zs = np.roll(zs, -1)
+                for x in xs[starts[xs].any(axis=1)]:
+                    for z in zs[starts[x, zs]]:
                         c = _try_fit(voxels, filled, y, x, z, w, hy, d)
                         if c is None:
                             continue
                         filled[y:y + hy, x:x + w, z:z + d] = True
                         placements.append(Placement(
                             part=part, color_idx=c,
-                            x_stud=x, z_stud=z, y_plate=y,
+                            x_stud=int(x), z_stud=int(z), y_plate=y,
                             w_world=w, d_world=d, rotation_deg=rot,
                         ))
     return placements
