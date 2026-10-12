@@ -95,3 +95,40 @@ def test_without_labels_the_detector_is_used():
     result = SemanticLegoPipeline(PipelineConfig(max_studs=30)).run_on_target(t)
     assert "forced_openings" not in t.metadata
     assert result.placements
+
+
+import time
+
+import pytest
+
+from meshes import noisy_house
+
+
+@pytest.mark.parametrize("name,mesh", [
+    ("clean", noisy_house(noise=0, shade=0)),
+    ("shaded", noisy_house(noise=0)),
+    ("noisy", noisy_house()),
+    ("noisy turned 9 degrees", noisy_house(rotate_deg=9)),
+    ("noisy seed 3", noisy_house(seed=3)),
+    ("noisy seed 5", noisy_house(seed=5)),
+])
+def test_builtin_segmenter_on_a_photo_like_house(name, mesh):
+    """Baked shading, a gradient and per-face noise are what a photo-derived
+    mesh looks like; the CPU segmenter must still give one region per wall,
+    one roof and the three openings."""
+    t0 = time.time()
+    labels = parts.segment_builtin(mesh)
+    assert time.time() - t0 < 3.0
+    t = MeshTarget.from_mesh(mesh, max_studs=30, n_samples=30000, color_samples=30000, seed=1)
+    regions = parts.regions_from_labels(t, labels)
+    kinds = sorted(r.label.value for r in regions)
+    assert kinds == ["planar_roof"] + ["planar_wall"] * 4, (name, kinds)
+    assert len(t.metadata["forced_openings"]) == 3, name
+
+
+def test_builtin_segmenter_pipeline_on_the_noisy_house():
+    t = MeshTarget.from_mesh(noisy_house(), max_studs=30, n_samples=30000, color_samples=30000, seed=1)
+    result = SemanticLegoPipeline(PipelineConfig(max_studs=30, segmenter="builtin")).run_on_target(t)
+    kinds = sorted(p.part.shape for p in result.placements if p.part.shape in ("window", "door"))
+    assert kinds == ["door", "window", "window"]
+    assert stability.check(result.placements).ok

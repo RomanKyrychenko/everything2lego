@@ -18,3 +18,23 @@ def house(extents=(240, 120, 160), windows=((40, 50, 48, 30), (150, 50, 48, 30))
     fc[m] = [70, 40, 20, 255]
     box.visual.face_colors = fc
     return box
+
+
+def noisy_house(seed=0, noise=18, shade=0.35, rotate_deg=0.0):
+    """The house with a photo-like finish: shading baked per face normal, a
+    darker base, per-face colour noise, a dark red roof; optionally turned."""
+    rng = np.random.default_rng(seed)
+    m = house()
+    fc = np.asarray(m.visual.face_colors)[:, :3].astype(float)
+    n = np.asarray(m.face_normals)
+    fc[n[:, 1] > 0.9] = [120, 60, 50]
+    light = np.array([0.4, 0.8, 0.45]); light /= np.linalg.norm(light)
+    shading = 1 - shade + shade * np.clip(n @ light, 0, 1)
+    cent = m.triangles.mean(axis=1)
+    grad = 1 - 0.15 * (cent[:, 1] - cent[:, 1].min()) / np.ptp(cent[:, 1])
+    fc = fc * shading[:, None] * grad[:, None] + rng.normal(0, noise, fc.shape)
+    m.visual.face_colors = np.column_stack([np.clip(fc, 0, 255).astype(np.uint8),
+                                            np.full(len(fc), 255, np.uint8)])
+    if rotate_deg:
+        m.apply_transform(trimesh.transformations.rotation_matrix(np.radians(rotate_deg), [0, 1, 0]))
+    return m
