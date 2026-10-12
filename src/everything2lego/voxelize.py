@@ -41,6 +41,39 @@ def load_mesh(path: str | Path) -> trimesh.Trimesh:
     return scene_or_mesh
 
 
+def dominant_yaw(mesh: trimesh.Trimesh, *, min_vertical: float = 0.9) -> float:
+    """Angle (radians) by which the mesh's walls are turned away from the
+    x/z axes: the area-weighted circular mean, modulo 90°, of the heading
+    of every near-vertical face normal.  0 when there are no walls."""
+    n = np.asarray(mesh.face_normals, dtype=np.float64)
+    a = np.asarray(mesh.area_faces, dtype=np.float64)
+    horizontal = np.linalg.norm(n[:, [0, 2]], axis=1)
+    walls = horizontal >= min_vertical
+    if not walls.any():
+        return 0.0
+    heading = np.arctan2(n[walls, 2], n[walls, 0])
+    # Four headings 90° apart are one wall direction: fold with 4x.
+    folded = np.exp(4j * heading)
+    mean = (a[walls] * folded).sum()
+    if abs(mean) < 1e-9:
+        return 0.0
+    return float(np.angle(mean) / 4.0)
+
+
+def align_to_axes(mesh: trimesh.Trimesh, *, max_degrees: float = 44.0) -> trimesh.Trimesh:
+    """Turn the mesh about the vertical axis so its walls run along x and
+    z.  A photo-derived mesh is rarely square to the camera, and a wall a
+    few degrees off the grid voxelises as a staircase; squaring it first
+    gives straight walls and lets the region detector see one plane per
+    wall.  Returns a rotated copy; the original is left alone."""
+    yaw = dominant_yaw(mesh)
+    if abs(np.degrees(yaw)) < 0.05 or abs(np.degrees(yaw)) > max_degrees:
+        return mesh
+    aligned = mesh.copy()
+    aligned.apply_transform(trimesh.transformations.rotation_matrix(yaw, [0, 1, 0]))
+    return aligned
+
+
 def _fit_transform(mesh: trimesh.Trimesh, max_studs: int) -> np.ndarray:
     """Build a 4x4 transform mapping mesh coords into voxel-index space.
 
@@ -109,8 +142,11 @@ def _face_color_lookup(mesh: trimesh.Trimesh, points: np.ndarray,
 def voxelize(mesh: trimesh.Trimesh, max_studs: int = 32, color_samples: int = 200_000,
              hollow: bool = False, wall_thickness: int = 2,
              keep_floor: bool = True, color_k: int = 5,
-             color_mode: str = "closest_face", subvoxels: int = 1) -> VoxelGrid:
+             color_mode: str = "closest_face", subvoxels: int = 1,
+             align: bool = True) -> VoxelGrid:
     """Voxelize `mesh` at LEGO scale and return a colored grid.
+
+    `align` first squares the mesh's walls to the x/z axes (`align_to_axes`).
 
     `max_studs` sets the longer horizontal dimension in studs.
 
@@ -129,6 +165,8 @@ def voxelize(mesh: trimesh.Trimesh, max_studs: int = 32, color_samples: int = 20
     small features that vanish at coarse pitch. 1 = off, 2-4 = increasing
     detail (and cost).
     """
+    if align:
+        mesh = align_to_axes(mesh)
     if max_studs < 1 or color_samples < 1:
         raise ValueError("max_studs and color_samples must be positive")
     if mesh.is_empty or not np.isfinite(mesh.vertices).all():

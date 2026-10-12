@@ -176,7 +176,7 @@ def find_openings(region: PlanarRegion, target: MeshTarget, *,
             continue
         colour = int(np.argmin(np.linalg.norm(pal_lab - mean[cells].mean(axis=0), axis=1)))
         patches.append(((u0 + u1) / 2, (y0 + y1) / 2, width, height, y0, colour))
-    for cu, cy, width, height, y0, colour in equalise(patches):
+    for cu, cy, width, height, y0, colour in equalise(patches, length=frame.length):
         snapped = _snap(width, height, y0, frame.height)
         if snapped is None:
             continue
@@ -195,7 +195,7 @@ Patch = tuple[float, float, int, int, int, int]   # centre u, centre y, width, h
 
 
 def equalise(patches: list[Patch], *, row_tolerance: float = COURSE,
-             size_tolerance: float = 2.0) -> list[Patch]:
+             size_tolerance: float = 2.0, length: float | None = None) -> list[Patch]:
     """Make repeated openings identical.  Patches whose centres sit on the
     same row and whose sizes are within `size_tolerance` are one kind of
     window: each takes the kind's median width, height and row, so the
@@ -218,7 +218,31 @@ def equalise(patches: list[Patch], *, row_tolerance: float = COURSE,
         height = int(round(float(np.median([q[3] for q in g]))))
         cy = float(np.median([q[1] for q in g]))
         y0 = int(round(float(np.median([q[4] for q in g]))))
-        out.extend((q[0], cy, width, height, y0, q[5]) for q in g)
+        centres = [q[0] for q in g]
+        if length is not None:
+            centres = _mirror(centres, length)
+        out.extend((cu, cy, width, height, y0, q[5]) for cu, q in zip(centres, g))
+    return out
+
+
+def _mirror(centres: list[float], length: float, tolerance: float = 1.0) -> list[float]:
+    """Openings that face each other across the wall's middle are placed
+    exactly symmetric; the wall's own centre line is the mirror."""
+    mid = length / 2
+    out = list(centres)
+    used = set()
+    for i, a in enumerate(centres):
+        if i in used:
+            continue
+        for j in range(i + 1, len(centres)):
+            if j in used:
+                continue
+            if abs((a - mid) + (centres[j] - mid)) <= tolerance:
+                half = (abs(a - mid) + abs(centres[j] - mid)) / 2
+                out[i] = mid - half if a < mid else mid + half
+                out[j] = mid + half if a < mid else mid - half
+                used.update((i, j))
+                break
     return out
 
 

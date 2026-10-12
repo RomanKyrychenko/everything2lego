@@ -80,7 +80,10 @@ class MeshTarget:
                    max_studs: int = 32,
                    n_samples: int = 100_000,
                    color_samples: int = 120_000,
-                   subvoxels: int = 1) -> "MeshTarget":
+                   subvoxels: int = 1, align: bool = True) -> "MeshTarget":
+        if align:
+            from ..voxelize import align_to_axes
+            mesh = align_to_axes(mesh)
         pts, face_ids = trimesh.sample.sample_surface(mesh, n_samples)
         normals = np.asarray(mesh.face_normals[face_ids], dtype=np.float32)
         rgb = _sample_mesh_colors(mesh, pts, face_ids)
@@ -90,7 +93,7 @@ class MeshTarget:
         # trim) that the coarse grid alone would alias away.
         grid = voxelize(mesh, max_studs=max_studs,
                           color_samples=color_samples,
-                          subvoxels=subvoxels)
+                          subvoxels=subvoxels, align=False)
         # _fit_transform's T maps mesh_mm to voxel space with mesh CENTRED,
         # but voxelize() shifts the grid so cell (0,0,0) is at the mesh's
         # min-corner (all indices ≥ 0). Rebuild the transform so surface
