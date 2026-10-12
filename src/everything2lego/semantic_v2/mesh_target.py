@@ -99,15 +99,22 @@ class MeshTarget:
         # but voxelize() shifts the grid so cell (0,0,0) is at the mesh's
         # min-corner (all indices ≥ 0). Rebuild the transform so surface
         # builders' coords align with the voxel grid's indices.
-        T_raw = _fit_transform(mesh, max_studs=max_studs)
-        bounds_min_h = np.array([mesh.bounds[0, 0], mesh.bounds[0, 1],
-                                   mesh.bounds[0, 2], 1.0], dtype=np.float64)
-        min_voxel = T_raw @ bounds_min_h
-        T = T_raw.copy()
-        # Shift so mesh_min maps to (0, 0, 0) in voxel index space.
-        T[0, 3] -= min_voxel[0]
-        T[1, 3] -= min_voxel[1]
-        T[2, 3] -= min_voxel[2]
+        # The grid trimesh produces is a cell or two larger than the mesh's
+        # scaled extent (it keeps every cell the surface touches), so the
+        # transform is taken from the grid itself: the mesh's bounds map
+        # onto the occupied cells' extent, min corner to its first cell and
+        # max corner to the far side of its last.  Builders then find the
+        # outer faces of the model on the grid's outer cells.
+        occ = grid.occupied()
+        axes = (1, 0, 2)   # grid is (y, x, z); mesh axes are (x, y, z)
+        T = np.eye(4)
+        for mesh_axis, grid_axis in enumerate(axes):
+            filled = np.flatnonzero(occ.any(axis=tuple(a for a in range(3) if a != grid_axis)))
+            lo, n_cells = (int(filled.min()), int(filled.max() - filled.min() + 1)) if len(filled) else (0, 1)
+            extent = float(mesh.bounds[1, mesh_axis] - mesh.bounds[0, mesh_axis])
+            scale = n_cells / extent if extent > 1e-9 else 1.0
+            T[mesh_axis, mesh_axis] = scale
+            T[mesh_axis, 3] = lo - mesh.bounds[0, mesh_axis] * scale
         return cls(
             mesh=mesh,
             max_studs=max_studs,

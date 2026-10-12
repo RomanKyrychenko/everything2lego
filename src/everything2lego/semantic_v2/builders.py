@@ -29,6 +29,10 @@ from .regions import (Region, RegionLabel, PlanarRegion, CylindricalRegion,
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+# A mesh bound that should land on a stud boundary comes back a hair short
+# of it (16 as 15.9999); flooring after this nudge keeps the right stud.
+_EPS = 1e-4
+
 def _nearest_palette(rgb: np.ndarray) -> int:
     """Return palette index for the given RGB."""
     from ..colors import _palette_lab as pallab
@@ -133,23 +137,28 @@ class FoundationBuilder(RegionBuilder):
         # The ground slab sits at plate 0; any other upward-facing plane (a
         # flat roof, a terrace) is the top plate layer just under its surface.
         if isinstance(region, FoundationRegion):
-            y_plate = 0
-        else:
-            # The highest occupied plate under the plane, from the grid: the
-            # mesh's top maps to a fraction of a plate, the grid to a whole.
-            occ = target.voxel_grid.occupied()
-            mn, mx = (target.mm_point_to_voxel(b) for b in region.bounds)
-            x0, x1 = int(np.floor(min(mn[0], mx[0]))), int(np.floor(max(mn[0], mx[0]))) + 1
-            z0, z1 = int(np.floor(min(mn[2], mx[2]))), int(np.floor(max(mn[2], mx[2]))) + 1
-            block = occ[:, max(0, x0):x1, max(0, z0):z1]
-            rows = np.flatnonzero(block.any(axis=(1, 2)))
-            y_plate = int(rows.max()) if len(rows) else max(0, int(np.ceil(mx[1])) - 1)
-        return _pack_horizontal_slab(
-            region, target=target,
-            part_family=self._plate_parts(),
-            y_plate=y_plate,
-            config=self.config,
-        )
+            return _pack_horizontal_slab(
+                region, target=target, part_family=self._plate_parts(),
+                y_plate=0, config=self.config)
+        # The highest occupied plate under the plane, from the grid: the
+        # mesh's top maps to a fraction of a plate, the grid to a whole.
+        occ = target.voxel_grid.occupied()
+        mn, mx = (target.mm_point_to_voxel(b) for b in region.bounds)
+        x0, x1 = int(np.floor(min(mn[0], mx[0]) + _EPS)), int(np.floor(max(mn[0], mx[0]) + _EPS)) + 1
+        z0, z1 = int(np.floor(min(mn[2], mx[2]) + _EPS)), int(np.floor(max(mn[2], mx[2]) + _EPS)) + 1
+        block = occ[:, max(0, x0):x1, max(0, z0):z1]
+        rows = np.flatnonzero(block.any(axis=(1, 2)))
+        y_plate = int(rows.max()) if len(rows) else max(0, int(np.ceil(mx[1])) - 1)
+        # A slab of plates side by side ties nothing together: its edge
+        # strips rest on one wall each.  Two plate layers, the lower one
+        # tiled mirrored so its seams cross the upper one's, make the top a
+        # single bonded sheet that joins every wall under it.
+        out = _pack_horizontal_slab(region, target=target, part_family=self._plate_parts(),
+                                    y_plate=y_plate, config=self.config)
+        if y_plate >= 1:
+            out += _pack_horizontal_slab(region, target=target, part_family=self._plate_parts(),
+                                         y_plate=y_plate - 1, config=self.config, mirror=True)
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -307,7 +316,8 @@ def _pack_horizontal_slab(region: PlanarRegion, *,
                             target: MeshTarget,
                             part_family: list[Part],
                             y_plate: int,
-                            config: BuilderConfig) -> list[Placement]:
+                            config: BuilderConfig,
+                            mirror: bool = False) -> list[Placement]:
     """Rasterise the region's XZ points into a stud grid and pack it.
 
     Coordinates: region.points are in mesh-mm; we map each through
@@ -317,10 +327,10 @@ def _pack_horizontal_slab(region: PlanarRegion, *,
     mx_vox = target.mm_point_to_voxel(region.bounds[1])
     # From the first to the last stud the bounds touch: a bound that lands
     # on a stud boundary still touches that stud (the wall under it).
-    x0 = int(np.floor(min(mn_vox[0], mx_vox[0])))
-    z0 = int(np.floor(min(mn_vox[2], mx_vox[2])))
-    x1 = int(np.floor(max(mn_vox[0], mx_vox[0]))) + 1
-    z1 = int(np.floor(max(mn_vox[2], mx_vox[2]))) + 1
+    x0 = int(np.floor(min(mn_vox[0], mx_vox[0]) + _EPS))
+    z0 = int(np.floor(min(mn_vox[2], mx_vox[2]) + _EPS))
+    x1 = int(np.floor(max(mn_vox[0], mx_vox[0]) + _EPS)) + 1
+    z1 = int(np.floor(max(mn_vox[2], mx_vox[2]) + _EPS)) + 1
     W, D = max(1, x1 - x0), max(1, z1 - z0)
 
     # Coverage mask: the cells of this plate layer the model occupies within
@@ -339,7 +349,9 @@ def _pack_horizontal_slab(region: PlanarRegion, *,
     packer = MILPPacker(parts=footprints,
                          diversity_weight=config.diversity_weight,
                          time_limit_s=config.milp_time_limit_s)
-    result = packer.pack(mask)
+    # `mirror` packs the mask flipped along x and maps the tiling back, so a
+    # second layer's seams cross the first layer's.
+    result = packer.pack(mask[::-1] if mirror else mask)
 
     # Dominant palette colour for the region.
     color_idx = _dominant_palette(region.colors)
@@ -350,9 +362,10 @@ def _pack_horizontal_slab(region: PlanarRegion, *,
         part = part_lookup.get((fw, fd)) or part_lookup.get((fd, fw))
         if part is None:
             continue
+        x = W - pl.x - pl.w if mirror else pl.x
         out.append(Placement(
             part=part, color_idx=color_idx,
-            x_stud=x0 + pl.x, z_stud=z0 + pl.z, y_plate=y_plate,
+            x_stud=x0 + x, z_stud=z0 + pl.z, y_plate=y_plate,
             w_world=pl.w, d_world=pl.d, rotation_deg=pl.rotation_deg,
         ))
     return out

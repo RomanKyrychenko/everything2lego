@@ -68,11 +68,12 @@ def wall_frame(region: PlanarRegion, target: MeshTarget) -> WallFrame:
     H, X, Z = occupied.shape
     lo_u, hi_u = ((min(mn[0], mx[0]), max(mn[0], mx[0])) if axis_x
                   else (min(mn[2], mx[2]), max(mn[2], mx[2])))
-    origin = int(np.floor(lo_u))
-    last = min((X if axis_x else Z) - 1, int(np.floor(hi_u)))
+    eps = 1e-4   # a bound meant for a stud boundary may come back a hair short
+    origin = int(np.floor(lo_u + eps))
+    last = min((X if axis_x else Z) - 1, int(np.floor(hi_u + eps)))
     length = max(1, last - origin + 1)
-    other = min((Z if axis_x else X) - 1, int(np.floor(mn[2] if axis_x else mn[0])))
-    y0 = max(0, int(np.floor(min(mn[1], mx[1]))))
+    other = min((Z if axis_x else X) - 1, int(np.floor((mn[2] if axis_x else mn[0]) + eps)))
+    y0 = max(0, int(np.floor(min(mn[1], mx[1]) + eps)))
     columns = occupied[:, origin:origin + length, other] if axis_x \
         else occupied[:, other, origin:origin + length]
     rows = np.flatnonzero(columns[y0:].any(axis=1))
