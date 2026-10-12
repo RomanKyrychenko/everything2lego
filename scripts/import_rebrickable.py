@@ -27,6 +27,9 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from everything2lego.bricks import height_from_name, is_plain_geometry  # noqa: E402
+
 ROOT = Path(__file__).parent.parent
 RB = ROOT / "data" / "rebrickable"
 DATA = ROOT / "src" / "everything2lego" / "data"
@@ -127,6 +130,7 @@ _WXD = re.compile(
 # For classifying by name when category is ambiguous.
 _NAME_SHAPE_HINTS = (
     ("Slope Inverted", "slope_inv"),
+    ("Sloped Inverted", "slope_inv"),
     ("Slope Curved",   "slope"),
     ("Slope",          "slope"),
     ("Wedge",          "slope"),
@@ -161,56 +165,19 @@ def _parse_geometry(name: str, cat_shape: str | None) -> tuple[str, tuple[int, i
     if shape is None:
         return None
 
+    if not is_plain_geometry(shape, name):
+        return None
     m = _WXD.search(name)
     if not m:
         return None
     w = int(m.group(1))
     d = int(m.group(2))
-    third_num = m.group(3)
-    third_den = m.group(4)
-    if third_num is None:
-        third = None
-    elif third_den is None:
-        third = int(third_num)  # integer height in bricks
-    else:
-        # Fractional height in bricks (e.g. "2/3" = 2/3 brick = 2 plates).
-        third = (int(third_num), int(third_den))
-
     # Normalize footprint: (max, min) → LDraw parts are canonically wider on x.
     fw, fd = max(w, d), min(w, d)
 
-    # Height table.
-    if shape == "plate":
-        h = 1
-    elif shape == "tile":
-        h = 1
-    elif shape == "brick":
-        h = 3
-    elif shape in ("slope", "slope_inv"):
-        # Slope height depends on the "1 x N x H" third dim if present.
-        if third is None:
-            h = 3
-        elif isinstance(third, tuple):
-            num, den = third
-            # Slopes use "N/3" convention: 2/3 = 2 plates, 1/3 = 1 plate,
-            # 3/3 = 3 plates (1 brick), 6/3 = 6 plates (2 bricks).
-            if den == 3:
-                h = num
-            else:
-                h = max(1, int(round(num * 3 / den)))
-        else:
-            # Integer means N bricks tall.
-            h = third * 3
-    elif shape == "panel":
-        # Panel 1 x N x H → third dim is height in bricks; each brick 3 plates
-        # (but Panel 1x2x1 is 3 plates tall, matching a brick).
-        h = (third or 1) * 3
-    elif shape == "window":
-        h = (third or 2) * 3
-    elif shape == "door":
-        h = (third or 5) * 3
-    else:
+    if shape not in ("plate", "tile", "brick", "slope", "slope_inv", "panel", "window", "door"):
         return None
+    h = height_from_name(shape, name)
 
     # Reject anything unreasonably large — noisy names or oversized parts.
     if fw > 16 or fd > 16 or h > 30:
@@ -298,7 +265,7 @@ def import_parts(top_n: int = 300) -> None:
         m = re.match(r"^(\d+)", stem)
         return m.group(1) if m else stem
 
-    from everything2lego.bricks import catalog  # existing catalog
+    from everything2lego.bricks import catalog  # noqa: E402  (existing catalog)
     existing_bases = {_base_id(p.ldraw) for p in catalog()}
 
     imported = []

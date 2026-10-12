@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields
 from typing import Protocol
 
-from ..bricks import Part, catalog
+from ..bricks import Part, catalog, full_catalog
 from ..colors import LegoColor, palette
 from ..pack import Placement
 
@@ -45,8 +45,8 @@ def color_index_by_code(code: int) -> int:
 
 
 def part_by_ldraw(ldraw: str) -> Part | None:
-    """Look up a catalog entry by LDraw filename."""
-    for p in catalog():
+    """Look up a catalog entry by LDraw filename, decorative parts included."""
+    for p in full_catalog():
         if p.ldraw == ldraw:
             return p
     return None

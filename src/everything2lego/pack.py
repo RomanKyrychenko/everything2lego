@@ -8,11 +8,13 @@ become plates. Tiles are used for exposed top surfaces if requested.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
 
-from .bricks import Part, catalog, largest_first, parts_by_shape
+from .bricks import Part, catalog, largest_first, parts_by_shape, full_catalog
 from .voxelize import VoxelGrid
 
 
@@ -63,17 +65,11 @@ def _level_consistent(col_top: np.ndarray, top_y: int,
     covered by upper bricks (an interior fill) or uniformly at column top
     with a footprint in `top_footprints`. Anything else straddles a step
     edge and is deferred to the relaxed pass."""
-    at_top = False
-    covered = False
-    for dx in range(w):
-        for dz in range(d):
-            ct = col_top[x + dx, z + dz]
-            if ct == top_y:
-                at_top = True
-            elif ct > top_y:
-                covered = True
-            if at_top and covered:
-                return False
+    window = col_top[x:x + w, z:z + d]
+    at_top = bool((window == top_y).any())
+    covered = bool((window > top_y).any())
+    if at_top and covered:
+        return False
     if at_top and not covered:
         if height_units != 3:
             return False
@@ -81,6 +77,39 @@ def _level_consistent(col_top: np.ndarray, top_y: int,
             return True
         return (w, d) in top_footprints
     return True
+
+
+def _windows(a: np.ndarray, w: int, d: int) -> np.ndarray:
+    """Every (w, d) window of a 2-D array, as an array of shape (W-w+1, D-d+1, w, d)."""
+    return sliding_window_view(a, (w, d))
+
+
+def _candidate_starts(voxels: np.ndarray, filled: np.ndarray, y: int, hy: int,
+                      w: int, d: int) -> np.ndarray:
+    """(W-w+1, D-d+1) mask of starts where a (w, hy, d) block is unfilled and
+    one colour.  Computed once per part and layer; `filled` only grows, so
+    a start that fails here can never fit later and the ones that pass are
+    confirmed by `_try_fit` in scan order."""
+    sub = voxels[y:y + hy]
+    free = ~filled[y:y + hy].any(axis=0)
+    column_uniform = (sub == sub[:1]).all(axis=0) & (sub[0] >= 0)
+    base = _windows(sub[0], w, d)
+    return (_windows(free & column_uniform, w, d).all(axis=(2, 3))
+            & (base.min(axis=(2, 3)) == base.max(axis=(2, 3))))
+
+
+def _consistent_starts(col_top: np.ndarray, top_y: int, w: int, d: int,
+                       hy: int, top_footprints: frozenset[tuple[int, int]] | None
+                       ) -> np.ndarray:
+    """`_level_consistent` for every start at once."""
+    windows = _windows(col_top, w, d)
+    at_top = (windows == top_y).any(axis=(2, 3))
+    covered = (windows > top_y).any(axis=(2, 3))
+    top_ok = hy == 3 and (top_footprints is None or (w, d) in top_footprints)
+    bad = at_top & covered
+    if not top_ok:
+        bad |= at_top & ~covered
+    return ~bad
 
 
 def _place_parts(voxels: np.ndarray, filled: np.ndarray,
@@ -91,40 +120,48 @@ def _place_parts(voxels: np.ndarray, filled: np.ndarray,
                  strict_level: bool = False,
                  top_footprints: frozenset[tuple[int, int]] | None = None) -> list[Placement]:
     """Greedy pass: for each part (largest first) and each orientation, walk
-    the scan order and place wherever it fits."""
+    the scan order and place wherever it fits.
+
+    Two parts with the same footprint see the same grid, so the second can
+    place nothing the first did not; each (w, d) is walked once per layer.
+    """
     placements: list[Placement] = []
     H, W, D = voxels.shape
     for y in y_range:
+        if y + hy > H:
+            continue
         top_y = y + hy - 1
+        tried: set[tuple[int, int]] = set()
         for part in largest_first(parts):
             orientations = part.orientations()
             if y % 2:
                 orientations.reverse()
             for w, d in orientations:
-                rot = 0 if (w, d) == part.footprint else 90
-                if y + hy > H:
+                if (w, d) in tried or w > W or d > D:
                     continue
-                xs = list(range(W - w + 1))
-                zs = list(range(D - d + 1))
+                tried.add((w, d))
+                rot = 0 if (w, d) == part.footprint else 90
+                starts = _candidate_starts(voxels, filled, y, hy, w, d)
+                if support is not None:
+                    starts &= _windows(support, w, d).any(axis=(2, 3))
+                if strict_level and col_top is not None:
+                    starts &= _consistent_starts(col_top, top_y, w, d, hy, top_footprints)
+                if not starts.any():
+                    continue
+                xs = np.arange(W - w + 1)
+                zs = np.arange(D - d + 1)
                 if y % 2:
-                    xs = xs[1:] + xs[:1]
-                    zs = zs[1:] + zs[:1]
-                for x in xs:
-                    for z in zs:
-                        if support is not None and not support[x:x + w, z:z + d].any():
-                            continue
-                        if strict_level and col_top is not None and \
-                                not _level_consistent(col_top, top_y, x, z, w, d,
-                                                       height_units=hy,
-                                                       top_footprints=top_footprints):
-                            continue
+                    xs = np.roll(xs, -1)
+                    zs = np.roll(zs, -1)
+                for x in xs[starts[xs].any(axis=1)]:
+                    for z in zs[starts[x, zs]]:
                         c = _try_fit(voxels, filled, y, x, z, w, hy, d)
                         if c is None:
                             continue
                         filled[y:y + hy, x:x + w, z:z + d] = True
                         placements.append(Placement(
                             part=part, color_idx=c,
-                            x_stud=x, z_stud=z, y_plate=y,
+                            x_stud=int(x), z_stud=int(z), y_plate=y,
                             w_world=w, d_world=d, rotation_deg=rot,
                         ))
     return placements
@@ -342,6 +379,21 @@ def _step_down_direction(col_top: np.ndarray, p: Placement,
         z_dir = "+z" if "+z" in s else "-z"
         return x_dir + z_dir
     return None
+
+
+def slope_world_low(p: Placement) -> str | None:
+    """World direction a placed slope's low side points to ("+x", "-z",
+    "+x+z" for a corner...), from the part's default and the placement's
+    rotation; None for anything that is not a slope."""
+    part = p.part
+    if part.shape not in ("slope", "slope_inv", "slope_corner"):
+        return None
+    steps = (p.rotation_deg // 90) % 4
+    if part.shape == "slope_corner":
+        default = part.slope_dir if part.slope_dir in _CORNER_LOW_CYCLE else "+x+z"
+        return _CORNER_LOW_CYCLE[(_CORNER_LOW_CYCLE.index(default) + steps) % 4]
+    default = part.slope_dir if part.slope_dir in _LOW_DIR_CYCLE else "+x"
+    return _LOW_DIR_CYCLE[(_LOW_DIR_CYCLE.index(default) + steps) % 4]
 
 
 def _slope_rotation(slope: Part, world_footprint: tuple[int, int],
@@ -589,7 +641,7 @@ def apply_variety(placements: list[Placement], *, seed: int = 0
     context: corners get side-stud/headlight accents; straight walls get
     plain + masonry variety; interior surfaces stay plain. Purely visual —
     footprint, height and volume are unchanged."""
-    parts_by_ldraw = {p.ldraw: p for p in catalog()}
+    parts_by_ldraw = {p.ldraw: p for p in full_catalog()}
 
     # Cell-owner map for the neighbourhood classifier.
     cell_owner: dict[tuple[int, int, int], int] = {}
@@ -629,35 +681,59 @@ def apply_variety(placements: list[Placement], *, seed: int = 0
 def substitute_by_color(placements: list[Placement],
                          color_swaps: dict[int, str]) -> list[Placement]:
     """Swap parts whose LDraw color code matches any key of `color_swaps`
-    with the substitute LDraw part id. Footprint-preserving only — if the
-    substitute has a different declared footprint the placement passes through.
+    with the substitute LDraw part id.
 
     Use this to turn 1x2 bricks in the 'window' color into actual 1x2 window
     frames, brown bricks into door parts, etc. The user picks the colour;
     we handle the swap.
+
+    The substitute must have the placement's footprint.  Where it is taller
+    than the placement (a window frame is two bricks, a door five), the
+    placement is swapped together with the parts stacked directly on it:
+    a run of same-colour, same-footprint parts whose heights add up to the
+    substitute's height becomes the one taller part.  A placement with
+    nothing suitable above it is left alone, so nothing ever overlaps.
     """
     if not color_swaps:
         return list(placements)
     from .colors import palette
     pal = palette()
-    parts_by_ldraw = {p.ldraw: p for p in catalog()}
-    result: list[Placement] = []
-    for p in placements:
-        code = pal[p.color_idx].code
-        target = color_swaps.get(code)
+    parts_by_ldraw = {p.ldraw: p for p in full_catalog()}
+
+    def wants(p: Placement) -> Part | None:
+        target = color_swaps.get(pal[p.color_idx].code)
         new_part = parts_by_ldraw.get(target) if target else None
+        if new_part is None:
+            return None
+        world = (p.w_world, p.d_world)
+        if world not in (new_part.footprint, new_part.footprint[::-1]):
+            return None
+        return new_part
+
+    # Parts stacked exactly on one another, by footprint column.
+    by_column: dict[tuple[int, int, int, int, int], Placement] = {
+        (p.x_stud, p.z_stud, p.w_world, p.d_world, p.y_plate): p for p in placements}
+    consumed: set[int] = set()
+    result: list[Placement] = []
+    for p in sorted(placements, key=lambda q: q.y_plate):
+        if id(p) in consumed:
+            continue
+        new_part = wants(p)
         if new_part is None:
             result.append(p)
             continue
-        world = (p.w_world, p.d_world)
-        if world not in (new_part.footprint, (new_part.footprint[1], new_part.footprint[0])):
+        stack = [p]
+        height = p.part.height_units
+        while height < new_part.height_units:
+            above = by_column.get((p.x_stud, p.z_stud, p.w_world, p.d_world, p.y_plate + height))
+            if above is None or id(above) in consumed or above.color_idx != p.color_idx:
+                break
+            stack.append(above)
+            height += above.part.height_units
+        if height != new_part.height_units:
             result.append(p)
             continue
-        # For heights: only allow drop-in (equal) or shorter substitutes so we
-        # don't overlap whatever is above the current brick.
-        if new_part.height_units > p.part.height_units:
-            result.append(p)
-            continue
+        consumed.update(id(q) for q in stack)
         result.append(Placement(
             part=new_part, color_idx=p.color_idx,
             x_stud=p.x_stud, z_stud=p.z_stud, y_plate=p.y_plate,
@@ -674,7 +750,7 @@ def substitute_texture(placements: list[Placement], preset: str) -> list[Placeme
     subs = TEXTURE_PRESETS.get(preset, {})
     if not subs:
         return list(placements)
-    parts_by_ldraw = {p.ldraw: p for p in catalog()}
+    parts_by_ldraw = {p.ldraw: p for p in full_catalog()}
     result: list[Placement] = []
     for p in placements:
         target_ldraw = subs.get(p.part.ldraw)
@@ -740,14 +816,23 @@ def _cluster_by_color(placements: list[Placement],
     return clusters
 
 
+# Window frames and doors by (studs wide, plates tall).
+_WINDOW_BY_SIZE = {(2, 6): "60592.dat", (2, 9): "60800.dat",
+                   (4, 9): "60594.dat", (6, 9): "3853.dat"}
+_DOOR_BY_SIZE = {(4, 15): "60623.dat", (4, 18): "60614.dat"}
+
+
 def detect_windows_and_doors(placements: list[Placement], *,
                               wall_color_top_n: int = 2,
-                              min_cluster_size: int = 3,
+                              min_cluster_size: int = 2,
                               min_door_plates: int = 9) -> tuple[list[Placement], dict]:
     """Detect window and door-shaped color clusters and swap them for real
-    LEGO window/door parts. Returns (new_placements, stats)."""
+    LEGO window/door parts. Returns (new_placements, stats).
+
+    A cluster is swapped only when it is a full rectangle the exact size of
+    a window frame or door; the smallest, a 1x2x2 frame, is two bricks."""
     from collections import Counter, defaultdict
-    parts_by_ldraw = {p.ldraw: p for p in catalog()}
+    parts_by_ldraw = {p.ldraw: p for p in full_catalog()}
 
     if not placements:
         return [], {"clusters_found": 0, "windows_placed": 0, "doors_placed": 0}
@@ -792,13 +877,21 @@ def detect_windows_and_doors(placements: list[Placement], *,
                 continue
             width = z_extent if thin_x else x_extent
 
+            # The replacement must be exactly the cluster's size, or it
+            # would overlap its neighbours or leave a hole: a window frame
+            # is 2 or 3 bricks tall and a door 5 or 6, so the cluster has
+            # to be a full rectangle of one of those sizes.
+            cells = sum(p.w_world * p.d_world * p.part.height_units
+                        for p in (placements[i] for i in cluster_indices))
+            if cells != x_extent * z_extent * y_extent:
+                continue
             target: str | None = None
-            # Window: 2-4 wide, 1-3 bricks tall (3-9 plates), not at the floor.
-            if 2 <= width <= 4 and 3 <= y_extent <= 9 and y_min >= 3:
-                target = "60592.dat" if width == 2 else "60594.dat"
-            # Door: 2-4 wide, 3+ bricks tall (9+ plates), reaches the floor.
-            elif 2 <= width <= 4 and y_extent >= min_door_plates and y_min <= 4:
-                target = "60623.dat"
+            # Window: not at the floor.
+            if y_min >= 3:
+                target = _WINDOW_BY_SIZE.get((width, y_extent))
+            # Door: reaches the floor.
+            elif y_extent >= min_door_plates and y_min <= 4:
+                target = _DOOR_BY_SIZE.get((width, y_extent))
 
             if target is None:
                 continue
@@ -827,7 +920,7 @@ def detect_windows_and_doors(placements: list[Placement], *,
                 to_replace[idx] = None
             to_replace[min(cluster_indices)] = replacement
 
-            if target in ("60592.dat", "60594.dat"):
+            if new_part.shape == "window":
                 stats["windows_placed"] += 1
             else:
                 stats["doors_placed"] += 1
@@ -944,6 +1037,9 @@ def apply_architectural_style(placements: list[Placement], *,
     idx_by_code = {c.code: i for i, c in enumerate(pal)}
 
     def _to_idx(code: int, fallback: int) -> int:
+        if code not in idx_by_code:
+            warnings.warn(f"LDraw colour {code} is not in the palette; using {pal[fallback].name}",
+                          RuntimeWarning, stacklevel=2)
         return idx_by_code.get(code, fallback)
 
     default_idx = 0

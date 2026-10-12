@@ -215,6 +215,7 @@ class SoftTrainer:
 
         _, init_L = self.soft_loss.evaluate(a, tau=tau)
         best_L = float(init_L.detach())
+        best_state = [p.detach().clone() for p in a.parameters()]
         history = [best_L]
         t0 = time.time()
 
@@ -225,7 +226,14 @@ class SoftTrainer:
             opt.step()
             if brk.total < best_L:
                 best_L = brk.total
+                best_state = [p.detach().clone() for p in a.parameters()]
             history.append(brk.total)
+
+        # Discretise the best iterate, which is what `best_loss` reports,
+        # not wherever the last step landed.
+        with torch.no_grad():
+            for p, best in zip(a.parameters(), best_state):
+                p.copy_(best)
             if (self.on_progress is not None
                     and step % max(1, self.progress_every) == 0):
                 self.on_progress(step, brk)
@@ -305,17 +313,10 @@ class SoftTrainer:
                         part = tile_1x1 or plate_1x1
                         rot = 0
                         w, d = 1, 1
-                    elif t in cheese_rot and cheese is not None:
-                        part = cheese
-                        rot = cheese_rot[t]
-                        w, d = 1, 1
-                    elif t in slope_rot and slope_2x1 is not None:
-                        # Slope is 2 studs wide — only emit when the +axis
-                        # neighbour is the same type (block claim).
-                        part = slope_2x1
-                        rot = slope_rot[t]
-                        # Use as 1x1 for the discretiser first-pass (the
-                        # consolidator can promote to 2x1 in a follow-up).
+                    elif t in cheese_rot or t in slope_rot:
+                        # Sloped parts are 2 or 3 plates tall; the per-cell
+                        # path stands them in with 1x1 plates so nothing
+                        # overlaps.  `_emit_slopes` builds the real parts.
                         part = plate_1x1
                         rot = 0
                         w, d = 1, 1
@@ -445,19 +446,7 @@ class SoftTrainer:
                         consumed[y:y+3, pl.x:pl.x+pl.w,
                                     pl.z:pl.z+pl.d] = True
 
-        # Prepare cheese + slope 1x1 emission (no consolidation yet).
-        cheese_p = part_by_ldraw("54200.dat")
         plate_1x1 = part_by_ldraw("3024.dat")
-        slope_2x1 = part_by_ldraw("3040.dat") or part_by_ldraw("3040b.dat")
-        slope_2x2 = part_by_ldraw("3039.dat")
-        slope_4x1 = part_by_ldraw("61678.dat")   # curved slope, 4x1x3
-        brick_1x1 = part_by_ldraw("3005.dat")    # same height as 2x1 slope
-        cheese_rot = {CHEESE_XP: 0, CHEESE_XM: 180,
-                        CHEESE_ZP: 270, CHEESE_ZM: 90}
-        # 2x1 slope (part 3040) low-toward-<axis>.  LDraw rot convention here
-        # matches cheese_rot above.
-        slope_rot = {SLOPE_XP: 0, SLOPE_XM: 180,
-                       SLOPE_ZP: 270, SLOPE_ZM: 90}
         packer_plate = MILPPacker(parts=plate_footprints,
                                      time_limit_s=1.0, max_mask_area=200)
         packer_tile = MILPPacker(parts=tile_footprints,
@@ -492,132 +481,86 @@ class SoftTrainer:
                             w_world=pl.w, d_world=pl.d,
                             rotation_deg=pl.rotation_deg,
                         ))
-        # Cheese cells (54200) emit 1x1 directly.
-        # SLOPE_* cells consolidate by scanning MAXIMAL RUNS of the same
-        # (type, color) along the perpendicular-to-pitch axis:
-        #   SLOPE_XP / SLOPE_XM pitch along ±x, run along z
-        #   SLOPE_ZP / SLOPE_ZM pitch along ±z, run along x
-        # For a run of length N: emit ⌊N/2⌋ × 2x1 slopes (3040) and, when
-        # N is odd, a single 1x1 BRICK (3005) at the FIRST cell — same
-        # height as the 2x1 slope, so no sawtooth pit at the run's edge,
-        # and placed toward the interior (hidden against the gable end).
-        # Cheese fallback is used only when neither the 2x1 slope nor the
-        # 1x1 brick is available in the catalog.
-        slope_pair_axis = {SLOPE_XP: "z", SLOPE_XM: "z",
-                             SLOPE_ZP: "x", SLOPE_ZM: "x"}
-        # Merge the brick-pre-pass' `consumed` mask so slopes don't
-        # re-emit into cells that were already claimed by bricks.
-        claimed = consumed.copy()
-        # First pass: emit cheese cells (unambiguous, no consolidation).
-        for y in range(Y):
-            for x in range(X):
-                for z in range(Z):
-                    if claimed[y, x, z]:
-                        continue
-                    t = int(hard_types[y, x, z])
-                    if t in cheese_rot and cheese_p is not None:
-                        c = int(hard_colors[y, x, z])
-                        out.append(Placement(
-                            part=cheese_p, color_idx=c,
-                            x_stud=x, y_plate=y, z_stud=z,
-                            w_world=1, d_world=1,
-                            rotation_deg=cheese_rot[t],
-                        ))
-                        claimed[y, x, z] = True
-
-        def _emit_slope_run(y: int, x0: int, z0: int, t: int, c: int,
-                              run_axis: str, length: int) -> None:
-            """Emit a run of `length` same-(t,c) SLOPE_* cells starting at
-            (y, x0, z0) along `run_axis`.  Uses 2x1 slopes + 1x1 brick
-            for the odd cell (placed at the start of the run)."""
-            rot = slope_rot[t]
-            i = 0
-            if length % 2 == 1:
-                # Odd cell → 1x1 brick at the start.
-                if brick_1x1 is not None:
-                    out.append(Placement(
-                        part=brick_1x1, color_idx=c,
-                        x_stud=x0, y_plate=y, z_stud=z0,
-                        w_world=1, d_world=1, rotation_deg=0,
-                    ))
-                elif cheese_p is not None:
-                    out.append(Placement(
-                        part=cheese_p, color_idx=c,
-                        x_stud=x0, y_plate=y, z_stud=z0,
-                        w_world=1, d_world=1, rotation_deg=rot,
-                    ))
-                if run_axis == "z":
-                    claimed[y, x0, z0] = True
-                else:
-                    claimed[y, x0, z0] = True
-                i = 1
-            # Remaining cells are even — emit 2x1 slopes.
-            while i < length:
-                if run_axis == "z":
-                    z_here = z0 + i
-                    if slope_2x1 is not None:
-                        out.append(Placement(
-                            part=slope_2x1, color_idx=c,
-                            x_stud=x0, y_plate=y, z_stud=z_here,
-                            w_world=1, d_world=2, rotation_deg=rot,
-                        ))
-                    else:
-                        # Fallback: two 1x1 bricks.
-                        for dz in (0, 1):
-                            if brick_1x1 is not None:
-                                out.append(Placement(
-                                    part=brick_1x1, color_idx=c,
-                                    x_stud=x0, y_plate=y, z_stud=z_here + dz,
-                                    w_world=1, d_world=1, rotation_deg=0,
-                                ))
-                    claimed[y, x0, z_here] = True
-                    claimed[y, x0, z_here + 1] = True
-                else:  # run_axis == "x"
-                    x_here = x0 + i
-                    if slope_2x1 is not None:
-                        out.append(Placement(
-                            part=slope_2x1, color_idx=c,
-                            x_stud=x_here, y_plate=y, z_stud=z0,
-                            w_world=2, d_world=1, rotation_deg=rot,
-                        ))
-                    else:
-                        for dx in (0, 1):
-                            if brick_1x1 is not None:
-                                out.append(Placement(
-                                    part=brick_1x1, color_idx=c,
-                                    x_stud=x_here + dx, y_plate=y, z_stud=z0,
-                                    w_world=1, d_world=1, rotation_deg=0,
-                                ))
-                    claimed[y, x_here, z0] = True
-                    claimed[y, x_here + 1, z0] = True
-                i += 2
-
-        # Second pass: SLOPE_* runs.
-        for y in range(Y):
-            for x in range(X):
-                for z in range(Z):
-                    if claimed[y, x, z]:
-                        continue
-                    t = int(hard_types[y, x, z])
-                    if t not in slope_rot:
-                        continue
-                    c = int(hard_colors[y, x, z])
-                    axis = slope_pair_axis[t]
-                    # Scan max run along axis.
-                    run = 1
-                    if axis == "z":
-                        z_end = z + 1
-                        while (z_end < Z and not claimed[y, x, z_end]
-                                and int(hard_types[y, x, z_end]) == t
-                                and int(hard_colors[y, x, z_end]) == c):
-                            run += 1
-                            z_end += 1
-                    else:  # axis == "x"
-                        x_end = x + 1
-                        while (x_end < X and not claimed[y, x_end, z]
-                                and int(hard_types[y, x_end, z]) == t
-                                and int(hard_colors[y, x_end, z]) == c):
-                            run += 1
-                            x_end += 1
-                    _emit_slope_run(y, x, z, t, c, axis, run)
+        out.extend(_emit_slopes(hard_types, hard_colors, consumed))
         return out
+
+
+# World low direction of each sloped cell type.
+_SLOPE_LOW = {SLOPE_XP: "+x", SLOPE_XM: "-x", SLOPE_ZP: "+z", SLOPE_ZM: "-z"}
+_CHEESE_LOW = {CHEESE_XP: "+x", CHEESE_XM: "-x", CHEESE_ZP: "+z", CHEESE_ZM: "-z"}
+
+
+def _emit_slopes(hard_types: np.ndarray, hard_colors: np.ndarray,
+                 claimed: np.ndarray) -> list[Placement]:
+    """Turn the sloped cells of the argmax grid into real parts.
+
+    A SLOPE_* cell stands for a 45° slope that is three plates tall and two
+    studs long along its pitch; a CHEESE_* cell for a cheese slope two
+    plates tall.  Each cell is therefore emitted only as the bottom of a
+    column of identical cells of the part's height, and the whole column
+    is claimed, so nothing is placed into cells a taller part already
+    fills.  Columns that are too short for their part degrade to a plate
+    (one plate) or a cheese (two).  Along the pitch axis, pairs of columns
+    become one 2x1 slope (3040) oriented by the packer's own
+    `_slope_rotation`, so a slope here can never point another way than
+    the same part placed by the packer; an odd column becomes a 1x1 brick
+    of the same height.
+    """
+    from ..pack import _slope_rotation
+    cheese = part_by_ldraw("54200.dat")
+    slope_2x1 = part_by_ldraw("3040.dat") or part_by_ldraw("3040b.dat")
+    brick_1x1 = part_by_ldraw("3005.dat")
+    plate_1x1 = part_by_ldraw("3024.dat")
+    Y, X, Z = hard_types.shape
+    out: list[Placement] = []
+
+    def column(y: int, x: int, z: int, height: int) -> bool:
+        """Whether cells y..y+height-1 at (x, z) are free and identical."""
+        if y + height > Y:
+            return False
+        col_t = hard_types[y:y + height, x, z]
+        col_c = hard_colors[y:y + height, x, z]
+        return (not claimed[y:y + height, x, z].any()
+                and (col_t == col_t[0]).all() and (col_c == col_c[0]).all())
+
+    def place(part, y, x, z, w, d, rot, c):
+        out.append(Placement(part=part, color_idx=c, x_stud=x, y_plate=y, z_stud=z,
+                             w_world=w, d_world=d, rotation_deg=rot))
+        claimed[y:y + part.height_units, x:x + w, z:z + d] = True
+
+    for y in range(Y):
+        for x in range(X):
+            for z in range(Z):
+                if claimed[y, x, z]:
+                    continue
+                t = int(hard_types[y, x, z])
+                c = int(hard_colors[y, x, z])
+                if t in _SLOPE_LOW:
+                    low = _SLOPE_LOW[t]
+                    if column(y, x, z, 3):
+                        dx, dz = (1, 0) if low[1] == "x" else (0, 1)
+                        nx, nz = x + dx, z + dz
+                        pair = (nx < X and nz < Z and column(y, nx, nz, 3)
+                                and int(hard_types[y, nx, nz]) == t
+                                and int(hard_colors[y, nx, nz]) == c)
+                        world = (1 + dx, 1 + dz)
+                        rot = _slope_rotation(slope_2x1, world, low) if slope_2x1 else None
+                        if pair and rot is not None:
+                            place(slope_2x1, y, x, z, *world, rot, c)
+                        elif brick_1x1 is not None:
+                            place(brick_1x1, y, x, z, 1, 1, 0, c)
+                        else:
+                            place(plate_1x1, y, x, z, 1, 1, 0, c)
+                    elif column(y, x, z, 2) and cheese is not None:
+                        rot = _slope_rotation(cheese, (1, 1), low)
+                        place(cheese, y, x, z, 1, 1, rot or 0, c)
+                    else:
+                        place(plate_1x1, y, x, z, 1, 1, 0, c)
+                elif t in _CHEESE_LOW:
+                    low = _CHEESE_LOW[t]
+                    if column(y, x, z, 2) and cheese is not None:
+                        rot = _slope_rotation(cheese, (1, 1), low)
+                        place(cheese, y, x, z, 1, 1, rot or 0, c)
+                    else:
+                        place(plate_1x1, y, x, z, 1, 1, 0, c)
+    return out

@@ -49,7 +49,20 @@ def placement_to_line(p: Placement) -> str:
 
 
 def write_ldr(placements: Iterable[Placement], out_path: str | Path,
-              *, model_name: str = "everything2lego model") -> Path:
+              *, model_name: str = "everything2lego model",
+              steps: Iterable[Iterable[Placement]] | None = None) -> Path:
+    """Write an LDraw model with one `0 STEP` marker closing each build step.
+
+    `steps` is the build-step grouping (a list of lists of placements, as
+    returned by `instructions.plan_steps`); it lets the .ldr follow the same
+    steps as the PDF. When omitted the default grouping is computed here.
+    Parts inside a step are written bottom-up so viewers show a natural
+    build order.
+    """
+    placements = list(placements)
+    if steps is None:
+        from .instructions import plan_steps
+        steps = plan_steps(placements)
     out_path = Path(out_path)
     lines: list[str] = [
         f"0 {model_name}",
@@ -58,12 +71,11 @@ def write_ldr(placements: Iterable[Placement], out_path: str | Path,
         "0 !LICENSE Redistributable under CCAL version 2.0",
         "",
     ]
-    # Sort bottom-up so LDraw viewers show a natural build order.
-    previous_layer = None
-    for p in sorted(placements, key=lambda q: (q.y_plate, q.z_stud, q.x_stud)):
-        if previous_layer is not None and p.y_plate != previous_layer:
-            lines.append("0 STEP")
-        lines.append(placement_to_line(p))
-        previous_layer = p.y_plate
+    for step in steps:
+        step = sorted(step, key=lambda q: (q.y_plate, q.z_stud, q.x_stud))
+        if not step:
+            continue
+        lines.extend(placement_to_line(p) for p in step)
+        lines.append("0 STEP")
     out_path.write_text("\n".join(lines) + "\n")
     return out_path

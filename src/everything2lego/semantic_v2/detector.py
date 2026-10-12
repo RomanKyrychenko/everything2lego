@@ -15,6 +15,7 @@ We augment that with:
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import List
 
@@ -98,7 +99,9 @@ class RegionDetector:
         try:
             from scipy.spatial import cKDTree
             tree = cKDTree(target.surface_points)
-        except Exception:
+        except Exception as exc:
+            warnings.warn(f"no KD-tree for facet sampling ({exc}); facets get no point subsets",
+                          RuntimeWarning, stacklevel=2)
             tree = None
 
         # Relative area threshold — robust across mesh scales (mm-scale
@@ -414,5 +417,7 @@ def _facet_colors(mesh: trimesh.Trimesh, face_ids: np.ndarray,
             return rgb[:n_points]
         pad = np.full((n_points - len(rgb), 3), 200, dtype=np.uint8)
         return np.concatenate([rgb, pad], axis=0)
-    except Exception:
+    except Exception as exc:
+        warnings.warn(f"colour sampling failed ({exc}); the region will be uniform grey",
+                      RuntimeWarning, stacklevel=2)
         return np.full((n_points, 3), 200, dtype=np.uint8)

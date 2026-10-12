@@ -28,13 +28,18 @@ console = Console()
 
 def _write_outputs(placements, out_dir: Path, *, model_name: str, report: dict) -> dict[str, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
-    ldr = io_ldraw.write_ldr(placements, out_dir / "model.ldr", model_name=model_name)
+    placements = list(placements)
+    # One build-step grouping shared by the LDraw file and the PDF.
+    steps = instructions.plan_steps(placements)
+    ldr = io_ldraw.write_ldr(placements, out_dir / "model.ldr", model_name=model_name, steps=steps)
     xml = io_bricklink.write_wanted_list(placements, out_dir / "wanted.xml")
     view_dir = out_dir / "viewer"
     viewer_index = viewer_export.write_viewer(placements, view_dir, report=report)
-    pdf = instructions.write_pdf(placements, out_dir / "instructions.pdf")
+    order = instructions._painter_order(placements)
+    pdf = instructions.write_pdf(placements, out_dir / "instructions.pdf", order=order, steps=steps)
     preview = out_dir / "preview.png"
-    instructions._render_step(placements, set(), (1400, 1000), instructions._bounds(placements)).save(preview)
+    instructions._render_step(placements, set(), (1400, 1000), instructions._bounds(placements),
+                              order=order).save(preview)
     report_path = out_dir / "report.json"
     report_path.write_text(json.dumps(report, indent=2) + "\n")
     stl = io_stl.write_stl(placements, out_dir / "lego.stl")
@@ -42,7 +47,8 @@ def _write_outputs(placements, out_dir: Path, *, model_name: str, report: dict) 
             "preview": preview, "report": report_path, "lego_stl": stl}
 
 
-def _print_summary(placements, outputs: dict[str, Path]) -> None:
+def _print_summary(placements, outputs: dict[str, Path],
+                   report: "stability.StabilityReport | None" = None) -> None:
     counts = pack.summarize(placements)
     table = Table(title=f"{len(placements)} parts across {len(counts)} SKUs")
     table.add_column("Part")
@@ -54,7 +60,7 @@ def _print_summary(placements, outputs: dict[str, Path]) -> None:
         table.add_row("...", "", f"({len(counts) - 15} more)")
     console.print(table)
 
-    report = stability.check(placements)
+    report = stability.check(placements) if report is None else report
     if report.ok:
         console.print(f"[green]connections:[/green] all {report.total} parts form one supported assembly")
     else:
@@ -117,11 +123,17 @@ def _run(grid, out: Path, model_name: str, use_tiles: bool, supports: bool = Tru
             f"quoins {arch_stats['quoins']}"
         )
     console.print(f"placed {len(placements)} parts")
+    # The passes above may have changed parts and geometry since assemble()
+    # checked the structure; report what is actually written.
+    check = stability.check(placements)
+    report = {**result.report, **pipeline.structure_report(placements, check)}
 
     console.rule("[bold]writing outputs[/bold]")
-    outputs = _write_outputs(placements, out, model_name=model_name, report=result.report)
-    _print_summary(placements, outputs)
-    if supports and not result.report["geometrically_connected"]:
+    outputs = _write_outputs(placements, out, model_name=model_name, report=report)
+    _print_summary(placements, outputs, check)
+    if not report["geometrically_connected"]:
+        # With --no-supports or a brace mode that leaves parts floating the
+        # files are still written, but the model is not buildable as is.
         console.print("[red]The exported model needs structural review; see report.json.[/red]")
         raise typer.Exit(1)
 
@@ -652,7 +664,7 @@ def template_modernist_box(
 @app.command()
 def optimize(
     mesh: Path = typer.Argument(..., exists=True, help="Path to a .stl/.glb/.ply mesh."),
-    out: Path = typer.Option(Path("out_opt"), "--out", "-o"),
+    out: Path = typer.Option(Path("out"), "--out", "-o", help="Output directory."),
     max_studs: int = typer.Option(28, "--max-studs", min=6, max=64),
     iters: int = typer.Option(20_000, "--iters", min=100),
     t_start: float = typer.Option(0.05, "--t-start"),
@@ -761,7 +773,7 @@ def optimize(
 @app.command()
 def semantic(
     mesh: Path = typer.Argument(..., exists=True, help="Path to .stl/.glb/.ply mesh."),
-    out: Path = typer.Option(Path("out_sem"), "--out", "-o"),
+    out: Path = typer.Option(Path("out"), "--out", "-o", help="Output directory."),
     max_studs: int = typer.Option(32, "--max-studs", min=6, max=128),
     n_samples: int = typer.Option(100_000, "--n-samples",
         help="Surface point samples for the RegionDetector."),
@@ -794,8 +806,10 @@ def semantic(
         help="Zero or more photo files. Each fed as a photo-loss target during "
              "--soft-train.  First photo becomes the +Z (front) view, second is "
              "+X (side), third is +Y (top)."),
-    w_photo_pixel:  float = typer.Option(0.0, "--w-photo-pixel"),
-    w_photo_percep: float = typer.Option(0.0, "--w-photo-percep"),
+    w_photo_pixel:  float = typer.Option(1.0, "--w-photo-pixel",
+        help="Weight of the per-pixel photo loss; only used with --photos."),
+    w_photo_percep: float = typer.Option(0.0, "--w-photo-percep",
+        help="Weight of the perceptual (VGG) photo loss; only used with --photos."),
     w_shape_surface: float = typer.Option(1.0, "--w-shape-surface"),
     w_shape_volume: float = typer.Option(2.0, "--w-shape-volume"),
     w_color: float = typer.Option(1.0, "--w-color"),
@@ -935,8 +949,10 @@ def semantic(
         try:
             import torch
             import numpy as np
-        except ImportError:
-            console.print("[yellow]--soft-train requires PyTorch; skipping[/yellow]")
+        except ImportError as exc:
+            raise typer.BadParameter(
+                "--soft-train needs PyTorch (pip install torch); run without it "
+                "or install torch") from exc
         else:
             from .semantic_v2 import (SoftAssembly, SoftLoss, SoftLossWeights,
                                         SoftTrainer, SoftRenderer, MeshTarget)
@@ -1004,7 +1020,7 @@ def semantic(
                 per_region_palette = _build_region_cell_masks(
                     target, result.regions, pi, occ)
             sa = SoftAssembly.from_placements(
-                occ.shape, result.placements, n_col,
+                occ.shape, final_placements, n_col,
                 geometric_prior=geo_prior,
                 allowed_palette=allowed_palette,
                 per_region_palette=per_region_palette or None)
@@ -1051,13 +1067,17 @@ def semantic(
             refine_report["soft_n_parts"] = len(sres.placements)
 
     if final_placements:
+        check = stability.check(final_placements)
         outputs = _write_outputs(final_placements, out,
                                   model_name="semantic",
-                                  report={"parts": len(final_placements),
+                                  report={**pipeline.structure_report(final_placements, check),
                                           "regions": len(result.regions),
                                           "per_region": result.per_region_counts,
                                           "refine": refine_report})
-        _print_summary(final_placements, outputs)
+        _print_summary(final_placements, outputs, check)
+        if not check.ok:
+            console.print("[red]The exported model needs structural review; see report.json.[/red]")
+            raise typer.Exit(1)
     else:
         console.print("[yellow]no placements produced — check detector output[/yellow]")
 
