@@ -665,35 +665,59 @@ def apply_variety(placements: list[Placement], *, seed: int = 0
 def substitute_by_color(placements: list[Placement],
                          color_swaps: dict[int, str]) -> list[Placement]:
     """Swap parts whose LDraw color code matches any key of `color_swaps`
-    with the substitute LDraw part id. Footprint-preserving only — if the
-    substitute has a different declared footprint the placement passes through.
+    with the substitute LDraw part id.
 
     Use this to turn 1x2 bricks in the 'window' color into actual 1x2 window
     frames, brown bricks into door parts, etc. The user picks the colour;
     we handle the swap.
+
+    The substitute must have the placement's footprint.  Where it is taller
+    than the placement (a window frame is two bricks, a door five), the
+    placement is swapped together with the parts stacked directly on it:
+    a run of same-colour, same-footprint parts whose heights add up to the
+    substitute's height becomes the one taller part.  A placement with
+    nothing suitable above it is left alone, so nothing ever overlaps.
     """
     if not color_swaps:
         return list(placements)
     from .colors import palette
     pal = palette()
     parts_by_ldraw = {p.ldraw: p for p in full_catalog()}
-    result: list[Placement] = []
-    for p in placements:
-        code = pal[p.color_idx].code
-        target = color_swaps.get(code)
+
+    def wants(p: Placement) -> Part | None:
+        target = color_swaps.get(pal[p.color_idx].code)
         new_part = parts_by_ldraw.get(target) if target else None
+        if new_part is None:
+            return None
+        world = (p.w_world, p.d_world)
+        if world not in (new_part.footprint, new_part.footprint[::-1]):
+            return None
+        return new_part
+
+    # Parts stacked exactly on one another, by footprint column.
+    by_column: dict[tuple[int, int, int, int, int], Placement] = {
+        (p.x_stud, p.z_stud, p.w_world, p.d_world, p.y_plate): p for p in placements}
+    consumed: set[int] = set()
+    result: list[Placement] = []
+    for p in sorted(placements, key=lambda q: q.y_plate):
+        if id(p) in consumed:
+            continue
+        new_part = wants(p)
         if new_part is None:
             result.append(p)
             continue
-        world = (p.w_world, p.d_world)
-        if world not in (new_part.footprint, (new_part.footprint[1], new_part.footprint[0])):
+        stack = [p]
+        height = p.part.height_units
+        while height < new_part.height_units:
+            above = by_column.get((p.x_stud, p.z_stud, p.w_world, p.d_world, p.y_plate + height))
+            if above is None or id(above) in consumed or above.color_idx != p.color_idx:
+                break
+            stack.append(above)
+            height += above.part.height_units
+        if height != new_part.height_units:
             result.append(p)
             continue
-        # For heights: only allow drop-in (equal) or shorter substitutes so we
-        # don't overlap whatever is above the current brick.
-        if new_part.height_units > p.part.height_units:
-            result.append(p)
-            continue
+        consumed.update(id(q) for q in stack)
         result.append(Placement(
             part=new_part, color_idx=p.color_idx,
             x_stud=p.x_stud, z_stud=p.z_stud, y_plate=p.y_plate,

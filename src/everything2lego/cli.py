@@ -44,7 +44,8 @@ def _write_outputs(placements, out_dir: Path, *, model_name: str, report: dict) 
             "preview": preview, "report": report_path, "lego_stl": stl}
 
 
-def _print_summary(placements, outputs: dict[str, Path]) -> None:
+def _print_summary(placements, outputs: dict[str, Path],
+                   report: "stability.StabilityReport | None" = None) -> None:
     counts = pack.summarize(placements)
     table = Table(title=f"{len(placements)} parts across {len(counts)} SKUs")
     table.add_column("Part")
@@ -56,7 +57,7 @@ def _print_summary(placements, outputs: dict[str, Path]) -> None:
         table.add_row("...", "", f"({len(counts) - 15} more)")
     console.print(table)
 
-    report = stability.check(placements)
+    report = stability.check(placements) if report is None else report
     if report.ok:
         console.print(f"[green]connections:[/green] all {report.total} parts form one supported assembly")
     else:
@@ -119,11 +120,15 @@ def _run(grid, out: Path, model_name: str, use_tiles: bool, supports: bool = Tru
             f"quoins {arch_stats['quoins']}"
         )
     console.print(f"placed {len(placements)} parts")
+    # The passes above may have changed parts and geometry since assemble()
+    # checked the structure; report what is actually written.
+    check = stability.check(placements)
+    report = {**result.report, **pipeline.structure_report(placements, check)}
 
     console.rule("[bold]writing outputs[/bold]")
-    outputs = _write_outputs(placements, out, model_name=model_name, report=result.report)
-    _print_summary(placements, outputs)
-    if supports and not result.report["geometrically_connected"]:
+    outputs = _write_outputs(placements, out, model_name=model_name, report=report)
+    _print_summary(placements, outputs, check)
+    if supports and not report["geometrically_connected"]:
         console.print("[red]The exported model needs structural review; see report.json.[/red]")
         raise typer.Exit(1)
 

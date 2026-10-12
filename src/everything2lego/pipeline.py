@@ -15,6 +15,24 @@ class BuildResult:
     report: dict
 
 
+def structure_report(placements: list[pack.Placement],
+                     check: stability.StabilityReport | None = None) -> dict:
+    """The part count and structural fields of a report, for the placements
+    as they are now.  Every pass that changes placements after packing
+    (texture, colour swaps, feature detection, variety) must refresh these,
+    or the report describes a model that is not the one written out."""
+    check = stability.check(placements) if check is None else check
+    return {
+        "parts": len(placements),
+        "skus": len(pack.summarize(placements)),
+        "geometrically_connected": check.ok,
+        "connected_components": check.components,
+        "unsupported_parts": len(check.floating),
+        "overlapping_pairs": len(check.overlaps),
+        "single_stud_overhangs": check.weak_connections,
+    }
+
+
 def assemble(grid: VoxelGrid, *, use_tiles: bool = True, use_slopes: bool = True,
              supports: bool = True, brace_mode: str = "auto") -> BuildResult:
     """Assemble a voxel grid into a packed LEGO model with a stability report.
@@ -102,17 +120,11 @@ def assemble(grid: VoxelGrid, *, use_tiles: bool = True, use_slopes: bool = True
         raise RuntimeError("Support repair did not converge")
 
     report = {
-        "parts": len(placements),
         "reconstruction": grid.metadata,
-        "skus": len(pack.summarize(placements)),
         "dimensions_yxz": list(voxels.shape),
         "source_voxels": model_voxels,
         "added_support_voxels": int((voxels >= 0).sum()) - model_voxels,
-        "geometrically_connected": check.ok,
-        "connected_components": check.components,
-        "unsupported_parts": len(check.floating),
-        "overlapping_pairs": len(check.overlaps),
-        "single_stud_overhangs": check.weak_connections,
+        **structure_report(placements, check),
         "limits": [
             "Geometric checks do not simulate clutch strength, bending or tipping.",
             "Part/color availability must be checked before purchasing.",
