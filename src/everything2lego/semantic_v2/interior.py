@@ -85,6 +85,12 @@ class InteriorVolumeFiller:
         return out
 
 
+# Footprint (studs per side) of a hollow-mode support column.
+_COLUMN_STUDS = 2
+# Height of a standard brick in plates; interior courses are this tall.
+_COURSE_PLATES = 3
+
+
 def _hollow_with_supports(remaining: np.ndarray, occ: np.ndarray,
                             *, shell_thickness: int,
                             floor_spacing: int, column_spacing: int,
@@ -112,11 +118,14 @@ def _hollow_with_supports(remaining: np.ndarray, occ: np.ndarray,
         for y in range(0, Y, max(1, floor_spacing)):
             keep[y] |= remaining[y]
     # Column supports at each (x, z) modulo `column_spacing`.  A column
-    # is a single-cell vertical strip through occ.
+    # is a 2x2-stud vertical strip through occ wherever the grid has room
+    # (clipped to 2x1 / 1x1 at the far edge), so each course of the column
+    # has clutch on more than one stud and the 2x2x5 tall brick fits it.
     if column_spacing > 0:
         for x in range(0, X, max(1, column_spacing)):
             for z in range(0, Z, max(1, column_spacing)):
-                keep[:, x, z] |= remaining[:, x, z]
+                col = np.s_[:, x:x + _COLUMN_STUDS, z:z + _COLUMN_STUDS]
+                keep[col] |= remaining[col]
     return keep
 
 
@@ -151,53 +160,91 @@ def _mark_covered(shape_yxz: tuple[int, int, int],
 # Brick promotion (3-plate stacks)
 # ---------------------------------------------------------------------------
 
-# Interior structural bricks by (height × area) descending.  brick_tall
-# variants (2454, 30360) are 15 plates tall = 5 real bricks in a single
-# part — massive part-count reduction on load-bearing columns.
+# Interior structural bricks.  brick_tall variants (2454, 30360) are 15
+# plates tall = 5 real bricks in a single part — massive part-count
+# reduction on load-bearing columns.
 _INTERIOR_TALL_BRICKS = [
     ("30360.dat", (2, 2), 15),   # Brick 2x2x5 = 15 plates tall
     ("2454.dat",  (2, 1), 15),   # Brick 1x2x5
 ]
+# Standard 3-plate bricks, ordered by footprint AREA descending so the
+# greedy really is biggest-first.  Ties go to the 2-wide brick, which has
+# clutch across two rows of studs.
 _INTERIOR_BRICKS = [
-    ("3006.dat", (10, 2)),   # Brick 2x10
-    ("3007.dat", (8, 2)),    # Brick 2x8
-    ("2465.dat", (16, 1)),   # Brick 1x16
-    ("6112.dat", (12, 1)),   # Brick 1x12
-    ("3008.dat", (8, 1)),    # Brick 1x8
-    ("3001.dat", (4, 2)),    # Brick 2x4
-    ("2456.dat", (6, 2)),    # Brick 2x6
-    ("3003.dat", (2, 2)),    # Brick 2x2
-    ("3009.dat", (6, 1)),
-    ("3010.dat", (4, 1)),
-    ("3622.dat", (3, 1)),
-    ("3004.dat", (2, 1)),
-    ("3005.dat", (1, 1)),
+    ("3006.dat", (10, 2)),   # Brick 2x10  (20)
+    ("3007.dat", (8, 2)),    # Brick 2x8   (16)
+    ("2465.dat", (16, 1)),   # Brick 1x16  (16)
+    ("2456.dat", (6, 2)),    # Brick 2x6   (12)
+    ("6112.dat", (12, 1)),   # Brick 1x12  (12)
+    ("3001.dat", (4, 2)),    # Brick 2x4   (8)
+    ("3008.dat", (8, 1)),    # Brick 1x8   (8)
+    ("3009.dat", (6, 1)),    # Brick 1x6   (6)
+    ("3003.dat", (2, 2)),    # Brick 2x2   (4)
+    ("3010.dat", (4, 1)),    # Brick 1x4   (4)
+    ("3622.dat", (3, 1)),    # Brick 1x3   (3)
+    ("3004.dat", (2, 1)),    # Brick 1x2   (2)
+    ("3005.dat", (1, 1)),    # Brick 1x1   (1)
 ]
+
+
+def _course_parity(y: int) -> int:
+    """0 for even courses, 1 for odd — course index counted in bricks from
+    the foundation (y = 0)."""
+    return (y // _COURSE_PLATES) % 2
+
+
+def _staggered_scan(parity: int, orientations: list[tuple[int, int, int]],
+                     X: int, Z: int):
+    """Yield (pw, pd, rot, xs, zs) for one course.
+
+    Odd courses reverse the orientation order (long axis along z instead
+    of x) and roll the scan start by one stud, the same running-bond trick
+    `pack.py` uses, so brick seams on consecutive courses don't coincide
+    and the fill is bonded instead of a set of independent stacks.
+    """
+    orients = list(orientations)
+    if parity:
+        orients.reverse()
+    for pw, pd, rot in orients:
+        xs = list(range(X - pw + 1))
+        zs = list(range(Z - pd + 1))
+        if parity:
+            xs = xs[1:] + xs[:1]
+            zs = zs[1:] + zs[:1]
+        yield pw, pd, rot, xs, zs
 
 
 def _promote_interior_bricks(remaining: np.ndarray, color_idx: int
                                ) -> list[Placement]:
-    """Biggest-first brick promotion.
+    """Biggest-first brick promotion with a running bond between courses.
 
     Two passes:
-      1. brick_tall (15 plates tall) — massive load-bearing columns
-      2. brick (3 plates tall) — standard walls
+      1. brick_tall (15 plates tall) — load-bearing columns.  Only placed
+         on course boundaries (y % 3 == 0 from the foundation) so their
+         top seam lines up with the regular courses around them.
+      2. brick (3 plates tall) — standard walls, staggered per course.
     """
     Y, X, Z = remaining.shape
     processed = np.zeros_like(remaining)
     out: list[Placement] = []
 
-    def _try_promote(ldraw: str, fw: int, fd: int, height: int) -> None:
+    def _try_promote(ldraw: str, fw: int, fd: int, height: int,
+                     *, course_aligned: bool) -> None:
         part = part_by_ldraw(ldraw)
         if part is None:
             return
         orientations = [(fw, fd, 0)]
         if fw != fd:
             orientations.append((fd, fw, 90))
-        for pw, pd, rot in orientations:
-            for y in range(Y - height + 1):
-                for x in range(X - pw + 1):
-                    for z in range(Z - pd + 1):
+        for y in range(Y - height + 1):
+            if course_aligned and y % _COURSE_PLATES:
+                continue
+            if not remaining[y:y + height].any():
+                continue
+            for pw, pd, rot, xs, zs in _staggered_scan(
+                    _course_parity(y), orientations, X, Z):
+                for x in xs:
+                    for z in zs:
                         slab_slice = np.s_[y:y + height, x:x + pw, z:z + pd]
                         if processed[slab_slice].any():
                             continue
@@ -210,10 +257,10 @@ def _promote_interior_bricks(remaining: np.ndarray, color_idx: int
 
     # PASS 1: 15-plate-tall bricks (5-brick columns in one part).
     for ldraw, (fw, fd), height in _INTERIOR_TALL_BRICKS:
-        _try_promote(ldraw, fw, fd, height)
+        _try_promote(ldraw, fw, fd, height, course_aligned=True)
     # PASS 2: standard 3-plate-tall bricks.
     for ldraw, (fw, fd) in _INTERIOR_BRICKS:
-        _try_promote(ldraw, fw, fd, 3)
+        _try_promote(ldraw, fw, fd, _COURSE_PLATES, course_aligned=False)
 
     # Update remaining in place for the plate pass.
     remaining &= ~processed
@@ -259,13 +306,21 @@ def _pack_interior_plates(remaining: np.ndarray, color_idx: int
         if not layer.any():
             continue
         filled = ~layer.copy()
+        # Plates alternate scan start per layer too, so a stack of plate
+        # layers is bonded rather than a column of identical tilings.
+        parity = y % 2
         for pw, pd in _INTERIOR_PLATES:
             part = lookup.get((pw, pd))
             if part is None:
                 continue
             rot = 0 if (pw, pd) == part.footprint else 90
-            for x in range(X - pw + 1):
-                for z in range(Z - pd + 1):
+            xs = list(range(X - pw + 1))
+            zs = list(range(Z - pd + 1))
+            if parity:
+                xs = xs[1:] + xs[:1]
+                zs = zs[1:] + zs[:1]
+            for x in xs:
+                for z in zs:
                     if filled[x, z]:
                         continue
                     if filled[x:x + pw, z:z + pd].any():
