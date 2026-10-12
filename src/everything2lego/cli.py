@@ -28,12 +28,15 @@ console = Console()
 
 def _write_outputs(placements, out_dir: Path, *, model_name: str, report: dict) -> dict[str, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
-    ldr = io_ldraw.write_ldr(placements, out_dir / "model.ldr", model_name=model_name)
+    placements = list(placements)
+    # One build-step grouping shared by the LDraw file and the PDF.
+    steps = instructions.plan_steps(placements)
+    ldr = io_ldraw.write_ldr(placements, out_dir / "model.ldr", model_name=model_name, steps=steps)
     xml = io_bricklink.write_wanted_list(placements, out_dir / "wanted.xml")
     view_dir = out_dir / "viewer"
     viewer_index = viewer_export.write_viewer(placements, view_dir, report=report)
     order = instructions._painter_order(placements)
-    pdf = instructions.write_pdf(placements, out_dir / "instructions.pdf", order=order)
+    pdf = instructions.write_pdf(placements, out_dir / "instructions.pdf", order=order, steps=steps)
     preview = out_dir / "preview.png"
     instructions._render_step(placements, set(), (1400, 1000), instructions._bounds(placements),
                               order=order).save(preview)

@@ -1,12 +1,17 @@
 """Step-by-step PDF build instructions.
 
 Approach:
-- Sort placements bottom-up into build steps (one step per plate-layer).
+- Sort placements bottom-up and group consecutive plate-layers into build
+  steps with a part budget (see `plan_steps`). A layer is never split across
+  steps, so every step's parts rest only on parts from earlier steps.
 - Render each step as an isometric painter's-algorithm image with the current
   model in full color and the "just added" pieces outlined in bright yellow.
   Draw order is a topological sort of "is behind" over every pair of parts
   whose projections overlap, so tall and long parts occlude correctly.
-- Assemble the sequence of PNGs into a PDF using reportlab.
+- Follow each step image with a top-view placement plan per plate level that
+  gained parts, tiled across pages when the model is too wide to keep the
+  cells legible, plus a numbered part inventory.
+- Assemble the pages into a PDF using reportlab.
 """
 
 from __future__ import annotations
@@ -520,25 +525,76 @@ def _render_step(all_so_far: list[Placement], new: set[int], size: tuple[int, in
     return img
 
 
+DEFAULT_STEP_BUDGET = 40
+"""Upper bound on new parts per build step (layers are merged up to it)."""
+
+MIN_PLAN_CELL = 14.0
+"""Smallest stud cell (in points) drawn on a placement plan before tiling."""
+
+MAX_PLAN_CELL = 24.0
+"""Largest stud cell drawn on a placement plan (bigger only wastes paper)."""
+
+
+def _layers(placements: list[Placement]) -> list[list[Placement]]:
+    """Placements grouped by plate level, bottom-up."""
+    by_layer: dict[int, list[Placement]] = {}
+    for p in placements:
+        by_layer.setdefault(p.y_plate, []).append(p)
+    return [by_layer[y] for y in sorted(by_layer)]
+
+
+def plan_steps(placements: Iterable[Placement],
+               budget: int = DEFAULT_STEP_BUDGET) -> list[list[Placement]]:
+    """Group placements bottom-up into build steps of roughly `budget` parts.
+
+    Consecutive plate layers are merged into one step while the step stays
+    within the budget. A layer is never split: a layer with more parts than
+    the budget becomes a step of its own, and every step holds at least one
+    layer. Because steps are made of consecutive layers, each step's parts
+    only rest on parts from earlier steps.
+    """
+    budget = max(1, int(budget))
+    steps: list[list[Placement]] = []
+    current: list[Placement] = []
+    for layer in _layers(list(placements)):
+        if current and len(current) + len(layer) > budget:
+            steps.append(current)
+            current = []
+        current.extend(layer)
+    if current:
+        steps.append(current)
+    return steps
+
+
+def _step_levels(step: list[Placement]) -> list[int]:
+    return sorted({p.y_plate for p in step})
+
+
 def write_pdf(placements: Iterable[Placement], out_path: str | Path,
               *, page_size: tuple[float, float] = letter,
               image_size: tuple[int, int] = (1400, 1000),
-              order: list[Item] | None = None) -> Path:
-    """Write step-by-step PDF instructions grouped by plate-level.  Pass
-    ``order`` (from `_painter_order`) to reuse a draw order computed once."""
+              order: list[Item] | None = None,
+              steps: list[list[Placement]] | None = None,
+              budget: int = DEFAULT_STEP_BUDGET) -> Path:
+    """Write step-by-step PDF instructions.
+
+    `order` (from `_painter_order`) reuses a draw order computed once;
+    `steps` (from `plan_steps`) lets callers share one grouping between the
+    PDF and the LDraw file.  Both are computed here when omitted.
+    """
     placements = list(placements)
     if not placements:
         raise ValueError("No placements to write")
+    if steps is None:
+        steps = plan_steps(placements, budget)
+    steps = [list(s) for s in steps if s]
+    if not steps:
+        raise ValueError("No steps to write")
 
     view_bounds = _bounds(placements)
     if order is None:
         order = _painter_order(placements)
-
-    # Group by y_plate; one step per layer.
-    by_layer: dict[int, list[Placement]] = {}
-    for p in placements:
-        by_layer.setdefault(p.y_plate, []).append(p)
-    layers = sorted(by_layer.keys())
+    n_layers = len({p.y_plate for p in placements})
 
     out_path = Path(out_path)
     c = canvas.Canvas(str(out_path), pagesize=page_size)
@@ -549,15 +605,15 @@ def write_pdf(placements: Iterable[Placement], out_path: str | Path,
     c.drawCentredString(page_w / 2, page_h - 2 * inch, "everything2lego")
     c.setFont("Helvetica", 14)
     c.drawCentredString(page_w / 2, page_h - 2.6 * inch,
-                        f"{len(placements)} parts, {len(layers)} layers")
+                        f"{len(placements)} parts in {len(steps)} steps "
+                        f"({n_layers} plate layers)")
     c.setFont("Helvetica", 10)
     c.drawCentredString(page_w / 2, 1 * inch,
                         "Build bottom-up. Bricks added this step are highlighted in yellow.")
     c.showPage()
 
     running: list[Placement] = []
-    for step_num, y in enumerate(layers, start=1):
-        newly = by_layer[y]
+    for step_num, newly in enumerate(steps, start=1):
         running.extend(newly)
         new_ids = {id(p) for p in newly}
         img = _render_step(running, new_ids, image_size, view_bounds, order=order)
@@ -567,10 +623,14 @@ def write_pdf(placements: Iterable[Placement], out_path: str | Path,
         buf.seek(0)
         img_reader = _pil_to_reader(buf)
 
+        levels = _step_levels(newly)
+        layer_text = (f"layer {levels[0]}" if len(levels) == 1
+                      else f"layers {levels[0]}-{levels[-1]}")
+
         # Page header.
         c.setFont("Helvetica-Bold", 16)
         c.drawString(0.6 * inch, page_h - 0.7 * inch,
-                     f"Step {step_num} of {len(layers)} — layer {y}")
+                     f"Step {step_num} of {len(steps)} — {layer_text}")
         c.setFont("Helvetica", 10)
         c.drawString(0.6 * inch, page_h - 0.95 * inch,
                      f"{len(newly)} new part(s) this step, {len(running)} total")
@@ -590,55 +650,152 @@ def write_pdf(placements: Iterable[Placement], out_path: str | Path,
         c.drawImage(img_reader, img_x, img_y, width=draw_w, height=draw_h,
                     preserveAspectRatio=True, mask="auto")
         c.showPage()
-        _write_plan(c, newly, running, y, step_num, view_bounds, page_w, page_h)
+        _write_plan(c, newly, running, levels, step_num, view_bounds, page_w, page_h)
 
     c.save()
     return out_path
 
 
-def _write_plan(c, newly, running, y, step, bounds, page_w, page_h):
-    """A stud-coordinate plan and numbered inventory make hidden pieces locatable."""
+def _plan_tiles(width: int, depth: int, avail_w: float, avail_h: float
+                ) -> tuple[float, list[tuple[int, int, int, int]]]:
+    """Cell size and the (x0, x1, z0, z1) stud ranges of each plan tile.
+
+    The plan may use the whole available area (cells capped at MAX_PLAN_CELL
+    so small models do not waste paper); when that would still shrink the
+    cells below MIN_PLAN_CELL the grid is cut into tiles that each fit on one
+    page.
+    """
+    width, depth = max(1, width), max(1, depth)
+    cell = min(avail_w / width, avail_h / depth, MAX_PLAN_CELL)
+    if cell >= MIN_PLAN_CELL:
+        return cell, [(0, width, 0, depth)]
+    cell = MIN_PLAN_CELL
+    tile_w = max(1, int(avail_w // cell))
+    tile_d = max(1, int(avail_h // cell))
+    tiles = []
+    for z0 in range(0, depth, tile_d):
+        for x0 in range(0, width, tile_w):
+            tiles.append((x0, min(width, x0 + tile_w), z0, min(depth, z0 + tile_d)))
+    return cell, tiles
+
+
+_PLAN_PAGE_TOP = 50        # baseline of the page title
+_PLAN_FLOW_TOP = 95        # distance from the page top to the first plan block
+_PLAN_BOTTOM_MARGIN = 55   # lowest y a plan or inventory row may reach
+_PLAN_BLOCK_HEADER = 30    # sub-header + stud-number row above each grid
+_PLAN_BLOCK_GAP = 30
+_INVENTORY_ROW = 17
+
+
+def _write_plan(c, newly, running, levels, step, bounds, page_w, page_h):
+    """A stud-coordinate plan and numbered inventory make hidden pieces locatable.
+
+    `levels` is the plate level (or list of levels) of this step; one plan is
+    drawn per level that has new parts. Plans flow down the page and spill
+    onto further pages; a model too wide for legible cells is cut into tiles
+    whose stud ranges are named in their headers. The inventory follows the
+    last plan, continuing on extra pages when a step has many SKUs.
+    """
+    if isinstance(levels, int):
+        levels = [levels]
     pal = palette()
+    new_ids = {id(p) for p in newly}
     keys = sorted({(p.part.ldraw, p.color_idx) for p in newly})
     numbers = {key: i + 1 for i, key in enumerate(keys)}
     quantities = Counter((p.part.ldraw, p.color_idx) for p in newly)
     parts = {p.part.ldraw: p.part for p in newly}
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(42, page_h - 48, f"Step {step}: placement plan")
-    c.setFont("Helvetica", 10)
-    c.drawString(42, page_h - 66, f"Top view at plate level {y}. Numbers match the parts below.")
-    width = (bounds[1] - bounds[0]) / bricks.MM_PER_STUD
-    depth = (bounds[5] - bounds[4]) / bricks.MM_PER_STUD
-    cell = min((page_w - 110) / width, 290 / depth)
-    x0 = (page_w - width * cell) / 2
-    top = page_h - 95
-    for x in range(int(width)):
+
+    width = int(round((bounds[1] - bounds[0]) / bricks.MM_PER_STUD))
+    depth = int(round((bounds[5] - bounds[4]) / bricks.MM_PER_STUD))
+    x_origin = bounds[0] / bricks.MM_PER_STUD
+    z_origin = bounds[4] / bricks.MM_PER_STUD
+    avail_h = page_h - _PLAN_FLOW_TOP - _PLAN_BLOCK_HEADER - _PLAN_BOTTOM_MARGIN
+    cell, tiles = _plan_tiles(width, depth, page_w - 110, avail_h)
+    tiled = len(tiles) > 1
+
+    def page_title(subtitle):
+        c.setFillColorRGB(0, 0, 0)
+        c.setFont("Helvetica-Bold", 16)
+        c.drawString(42, page_h - 48, f"Step {step}: placement plan")
+        c.setFont("Helvetica", 10)
+        c.drawString(42, page_h - 66, subtitle)
+        return page_h - _PLAN_FLOW_TOP
+
+    def draw_tile(y, tile, cursor):
+        """Draw one tile of the level-y plan below `cursor`; return the y below it."""
+        tx0, tx1, tz0, tz1 = tile
+        tile_w, tile_d = tx1 - tx0, tz1 - tz0
+        x0 = (page_w - tile_w * cell) / 2
+        c.setFillColorRGB(0, 0, 0)
+        c.setFont("Helvetica-Bold", 11)
+        title = f"Plate level {y}"
+        if tiled:
+            title += f"  —  studs x {tx0}-{tx1 - 1}, z {tz0}-{tz1 - 1}"
+        c.drawString(42, cursor - 10, title)
+        top = cursor - _PLAN_BLOCK_HEADER
         c.setFillColorRGB(0.25, 0.25, 0.25)
         c.setFont("Helvetica", min(8, cell * 0.6))
-        c.drawCentredString(x0 + (x + 0.5) * cell, top + 5, str(x))
-    for z in range(int(depth)):
-        c.drawRightString(x0 - 5, top - (z + 0.65) * cell, str(z))
-    for p in running:
-        if p.y_plate > y or p.y_plate + p.part.height_units <= y:
-            continue
-        is_new = p.y_plate == y
-        rgb = pal[p.color_idx].rgb if is_new else (222, 226, 222)
-        c.setFillColorRGB(*(v / 255 for v in rgb))
-        c.setStrokeColorRGB(0.25, 0.25, 0.25)
-        px = x0 + p.x_stud * cell - bounds[0] / bricks.MM_PER_STUD * cell
-        pz = top - (p.z_stud + p.d_world) * cell + bounds[4] / bricks.MM_PER_STUD * cell
-        c.rect(px, pz, p.w_world * cell, p.d_world * cell, fill=1)
-        if is_new:
-            brightness = sum(rgb) / 3
-            c.setFillColorRGB(*((0, 0, 0) if brightness > 145 else (1, 1, 1)))
-            c.setFont("Helvetica-Bold", min(10, cell * 0.6))
-            c.drawCentredString(px + p.w_world * cell / 2, pz + p.d_world * cell / 2 - 3,
-                                str(numbers[(p.part.ldraw, p.color_idx)]))
-    cursor = top - depth * cell - 35
-    for key in keys:
-        if cursor < 55:
+        for x in range(tx0, tx1):
+            c.drawCentredString(x0 + (x - tx0 + 0.5) * cell, top + 4, str(x))
+        for z in range(tz0, tz1):
+            c.drawRightString(x0 - 5, top - (z - tz0 + 0.65) * cell, str(z))
+        grid_bottom = top - tile_d * cell
+        # Clip to the tile so parts straddling its edge are cut cleanly.
+        c.saveState()
+        clip = c.beginPath()
+        clip.rect(x0, grid_bottom, tile_w * cell, tile_d * cell)
+        c.clipPath(clip, stroke=0, fill=0)
+        for p in running:
+            if p.y_plate > y or p.y_plate + p.part.height_units <= y:
+                continue
+            px_s = p.x_stud - x_origin
+            pz_s = p.z_stud - z_origin
+            if (px_s + p.w_world <= tx0 or px_s >= tx1
+                    or pz_s + p.d_world <= tz0 or pz_s >= tz1):
+                continue
+            is_new = p.y_plate == y and id(p) in new_ids
+            rgb = pal[p.color_idx].rgb if is_new else (222, 226, 222)
+            c.setFillColorRGB(*(v / 255 for v in rgb))
+            c.setStrokeColorRGB(0.25, 0.25, 0.25)
+            px = x0 + (px_s - tx0) * cell
+            pz = top - (pz_s - tz0 + p.d_world) * cell
+            c.rect(px, pz, p.w_world * cell, p.d_world * cell, fill=1)
+            if is_new:
+                brightness = sum(rgb) / 3
+                c.setFillColorRGB(*((0, 0, 0) if brightness > 145 else (1, 1, 1)))
+                c.setFont("Helvetica-Bold", min(10, cell * 0.6))
+                # Label the visible portion of the part.
+                vx0, vx1 = max(px, x0), min(px + p.w_world * cell, x0 + tile_w * cell)
+                vz0, vz1 = max(pz, grid_bottom), min(pz + p.d_world * cell, top)
+                c.drawCentredString((vx0 + vx1) / 2, (vz0 + vz1) / 2 - 3,
+                                    str(numbers[(p.part.ldraw, p.color_idx)]))
+        c.restoreState()
+        return grid_bottom
+
+    subtitle = ("Top view per plate level. Grey = already placed; "
+                "numbers match the parts list.")
+    plans = [(y, tile) for y in levels
+             if any(p.y_plate == y for p in newly) for tile in tiles]
+    cursor = page_title(subtitle)
+    for y, tile in plans:
+        block_h = _PLAN_BLOCK_HEADER + (tile[3] - tile[2]) * cell
+        if cursor < page_h - _PLAN_FLOW_TOP and cursor - block_h < _PLAN_BOTTOM_MARGIN:
             c.showPage()
-            cursor = page_h - 50
+            cursor = page_title(subtitle)
+        cursor = draw_tile(y, tile, cursor) - _PLAN_BLOCK_GAP
+
+    # Inventory: under the last plan when at least a few rows fit there.
+    if cursor - 28 - 3 * _INVENTORY_ROW < _PLAN_BOTTOM_MARGIN:
+        c.showPage()
+        cursor = page_h - _PLAN_PAGE_TOP
+    c.setFillColorRGB(0, 0, 0)
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(42, cursor, f"Step {step}: parts")
+    cursor -= 28
+    for key in keys:
+        if cursor < _PLAN_BOTTOM_MARGIN:
+            c.showPage()
+            cursor = page_h - _PLAN_PAGE_TOP
             c.setFillColorRGB(0, 0, 0)
             c.setFont("Helvetica-Bold", 14)
             c.drawString(42, cursor, f"Step {step}: parts continued")
@@ -650,7 +807,7 @@ def _write_plan(c, newly, running, y, step, bounds, page_w, page_h):
         c.setFont("Helvetica", 10)
         c.drawString(62, cursor,
                      f"{numbers[key]}.  {quantities[key]} x {parts[part_id].name} ({parts[part_id].bl}) - {pal[color_idx].name}")
-        cursor -= 17
+        cursor -= _INVENTORY_ROW
     c.showPage()
 
 
