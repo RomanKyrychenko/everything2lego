@@ -32,9 +32,11 @@ def _write_outputs(placements, out_dir: Path, *, model_name: str, report: dict) 
     xml = io_bricklink.write_wanted_list(placements, out_dir / "wanted.xml")
     view_dir = out_dir / "viewer"
     viewer_index = viewer_export.write_viewer(placements, view_dir, report=report)
-    pdf = instructions.write_pdf(placements, out_dir / "instructions.pdf")
+    order = instructions._painter_order(placements)
+    pdf = instructions.write_pdf(placements, out_dir / "instructions.pdf", order=order)
     preview = out_dir / "preview.png"
-    instructions._render_step(placements, set(), (1400, 1000), instructions._bounds(placements)).save(preview)
+    instructions._render_step(placements, set(), (1400, 1000), instructions._bounds(placements),
+                              order=order).save(preview)
     report_path = out_dir / "report.json"
     report_path.write_text(json.dumps(report, indent=2) + "\n")
     stl = io_stl.write_stl(placements, out_dir / "lego.stl")
