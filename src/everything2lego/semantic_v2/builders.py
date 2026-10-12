@@ -78,6 +78,10 @@ class RegionBuilder(ABC):
     transform.
     """
 
+    # Cells other builders have already filled, set by the pipeline before
+    # each build; a builder that can pack around them should.
+    claimed: Optional[np.ndarray] = None
+
     def __init__(self, config: BuilderConfig | None = None) -> None:
         self.config = config or BuilderConfig()
 
@@ -126,10 +130,24 @@ class FoundationBuilder(RegionBuilder):
 
     def build(self, region: Region, target: MeshTarget) -> list[Placement]:
         assert isinstance(region, PlanarRegion)
+        # The ground slab sits at plate 0; any other upward-facing plane (a
+        # flat roof, a terrace) is the top plate layer just under its surface.
+        if isinstance(region, FoundationRegion):
+            y_plate = 0
+        else:
+            # The highest occupied plate under the plane, from the grid: the
+            # mesh's top maps to a fraction of a plate, the grid to a whole.
+            occ = target.voxel_grid.occupied()
+            mn, mx = (target.mm_point_to_voxel(b) for b in region.bounds)
+            x0, x1 = int(np.floor(min(mn[0], mx[0]))), int(np.floor(max(mn[0], mx[0]))) + 1
+            z0, z1 = int(np.floor(min(mn[2], mx[2]))), int(np.floor(max(mn[2], mx[2]))) + 1
+            block = occ[:, max(0, x0):x1, max(0, z0):z1]
+            rows = np.flatnonzero(block.any(axis=(1, 2)))
+            y_plate = int(rows.max()) if len(rows) else max(0, int(np.ceil(mx[1])) - 1)
         return _pack_horizontal_slab(
             region, target=target,
             part_family=self._plate_parts(),
-            y_plate=0,  # ground level
+            y_plate=y_plate,
             config=self.config,
         )
 
@@ -161,6 +179,14 @@ class PlanarWallBuilder(RegionBuilder):
                                      min_delta_e=self.config.opening_delta_e)
             if openings:
                 reserved = reserved_cells(openings, frame)
+        if self.claimed is not None:
+            from .openings import wall_frame
+            frame = wall_frame(region, target)
+            taken = np.zeros((frame.length, frame.height), dtype=bool)
+            for c in range(frame.length):
+                x, z = (frame.origin + c, frame.other) if frame.axis_x else (frame.other, frame.origin + c)
+                taken[c] = self.claimed[frame.y0:frame.y0 + frame.height, x, z]
+            reserved = taken if reserved is None else (reserved | taken)
         return openings + _pack_vertical_wall(
             region, target=target,
             part_family=self._brick_parts(),
@@ -289,21 +315,23 @@ def _pack_horizontal_slab(region: PlanarRegion, *,
     """
     mn_vox = target.mm_point_to_voxel(region.bounds[0])
     mx_vox = target.mm_point_to_voxel(region.bounds[1])
+    # From the first to the last stud the bounds touch: a bound that lands
+    # on a stud boundary still touches that stud (the wall under it).
     x0 = int(np.floor(min(mn_vox[0], mx_vox[0])))
     z0 = int(np.floor(min(mn_vox[2], mx_vox[2])))
-    x1 = int(np.ceil(max(mn_vox[0], mx_vox[0])))
-    z1 = int(np.ceil(max(mn_vox[2], mx_vox[2])))
+    x1 = int(np.floor(max(mn_vox[0], mx_vox[0]))) + 1
+    z1 = int(np.floor(max(mn_vox[2], mx_vox[2]))) + 1
     W, D = max(1, x1 - x0), max(1, z1 - z0)
 
-    # Coverage mask: which stud cells this region needs.
+    # Coverage mask: the cells of this plate layer the model occupies within
+    # the region's bounds.  The region's points are facet vertices, which on
+    # a finely meshed face lie on a lattice and miss most cells.
+    occupied = target.voxel_grid.occupied()
+    H, X, Z = occupied.shape
     mask = np.zeros((W, D), dtype=bool)
-    for p in region.points:
-        v = target.mm_point_to_voxel(p)
-        ix = int(np.floor(v[0])) - x0
-        iz = int(np.floor(v[2])) - z0
-        if 0 <= ix < W and 0 <= iz < D:
-            mask[ix, iz] = True
-
+    if 0 <= y_plate < H:
+        xs, zs = slice(max(0, x0), min(X, x0 + W)), slice(max(0, z0), min(Z, z0 + D))
+        mask[xs.start - x0:xs.stop - x0, zs.start - z0:zs.stop - z0] = occupied[y_plate, xs, zs]
     if not mask.any():
         return []
 
@@ -341,27 +369,23 @@ def _pack_vertical_wall(region: PlanarRegion, *,
     `reserved` is a (length, height) mask of cells that openings occupy;
     a course leaves out every stud column an opening crosses in it.
     """
-    mn_vox = target.mm_point_to_voxel(region.bounds[0])
-    mx_vox = target.mm_point_to_voxel(region.bounds[1])
+    from .openings import wall_frame
+    frame = wall_frame(region, target)
+    axis_x, origin_stud, other_origin = frame.axis_x, frame.origin, frame.other
+    y_bottom, length_studs, height_plates = frame.y0, frame.length, frame.height
+    y_top = y_bottom + height_plates
+    occupied = target.voxel_grid.occupied()
+    H, X, Z = occupied.shape
 
-    span_x = float(abs(mx_vox[0] - mn_vox[0]))
-    span_z = float(abs(mx_vox[2] - mn_vox[2]))
-    axis_x = span_x >= span_z
-    length_studs = max(1, int(np.ceil(span_x if axis_x else span_z)))
-
-    y_bottom = int(np.floor(min(mn_vox[1], mx_vox[1])))
-    y_top = int(np.ceil(max(mn_vox[1], mx_vox[1])))
-    height_plates = max(1, y_top - y_bottom)
-
-    coverage = np.zeros(length_studs, dtype=bool)
-    origin_stud = int(np.floor(min(mn_vox[0], mx_vox[0]) if axis_x
-                                 else min(mn_vox[2], mx_vox[2])))
-    for p in region.points:
-        v = target.mm_point_to_voxel(p)
-        c = int(np.floor(v[0] if axis_x else v[2])) - origin_stud
-        if 0 <= c < length_studs:
-            coverage[c] = True
-    if not coverage.any():
+    # Which (stud, plate) cells of the wall the model occupies.  The region's
+    # points are the facet's vertices, which on a finely meshed wall lie on
+    # a lattice and miss most stud columns; the voxel grid knows every cell.
+    cells = np.zeros((length_studs, height_plates), dtype=bool)
+    for c in range(length_studs):
+        x, z = (origin_stud + c, other_origin) if axis_x else (other_origin, origin_stud + c)
+        if 0 <= x < X and 0 <= z < Z:
+            cells[c] = occupied[y_bottom:y_top, x, z]
+    if not cells.any():
         return []
 
     footprints = _distinct_footprints(part_family)
@@ -372,29 +396,49 @@ def _pack_vertical_wall(region: PlanarRegion, *,
     color_idx = _dominant_palette(region.colors)
     part_lookup = _lookup_parts_by_footprint(part_family)
 
-    other_origin = int(np.floor((mn_vox[2] if axis_x else mn_vox[0])))
     other_axis_ext = 1  # 1-stud thick wall for v1
     out: list[Placement] = []
     course_plates = 3
-    n_courses = height_plates // course_plates
-    if n_courses == 0:
-        n_courses = 1
-    for course in range(n_courses):
-        y = y_bottom + course * course_plates
+    plate_family = [p for p in catalog() if p.shape == "plate"]
+    plate_footprints = _distinct_footprints(plate_family)
+    plate_packer = MILPPacker(parts=plate_footprints,
+                              diversity_weight=config.diversity_weight,
+                              time_limit_s=config.milp_time_limit_s)
+    plate_lookup = _lookup_parts_by_footprint(plate_family)
+    # Full courses are bricks; a partial course at the top is plates, one
+    # layer at a time, so the wall reaches the model's top plate.
+    layers: list[tuple[int, int]] = []
+    y = y_bottom
+    while y < y_top:
+        hy = course_plates if y + course_plates <= y_top else 1
+        layers.append((y, hy))
+        y += hy
+    for y, hy in layers:
+        y_rel = y - y_bottom
         mask = np.zeros((length_studs, other_axis_ext), dtype=bool)
-        mask[coverage, 0] = True
+        mask[:, 0] = cells[:, y_rel:y_rel + hy].any(axis=1)
         if reserved is not None:
-            y_rel = y - y_bottom
-            blocked = reserved[:, y_rel:y_rel + course_plates].any(axis=1)
+            # A full course needs all three plates free; a plate layer one.
+            blocked = reserved[:, y_rel:y_rel + hy].any(axis=1)
             mask[blocked, 0] = False
         if not mask.any():
             continue
-        result = packer.pack(mask)
+        bricks_here = hy == course_plates
+        # The packer tiles the same mask the same way every time, which
+        # stacks identical courses with their seams in line.  Odd courses
+        # pack the mirrored mask and map the result back, so a wall is
+        # bonded like a real one wherever its tiling is asymmetric.
+        mirror = (y_rel // course_plates) % 2 == 1
+        result = (packer if bricks_here else plate_packer).pack(mask[::-1] if mirror else mask)
         for pl in result.placements:
-            fw, fd = footprints[pl.part_index]
-            part = part_lookup.get((fw, fd)) or part_lookup.get((fd, fw))
+            fw, fd = (footprints if bricks_here else plate_footprints)[pl.part_index]
+            lookup = part_lookup if bricks_here else plate_lookup
+            part = lookup.get((fw, fd)) or lookup.get((fd, fw))
             if part is None:
                 continue
+            if mirror:
+                pl = Placement2D(part_index=pl.part_index, x=length_studs - pl.x - pl.w,
+                                 z=pl.z, w=pl.w, d=pl.d, rotation_deg=pl.rotation_deg)
             if axis_x:
                 px, pz = origin_stud + pl.x, other_origin
             else:

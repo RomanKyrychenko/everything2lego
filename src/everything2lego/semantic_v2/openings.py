@@ -50,19 +50,34 @@ class WallFrame:
 
 
 def wall_frame(region: PlanarRegion, target: MeshTarget) -> WallFrame:
-    """Where the wall sits on the stud grid (the same arithmetic the wall
-    builder uses, so openings and bricks agree on every cell)."""
+    """Where the wall sits on the stud grid; the wall builder and the
+    opening detector both use this, so they agree on every cell.
+
+    The stud columns run from the first to the last stud the wall's bounds
+    touch (a bound on a stud boundary still touches that stud, so a corner
+    column belongs to both walls that meet there), and the plates from the
+    lowest bound to the highest occupied plate in those columns: the mesh's
+    top maps to a fraction of a plate, the voxel grid to a whole one.
+    """
     mn = target.mm_point_to_voxel(region.bounds[0])
     mx = target.mm_point_to_voxel(region.bounds[1])
     span_x = float(abs(mx[0] - mn[0]))
     span_z = float(abs(mx[2] - mn[2]))
     axis_x = span_x >= span_z
-    length = max(1, int(np.ceil(span_x if axis_x else span_z)))
-    y0 = int(np.floor(min(mn[1], mx[1])))
-    y1 = int(np.ceil(max(mn[1], mx[1])))
-    origin = int(np.floor(min(mn[0], mx[0]) if axis_x else min(mn[2], mx[2])))
-    other = int(np.floor(mn[2] if axis_x else mn[0]))
-    return WallFrame(axis_x, origin, other, y0, length, max(1, y1 - y0))
+    occupied = target.voxel_grid.occupied()
+    H, X, Z = occupied.shape
+    lo_u, hi_u = ((min(mn[0], mx[0]), max(mn[0], mx[0])) if axis_x
+                  else (min(mn[2], mx[2]), max(mn[2], mx[2])))
+    origin = int(np.floor(lo_u))
+    last = min((X if axis_x else Z) - 1, int(np.floor(hi_u)))
+    length = max(1, last - origin + 1)
+    other = min((Z if axis_x else X) - 1, int(np.floor(mn[2] if axis_x else mn[0])))
+    y0 = max(0, int(np.floor(min(mn[1], mx[1]))))
+    columns = occupied[:, origin:origin + length, other] if axis_x \
+        else occupied[:, other, origin:origin + length]
+    rows = np.flatnonzero(columns[y0:].any(axis=1))
+    height = int(rows.max()) + 1 if len(rows) else max(1, int(np.ceil(max(mn[1], mx[1]))) - y0)
+    return WallFrame(axis_x, origin, other, y0, length, height)
 
 
 def wall_colour_grid(region: PlanarRegion, target: MeshTarget, frame: WallFrame,
