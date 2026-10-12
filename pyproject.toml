@@ -18,10 +18,32 @@ dependencies = [
     "scipy>=1.11",
     "networkx>=3.0",
     "pygltflib>=1.16",
+    # trimesh needs an R-tree for mesh containment / proximity queries
+    # (used by voxelisation and the semantic validation passes).
+    "rtree>=1.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+# Heavy photo -> 3D backends (Hunyuan3D, TripoSR, DUSt3R, U^2-Net).  Not
+# needed for the mesh -> LEGO pipeline or the test suite; tests that need
+# torch skip when it is absent.
+neural = [
+    "torch>=2.1",
+    "torchvision>=0.16",
+    "diffusers>=0.27",
+    "transformers>=4.38",
+    "huggingface_hub>=0.20",
+    "einops>=0.7",
+    "omegaconf>=2.3",
+    "timm>=0.9",
+    "scikit-image>=0.21",
+    "opencv-python-headless>=4.8",
+    "onnxruntime>=1.16",
+    "scikit-learn>=1.3",
+    "pymeshlab>=2023.12",
+    "pyyaml>=6.0",
+]
 
 [project.scripts]
 everything2lego = "everything2lego.cli:app"

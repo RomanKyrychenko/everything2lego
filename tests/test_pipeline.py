@@ -288,6 +288,7 @@ def test_neural_backends_registered():
 
 
 def test_dust3r_background_filter_removes_matching_colors():
+    pytest.importorskip("torch", reason="DUSt3R backend needs torch (pip install -e '.[neural]')")
     from everything2lego.backends import dust3r as _dust3r
     pts = np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [2.0, 2.0, 2.0]], dtype=np.float32)
     rgb = np.array([[100, 100, 100], [200, 40, 40], [98, 102, 101]], dtype=np.uint8)
@@ -298,6 +299,7 @@ def test_dust3r_background_filter_removes_matching_colors():
 
 
 def test_dust3r_outlier_filter_drops_far_points():
+    pytest.importorskip("torch", reason="DUSt3R backend needs torch (pip install -e '.[neural]')")
     from everything2lego.backends import dust3r as _dust3r
     rng = np.random.default_rng(0)
     pts = rng.normal(0, 1, size=(1000, 3)).astype(np.float32)
@@ -309,6 +311,7 @@ def test_dust3r_outlier_filter_drops_far_points():
 
 
 def test_dust3r_ground_snap_zeroes_bottom_and_drops_underground():
+    pytest.importorskip("torch", reason="DUSt3R backend needs torch (pip install -e '.[neural]')")
     from everything2lego.backends import dust3r as _dust3r
     rng = np.random.default_rng(1)
     pts = rng.uniform(0, 5, size=(500, 3)).astype(np.float32)

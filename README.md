@@ -39,12 +39,27 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
 ```
 
-Optional heavy deps for the photo → 3D backends:
+That installs the core mesh → LEGO pipeline plus `pytest`.  Nothing in it
+needs a GPU or PyTorch, so it works on a plain CI runner; the tests that
+touch the neural backends skip themselves when torch is absent.
+
+Extras (combine as `'.[dev,neural]'`):
+
+| extra    | what it adds                                                       |
+|----------|--------------------------------------------------------------------|
+| `dev`    | `pytest` — enough to run the whole suite                            |
+| `neural` | torch, torchvision, diffusers, transformers, einops, omegaconf, timm, scikit-image, opencv-python-headless, onnxruntime, scikit-learn, pymeshlab, pyyaml — the photo → 3D backends (Hunyuan3D, TripoSR, DUSt3R, U^2-Net) |
 
 ```bash
-.venv/bin/python -m pip install torch torchvision diffusers transformers \
-    einops omegaconf timm scikit-image opencv-python-headless onnxruntime \
-    scikit-learn pymeshlab pyyaml
+.venv/bin/python -m pip install -e '.[dev,neural]'
+```
+
+The interactive viewer's JavaScript bundle (`src/everything2lego/viewer/bundle.js`)
+is committed, so Node is only needed when you change `main.js`:
+
+```bash
+npm ci                    # three.js, lucide, esbuild, Playwright
+npm run build:viewer      # regenerate bundle.js (commit the result)
 ```
 
 External model checkpoints (~1.5 GB each) live on a directory you point at
@@ -249,9 +264,31 @@ tests/                          Pytest suite; regression tests for the packer,
 
 ## Testing
 
+Python suite (runs without torch; the three DUSt3R tests report as
+skipped unless the `neural` extra is installed):
+
 ```bash
-.venv/bin/python -m pytest tests/ -x
+.venv/bin/python -m pytest tests/ -q
 ```
+
+Viewer smoke test — rebuilds `bundle.js` in a temp dir and checks it matches
+the committed one, exports a small fixture scene with the Python package, then
+drives the exported page in headless Chromium at desktop, phone and 320px
+widths (orbit, step slider, auto-rotate, download links):
+
+```bash
+npm ci
+npx playwright install chromium   # once; or set CHROME_PATH to a Chrome/Chromium binary
+npm run test:viewer
+```
+
+The test finds the Python interpreter via `$PYTHON`, then `.venv/bin/python`,
+then `python3`.  Set `VIEWER_OUT=some/dir` to keep the fixture and the
+screenshots it takes.
+
+CI (`.github/workflows/ci.yml`) runs the Python suite on 3.10 and 3.12 and the
+viewer job (bundle up to date, Playwright Chromium) on every push and pull
+request.
 
 ---
 
