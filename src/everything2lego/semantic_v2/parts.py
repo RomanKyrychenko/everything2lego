@@ -209,55 +209,180 @@ def _match_names(colours: dict[int, tuple[int, int, int]], names: dict[str, str]
 
 # -- the built-in segmenter ---------------------------------------------------
 
-def segment_builtin(mesh: trimesh.Trimesh, *, colour_step: int = 40,
-                    normal_bins: int = 6, min_faces: int = 8) -> PartLabels:
-    """A part segmentation that needs no GPU: faces are grouped by
-    quantised colour and by which of six axis directions their normal is
-    closest to, then split into connected components over face adjacency;
-    components below `min_faces` join their largest neighbour.  It knows
-    nothing about objects, but on a building it separates walls from roof
-    from trim, and a window from the wall around it, which is what the
-    builders need."""
+def segment_builtin(mesh: trimesh.Trimesh, *, max_colours: int = 8,
+                    merge_delta_e: float = 16.0, normal_degrees: float = 12.0,
+                    smooth_passes: int = 2, min_fraction: float = 0.002,
+                    lightness_weight: float = 0.8, coplanar_delta_e: float = 28.0) -> PartLabels:
+    """A part segmentation that needs no GPU.
+
+    Built for meshes with a photo baked into their colours, where the same
+    paint comes out a different shade on every wall and every face carries
+    noise.  Face colours are taken to LAB, smoothed over their neighbours
+    (a median, `smooth_passes` times), and clustered globally (farthest-
+    point seeded k-means on up to `max_colours` centres, lightness weighted
+    down so shading splits fewer parts, centres closer than `merge_delta_e`
+    merged).  Faces are then grouped by colour cluster and by normal
+    (within `normal_degrees` of a seed, grown over adjacency), and
+    components below `min_fraction` of the faces join the neighbour they
+    touch most.  It knows nothing about objects, but on a building it
+    separates walls from roof from trim, and a window from the wall around
+    it, which is what the builders need.
+    """
+    from scipy.sparse import coo_matrix, csr_matrix
+    from scipy.sparse.csgraph import connected_components
+    from ..colors import _rgb_to_lab
+
+    F = len(mesh.faces)
     rgb = _face_colours(mesh)
     if rgb is None:
-        rgb = np.full((len(mesh.faces), 3), 128, dtype=np.int32)
-    colour_key = _quantise(rgb, colour_step)
-    n = np.asarray(mesh.face_normals)
-    axis = np.argmax(np.abs(n), axis=1)
-    sign = np.sign(n[np.arange(len(n)), axis])
-    normal_key = axis * 2 + (sign > 0)
-    key = np.column_stack([colour_key, normal_key])
-    _, group = np.unique(key, axis=0, return_inverse=True)
-    group = group.reshape(-1)
-
+        rgb = np.full((F, 3), 128, dtype=np.int32)
+    lab = _rgb_to_lab(rgb.astype(np.float32) / 255.0).astype(np.float64)
     adjacency = np.asarray(mesh.face_adjacency)
-    same = group[adjacency[:, 0]] == group[adjacency[:, 1]]
-    from scipy.sparse import coo_matrix
-    from scipy.sparse.csgraph import connected_components
-    F = len(mesh.faces)
-    edges = adjacency[same]
-    graph = coo_matrix((np.ones(len(edges)), (edges[:, 0], edges[:, 1])), shape=(F, F))
-    _, comp = connected_components(graph, directed=False)
+    if len(adjacency) == 0:
+        return PartLabels(np.zeros(F, dtype=int), colours={0: tuple(int(v) for v in rgb.mean(axis=0))})
 
-    # Absorb small components into the neighbour they touch most.
-    counts = np.bincount(comp)
-    for _ in range(3):
-        small = counts[comp] < min_faces
-        if not small.any():
+    # Neighbour lists once, for the median and the growing below.
+    order = np.argsort(np.concatenate([adjacency[:, 0], adjacency[:, 1]]))
+    both = np.concatenate([adjacency, adjacency[:, ::-1]])[order]
+    starts = np.searchsorted(both[:, 0], np.arange(F + 1))
+
+    def neighbours(i: int) -> np.ndarray:
+        return both[starts[i]:starts[i + 1], 1]
+
+    for _ in range(smooth_passes):
+        smoothed = lab.copy()
+        for i in range(F):
+            nb = neighbours(i)
+            if len(nb):
+                smoothed[i] = np.median(np.vstack([lab[nb], lab[i:i + 1]]), axis=0)
+        lab = smoothed
+
+    # Global colour clusters, lightness weighted down.
+    feat = lab * np.array([lightness_weight, 1.0, 1.0])
+    areas = np.asarray(mesh.area_faces, dtype=np.float64)
+    # The first centre is the face nearest the area-weighted mean colour,
+    # which does not depend on which of many equal faces sorts first.
+    mean = np.average(feat, axis=0, weights=areas)
+    centres = [feat[int(np.argmin(np.linalg.norm(feat - mean, axis=1)))]]
+    for _ in range(max_colours - 1):
+        d = np.min([np.linalg.norm(feat - c, axis=1) for c in centres], axis=0)
+        far = int(np.argmax(d * areas))
+        if d[far] < merge_delta_e:
             break
-        a, b = adjacency[:, 0], adjacency[:, 1]
-        for u, v in ((a, b), (b, a)):
-            move = small[u] & ~small[v]
-            if move.any():
-                comp = comp.copy()
-                comp[u[move]] = comp[v[move]]
-        counts = np.bincount(comp, minlength=comp.max() + 1)
-    _, comp = np.unique(comp, return_inverse=True)
-    comp = comp.reshape(-1)
-    colours = {}
-    for k in np.unique(comp):
-        colours[int(k)] = tuple(int(v) for v in rgb[comp == k].mean(axis=0).round())
-    return PartLabels(comp, colours=colours)
+        centres.append(feat[far])
+    centres = np.array(centres)
+    for _ in range(10):
+        assign = np.argmin([np.linalg.norm(feat - c, axis=1) for c in centres], axis=0)
+        new = np.array([np.average(feat[assign == k], axis=0, weights=areas[assign == k])
+                        if (assign == k).any() else centres[k] for k in range(len(centres))])
+        if np.allclose(new, centres, atol=0.05):
+            break
+        centres = new
+    # Merge centres that ended up close.
+    merged = True
+    while merged and len(centres) > 1:
+        merged = False
+        for i in range(len(centres)):
+            for j in range(i + 1, len(centres)):
+                if np.linalg.norm(centres[i] - centres[j]) < merge_delta_e:
+                    centres = np.delete(centres, j, axis=0)
+                    merged = True
+                    break
+            if merged:
+                break
+    colour = np.argmin([np.linalg.norm(feat - c, axis=1) for c in centres], axis=0)
+
+    # Planar grouping: grow over adjacency while the normal stays within
+    # `normal_degrees` of the group's seed and the colour cluster matches.
+    normals = np.asarray(mesh.face_normals)
+    cos_min = np.cos(np.radians(normal_degrees))
+    group = np.full(F, -1, dtype=int)
+    n_groups = 0
+    for seed in np.argsort(-areas):
+        if group[seed] >= 0:
+            continue
+        group[seed] = n_groups
+        frontier = [int(seed)]
+        seed_normal = normals[seed]
+        while frontier:
+            i = frontier.pop()
+            for j in neighbours(i):
+                if group[j] < 0 and colour[j] == colour[seed] and np.dot(normals[j], seed_normal) >= cos_min:
+                    group[j] = n_groups
+                    frontier.append(int(j))
+        n_groups += 1
+
+    labels = _absorb_small_labels(mesh, group, max(2, int(min_fraction * F)))
+    labels = _merge_blend_rings(labels, rgb, adjacency, max_faces=int(0.02 * F))
+    labels = _merge_coplanar_neighbours(labels, lab, normals, adjacency,
+                                        cos_min=cos_min, delta_e=coplanar_delta_e)
+    _, labels = np.unique(labels, return_inverse=True)
+    labels = labels.reshape(-1)
+    colours = {int(k): tuple(int(v) for v in rgb[labels == k].mean(axis=0).round())
+               for k in np.unique(labels)}
+    return PartLabels(labels, colours=colours)
+
+
+def _merge_coplanar_neighbours(labels: np.ndarray, lab: np.ndarray, normals: np.ndarray,
+                               adjacency: np.ndarray, *, cos_min: float, delta_e: float
+                               ) -> np.ndarray:
+    """Noise and shading split one wall or roof into several colour
+    clusters.  Two labels that touch, lie in the same plane and are within
+    `delta_e` of each other in LAB are one part; the merge repeats until
+    nothing qualifies, so a roof in six shades becomes one roof while a
+    window in a wall (far in colour) stays its own part."""
+    labels = labels.copy()
+    while True:
+        n = int(labels.max()) + 1
+        counts = np.bincount(labels, minlength=n)
+        mean_lab = np.array([lab[labels == k].mean(axis=0) if counts[k] else np.zeros(3) for k in range(n)])
+        mean_n = np.array([normals[labels == k].mean(axis=0) if counts[k] else np.zeros(3) for k in range(n)])
+        norms = np.linalg.norm(mean_n, axis=1, keepdims=True)
+        mean_n = mean_n / np.where(norms > 1e-9, norms, 1)
+        a, b = labels[adjacency[:, 0]], labels[adjacency[:, 1]]
+        pairs = np.unique(np.sort(np.column_stack([a, b])[a != b], axis=1), axis=0)
+        merged = False
+        for i, j in pairs:
+            if (np.dot(mean_n[i], mean_n[j]) >= cos_min
+                    and np.linalg.norm(mean_lab[i] - mean_lab[j]) <= delta_e):
+                labels[labels == j] = i
+                merged = True
+                break
+        if not merged:
+            return labels
+
+
+def _merge_blend_rings(labels: np.ndarray, rgb: np.ndarray, adjacency: np.ndarray,
+                       *, max_faces: int, tolerance: float = 70.0) -> np.ndarray:
+    """Smoothing paints a ring of mixed colour around a small part where
+    it meets a big one.  A small label whose colour lies between the
+    colours of the two labels it touches most is such a ring, and joins
+    the one nearer in colour (the window it surrounds, usually)."""
+    labels = labels.copy()
+    for _ in range(3):
+        n = int(labels.max()) + 1
+        counts = np.bincount(labels, minlength=n)
+        means = np.array([rgb[labels == k].mean(axis=0) if counts[k] else np.zeros(3) for k in range(n)])
+        a, b = labels[adjacency[:, 0]], labels[adjacency[:, 1]]
+        cross = a != b
+        changed = False
+        for k in np.flatnonzero((counts > 0) & (counts <= max_faces)):
+            touching = np.concatenate([b[cross & (a == k)], a[cross & (b == k)]])
+            if len(touching) == 0:
+                continue
+            nb_counts = np.bincount(touching, minlength=n)
+            top = np.argsort(-nb_counts)[:2]
+            top = [int(t) for t in top if nb_counts[t] > 0]
+            if len(top) < 2:
+                continue
+            p, q = means[top[0]], means[top[1]]
+            if _is_blend(means[k], [p, q], tolerance):
+                nearer = top[0] if np.abs(means[k] - p).sum() <= np.abs(means[k] - q).sum() else top[1]
+                labels[labels == k] = nearer
+                changed = True
+        if not changed:
+            break
+    return labels
 
 
 # -- labels to regions -------------------------------------------------------
@@ -297,13 +422,18 @@ def regions_from_labels(target: MeshTarget, labels: PartLabels, *,
 
     walls = [p for p in parts if p["planarity"] >= planar_tolerance and abs(p["normal"][1]) < vertical_ny
              and p["name"] not in OPENING_NAMES]
+    # An opening is at least this wide and tall (mesh mm): a sliver of
+    # noise along a wall's edge is not a window.
+    min_extent = 1.5 / max(1e-6, float(target.mesh_to_voxel[0, 0]))
     regions: list[Region] = []
     openings: list[dict] = []
     for p in parts:
         name, ny = p["name"], float(p["normal"][1])
         planar = p["planarity"] >= planar_tolerance
+        extents = np.sort(p["mx"] - p["mn"])
+        big_enough = extents[1] >= min_extent
         if name in OPENING_NAMES or (planar and abs(ny) < vertical_ny and p["area"] < 0.03 * total_area
-                                     and _in_plane_of_a_wall(p, walls)):
+                                     and big_enough and _in_plane_of_a_wall(p, walls)):
             openings.append({"min": p["mn"].tolist(), "max": p["mx"].tolist(),
                              "normal": p["normal"].tolist(), "name": name or "window",
                              "colour": labels.colours.get(p["label"])})
