@@ -816,12 +816,21 @@ def _cluster_by_color(placements: list[Placement],
     return clusters
 
 
+# Window frames and doors by (studs wide, plates tall).
+_WINDOW_BY_SIZE = {(2, 6): "60592.dat", (2, 9): "60800.dat",
+                   (4, 9): "60594.dat", (6, 9): "3853.dat"}
+_DOOR_BY_SIZE = {(4, 15): "60623.dat", (4, 18): "60614.dat"}
+
+
 def detect_windows_and_doors(placements: list[Placement], *,
                               wall_color_top_n: int = 2,
-                              min_cluster_size: int = 3,
+                              min_cluster_size: int = 2,
                               min_door_plates: int = 9) -> tuple[list[Placement], dict]:
     """Detect window and door-shaped color clusters and swap them for real
-    LEGO window/door parts. Returns (new_placements, stats)."""
+    LEGO window/door parts. Returns (new_placements, stats).
+
+    A cluster is swapped only when it is a full rectangle the exact size of
+    a window frame or door; the smallest, a 1x2x2 frame, is two bricks."""
     from collections import Counter, defaultdict
     parts_by_ldraw = {p.ldraw: p for p in full_catalog()}
 
@@ -868,13 +877,21 @@ def detect_windows_and_doors(placements: list[Placement], *,
                 continue
             width = z_extent if thin_x else x_extent
 
+            # The replacement must be exactly the cluster's size, or it
+            # would overlap its neighbours or leave a hole: a window frame
+            # is 2 or 3 bricks tall and a door 5 or 6, so the cluster has
+            # to be a full rectangle of one of those sizes.
+            cells = sum(p.w_world * p.d_world * p.part.height_units
+                        for p in (placements[i] for i in cluster_indices))
+            if cells != x_extent * z_extent * y_extent:
+                continue
             target: str | None = None
-            # Window: 2-4 wide, 1-3 bricks tall (3-9 plates), not at the floor.
-            if 2 <= width <= 4 and 3 <= y_extent <= 9 and y_min >= 3:
-                target = "60592.dat" if width == 2 else "60594.dat"
-            # Door: 2-4 wide, 3+ bricks tall (9+ plates), reaches the floor.
-            elif 2 <= width <= 4 and y_extent >= min_door_plates and y_min <= 4:
-                target = "60623.dat"
+            # Window: not at the floor.
+            if y_min >= 3:
+                target = _WINDOW_BY_SIZE.get((width, y_extent))
+            # Door: reaches the floor.
+            elif y_extent >= min_door_plates and y_min <= 4:
+                target = _DOOR_BY_SIZE.get((width, y_extent))
 
             if target is None:
                 continue
@@ -903,7 +920,7 @@ def detect_windows_and_doors(placements: list[Placement], *,
                 to_replace[idx] = None
             to_replace[min(cluster_indices)] = replacement
 
-            if target in ("60592.dat", "60594.dat"):
+            if new_part.shape == "window":
                 stats["windows_placed"] += 1
             else:
                 stats["doors_placed"] += 1
