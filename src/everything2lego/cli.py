@@ -17,6 +17,7 @@ import json
 import re
 import subprocess
 import sys
+import warnings
 from typing import Callable, List, Optional
 
 import numpy as np
@@ -49,6 +50,17 @@ def _write_outputs(placements, out_dir: Path, *, model_name: str, report: dict) 
     stl = io_stl.write_stl(placements, out_dir / "lego.stl")
     return {"ldr": ldr, "bricklink": xml, "viewer": viewer_index, "pdf": pdf,
             "preview": preview, "report": report_path, "lego_stl": stl}
+
+
+def _print_naming(naming) -> None:
+    """What the vision labeller said about the parts, when it ran."""
+    if naming is None:
+        return
+    source = "cached" if naming.cached else f"{naming.model}, {naming.input_tokens} in / {naming.output_tokens} out tokens"
+    console.print(f"  object: [bold]{naming.object or '?'}[/bold]  ({source})")
+    for p in sorted(naming.parts, key=lambda p: p.id):
+        kind = "" if p.kind == "other" else f"  -> {p.kind}"
+        console.print(f"    part {p.id:>3}: {p.name}{kind}  ({p.confidence:.2f})")
 
 
 def _print_summary(placements, outputs: dict[str, Path],
@@ -1060,6 +1072,44 @@ def optimize(
     _print_summary(placements, outputs)
 
 
+@app.command("label-parts")
+def label_parts_cmd(
+    mesh: Path = typer.Argument(..., exists=True, help="Path to .stl/.glb/.ply mesh."),
+    out: Optional[Path] = typer.Option(None, "--out", "-o",
+        help="Labelled GLB to write (default <mesh>.parts.glb); a JSON sidecar with the "
+             "names goes next to it. Pass both to `semantic --parts`."),
+    parts: Optional[Path] = typer.Option(None, "--parts", exists=True, dir_okay=False,
+        help="Colour-coded mesh with one colour per part to name; the builtin segmenter "
+             "splits the mesh when not given."),
+    hint: str = typer.Option("", "--hint", help="What the object is, if you know."),
+    model: str = typer.Option("claude-opus-5-5", "--model"),
+    no_cache: bool = typer.Option(False, "--no-cache", help="Ask again even if cached."),
+    pictures: Optional[Path] = typer.Option(None, "--pictures",
+        help="Directory to keep the renders the model was shown."),
+) -> None:
+    """Name the parts of a mesh with a vision model (Claude) and write a
+    labelled GLB plus JSON sidecar for `semantic --parts`.  Needs the
+    anthropic package and ANTHROPIC_API_KEY; a few cents per mesh, cached."""
+    from .semantic_v2 import labeller, parts as parts_mod
+    try:
+        m = voxelize.load_mesh(mesh)
+    except (ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    labels = parts_mod.load_part_labels(parts, m) if parts else parts_mod.segment_builtin(m)
+    console.print(f"  {len(labels.ids)} parts to name")
+    try:
+        naming = labeller.name_parts(m, labels, model=model, hint=hint, cache=not no_cache,
+                                     debug_dir=pictures)
+    except labeller.LabellerError as exc:
+        console.print(f"[red]cannot name the parts: {exc}[/red]")
+        raise typer.Exit(code=2)
+    labeller.apply(labels, naming)
+    _print_naming(naming)
+    out = out or mesh.with_suffix(".parts.glb")
+    names = labeller.export_labelled(m, labels, out)
+    console.print(f"  wrote {out} and {out.with_suffix('.json')} ({len(names)} names)")
+
+
 @app.command()
 def semantic(
     mesh: Path = typer.Argument(..., exists=True, help="Path to .stl/.glb/.ply mesh."),
@@ -1075,6 +1125,14 @@ def semantic(
     segmenter: str = typer.Option("none", "--segmenter",
         help="none: facet detector (default); builtin: a CPU part segmentation by colour, "
              "normal and connectivity, used when --parts is not given."),
+    label_parts: bool = typer.Option(False, "--label-parts/--no-label-parts",
+        help="Name the parts with a vision model (Claude; needs the anthropic package and "
+             "ANTHROPIC_API_KEY) so windows, doors, roofs and walls are built as such on any "
+             "object. Uses --parts, or the builtin segmenter when none is given. Cached per mesh."),
+    labeller_model: str = typer.Option("claude-opus-5-5", "--labeller-model",
+        help="Model for --label-parts."),
+    hint: str = typer.Option("", "--hint",
+        help="What the object is (\"a brick farmhouse\", \"a 1960s pickup\"), for --label-parts."),
     n_samples: int = typer.Option(100_000, "--n-samples",
         help="Surface point samples for the RegionDetector."),
     subvoxels: int = typer.Option(1, "--subvoxels", min=1, max=4,
@@ -1149,6 +1207,10 @@ def semantic(
         detector=DetectorConfig(),
         parts_path=str(parts) if parts else None,
         segmenter=segmenter,
+        label_parts=label_parts,
+        labeller_model=labeller_model,
+        labeller_hint=hint,
+        labeller_debug_dir=str(out / "parts") if label_parts else None,
         builder=BuilderConfig(
             milp_time_limit_s=milp_time,
             diversity_weight=diversity_weight,
@@ -1162,8 +1224,14 @@ def semantic(
     )
     console.rule("[bold]semantic[/bold]  v2 pipeline (RANSAC regions + MILP)")
     console.print(f"  mesh: {mesh}  max_studs={max_studs}  n_samples={n_samples}")
-    pipeline = SemanticLegoPipeline(cfg)
-    result = pipeline.run(mesh)
+    # Not `pipeline`: that is the module whose structure_report is used below.
+    sem = SemanticLegoPipeline(cfg)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", RuntimeWarning)
+        result = sem.run(mesh)
+    for w in caught:
+        console.print(f"  [yellow]{w.message}[/yellow]")
+    _print_naming(sem.last_naming)
     console.print(f"  regions detected: {len(result.regions)}")
     for reg in result.regions:
         console.print(f"    - {reg.label.value}  n_points={reg.n_points()}")

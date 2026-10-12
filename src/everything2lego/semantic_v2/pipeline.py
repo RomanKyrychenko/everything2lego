@@ -9,9 +9,11 @@ viewer_export, instructions).
 
 from __future__ import annotations
 
+import warnings
+
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 
@@ -44,6 +46,15 @@ class PipelineConfig:
     # the CPU.  Without either, regions come from the facet detector.
     parts_path: Optional[str] = None
     segmenter: str = "none"          # "none" | "builtin"
+    # Optional: name the parts with a vision model (see labeller.py).  Needs
+    # the anthropic package and an API key; without them the parts stay
+    # unnamed and the pipeline carries on.  Turns the built-in segmenter on
+    # when there is nothing else to name.
+    label_parts: bool = False
+    labeller_model: str = "claude-opus-5-5"
+    labeller_hint: str = ""           # what the object is, if the user knows
+    labeller_client: Any = None       # a fake in tests; the SDK's by default
+    labeller_debug_dir: Optional[str] = None
 
 
 @dataclass
@@ -76,6 +87,7 @@ class SemanticLegoPipeline:
         self.detector = RegionDetector(self.config.detector)
         self.registry = BuilderRegistry()
         self.interior_filler = InteriorVolumeFiller(self.config.interior)
+        self.last_naming = None       # what the vision labeller said, when it ran
         # Rebuild each builder with the pipeline's shared config so knob
         # changes (e.g. MILP time limit) propagate.
         for b in self.registry.builders:
@@ -102,8 +114,21 @@ class SemanticLegoPipeline:
         """Regions from part labels when given (or from the built-in
         segmenter when asked for), the facet detector otherwise."""
         from .parts import regions_from_labels, segment_builtin
-        if labels is None and self.config.segmenter == "builtin":
+        cfg = self.config
+        if labels is None and (cfg.segmenter == "builtin" or cfg.label_parts):
             labels = segment_builtin(target.mesh)
+        if labels is not None and cfg.label_parts:
+            from . import labeller
+            try:
+                naming = labeller.name_parts(
+                    target.mesh, labels, client=cfg.labeller_client, model=cfg.labeller_model,
+                    hint=cfg.labeller_hint, debug_dir=cfg.labeller_debug_dir)
+            except labeller.LabellerError as exc:
+                warnings.warn(f"part naming skipped: {exc}", RuntimeWarning, stacklevel=2)
+            else:
+                labeller.apply(labels, naming)
+                target.metadata["naming"] = naming
+                self.last_naming = naming
         if labels is not None:
             regions = regions_from_labels(target, labels)
             if regions:
