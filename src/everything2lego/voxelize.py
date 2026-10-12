@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -322,14 +323,16 @@ def clean_mesh(mesh: trimesh.Trimesh, *,
     if fill_holes:
         try:
             m.fill_holes()
-        except Exception:
-            pass
+        except Exception as exc:
+            warnings.warn(f"hole filling failed ({exc}); the mesh keeps its holes",
+                          RuntimeWarning, stacklevel=2)
     if smooth and smooth_iterations > 0:
         try:
             trimesh.smoothing.filter_taubin(m, lamb=0.5, nu=-0.53,
                                              iterations=smooth_iterations)
-        except Exception:
-            pass
+        except Exception as exc:
+            warnings.warn(f"smoothing failed ({exc}); the mesh is left unsmoothed",
+                          RuntimeWarning, stacklevel=2)
     return m
 
 

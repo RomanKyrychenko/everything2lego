@@ -14,6 +14,7 @@ and buildability.  Two orthogonal stages instead of one confused loss.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Iterable
 
@@ -337,4 +338,6 @@ def _palette_index_for_code(code: int) -> int:
     for i, c in enumerate(pal):
         if c.code == code:
             return i
+    warnings.warn(f"LDraw colour {code} is not in the palette; using {pal[0].name}",
+                  RuntimeWarning, stacklevel=2)
     return 0

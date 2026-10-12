@@ -11,6 +11,7 @@ Falls back to a size-first greedy when the ILP is infeasible or times out.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
@@ -92,8 +93,9 @@ class MILPPacker:
                 if result is not None:
                     result.solve_time_s = time.time() - t0
                     return result
-            except Exception:
-                pass  # fall through to greedy
+            except Exception as exc:
+                warnings.warn(f"MILP packing failed ({exc}); using the greedy packer",
+                              RuntimeWarning, stacklevel=2)
         result = self._greedy(mask, cands)
         result.solve_time_s = time.time() - t0
         return result

@@ -7,6 +7,7 @@ Detectors and Builders read from it.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -66,8 +67,9 @@ class MeshTarget:
         # processed. Trigger it here explicitly.
         try:
             mesh.process(validate=True)
-        except Exception:
-            pass
+        except Exception as exc:
+            warnings.warn(f"mesh cleanup failed ({exc}); facet detection may be poorer",
+                          RuntimeWarning, stacklevel=2)
         return cls.from_mesh(mesh, max_studs=max_studs,
                               n_samples=n_samples,
                               color_samples=color_samples,
@@ -149,5 +151,7 @@ def _sample_mesh_colors(mesh: trimesh.Trimesh,
         rgb = _face_color_lookup(mesh, np.asarray(points),
                                    np.asarray(face_ids))
         return np.clip(rgb, 0, 255).astype(np.uint8)
-    except Exception:
+    except Exception as exc:
+        warnings.warn(f"colour sampling failed ({exc}); the model will be uniform grey",
+                      RuntimeWarning, stacklevel=2)
         return np.full((len(points), 3), 200, dtype=np.uint8)

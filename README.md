@@ -112,8 +112,8 @@ PYTORCH_ENABLE_MPS_FALLBACK=1 \
    (`PlanarWallBuilder`, `PlanarRoofBuilder`, …) which uses HiGHS to solve
    an exact-cover problem over the region's cells, picking the biggest LEGO
    plate/tile that fits.
-4. **Optional soft training (`--soft-train`)** — 500 steps of Adam over a
-   Gumbel-Softmax-relaxed cell grid.  The trainer *initialises* from the
+4. **Optional soft training (`--soft-train`)** — 300 steps of Adam (set
+   `--soft-iters`) over a Gumbel-Softmax-relaxed cell grid.  Needs PyTorch.  The trainer *initialises* from the
    MILP placements (idea #1), keeps per-region palette locks (idea #2),
    and includes a support term that penalises floating cells (idea #6).
    Loss = `2·shape + 1·color + 0.05·type_prior + 0.02·coherence
@@ -136,7 +136,38 @@ PYTORCH_ENABLE_MPS_FALLBACK=1 \
 | `--floor-spacing 12` | One structural floor slab every N plates. |
 | `--column-spacing 8` | Column node every N × N (x, z) grid positions. |
 | `--w-color 3.0` | Colour-fidelity weight. Raise when colours drift. |
-| `--photos path.jpg` | Feed the source photo to a perceptual loss (opt-in). |
+| `--photos path.jpg` | Compare renders of the soft model with the source photo(s): first photo is the front view, second the side, third the top. Weighted by `--w-photo-pixel` (default 1) and `--w-photo-percep` (default 0, VGG). |
+| `--refine` / `--grad-refine` | Simulated-annealing and gradient refinement of the MILP placements (`--refine-iters`, `--grad-iters`). Soft training starts from their result. |
+| `--milp-time 1.0` | Seconds HiGHS may spend per region. |
+| `--w-shape-surface`, `--w-shape-volume`, `--w-color`, `--w-diversity`, `--w-coherence`, `--w-count` | Soft-training loss weights (defaults 1, 2, 1, 0, 0.02, 0). |
+| `--n-samples` | Surface samples taken from the mesh for region detection. |
+
+### `build` styling flags
+
+`build` (and `carve`, `triposr`, `hunyuan`...) packs voxels with the classical
+packer, then runs optional post-pack passes.  `report.json` describes the
+model after all of them.
+
+| Flag | What it does |
+|---|---|
+| `--brace-mode auto\|floors\|columns\|none` | How floating parts get support: internal floors for hollow shells, pegs and columns otherwise. |
+| `--hollow --wall-thickness 2` | Carve the interior before packing. |
+| `--texture log\|masonry\|curved\|smooth` | Swap bricks for textured equivalents. |
+| `--windows-color 71 --doors-color 70 --panels-color 71` | Swap stacks of bricks in those LDraw colours for window frames, doors and panels. |
+| `--detect-features` | Find window- and door-shaped colour clusters and swap in real parts. |
+| `--variety`, `--architectural-style` | Decorative part variation; foundation, cornice, ridge and quoin details. |
+| `--color-k`, `--color-mode`, `--subvoxels` | Colour quantisation and occupancy super-sampling. |
+
+Every command exits with status 1 when the model it wrote is not one
+supported assembly (see `report.json`), `--no-supports` included.
+
+### Other commands
+
+* `optimize mesh.glb` runs the simulated-annealing optimiser on its own
+  (`--iters`, `--t-start`, `--t-end`, the same `--w-*` weights).
+* `demo` builds the bundled parametric templates (gable cabin, modernist
+  box) for smoke tests.
+* All commands write to `out/` unless `--out` says otherwise.
 
 ### Reducing part count without breaking the model
 

@@ -661,7 +661,7 @@ def template_modernist_box(
 @app.command()
 def optimize(
     mesh: Path = typer.Argument(..., exists=True, help="Path to a .stl/.glb/.ply mesh."),
-    out: Path = typer.Option(Path("out_opt"), "--out", "-o"),
+    out: Path = typer.Option(Path("out"), "--out", "-o", help="Output directory."),
     max_studs: int = typer.Option(28, "--max-studs", min=6, max=64),
     iters: int = typer.Option(20_000, "--iters", min=100),
     t_start: float = typer.Option(0.05, "--t-start"),
@@ -770,7 +770,7 @@ def optimize(
 @app.command()
 def semantic(
     mesh: Path = typer.Argument(..., exists=True, help="Path to .stl/.glb/.ply mesh."),
-    out: Path = typer.Option(Path("out_sem"), "--out", "-o"),
+    out: Path = typer.Option(Path("out"), "--out", "-o", help="Output directory."),
     max_studs: int = typer.Option(32, "--max-studs", min=6, max=128),
     n_samples: int = typer.Option(100_000, "--n-samples",
         help="Surface point samples for the RegionDetector."),
@@ -803,8 +803,10 @@ def semantic(
         help="Zero or more photo files. Each fed as a photo-loss target during "
              "--soft-train.  First photo becomes the +Z (front) view, second is "
              "+X (side), third is +Y (top)."),
-    w_photo_pixel:  float = typer.Option(0.0, "--w-photo-pixel"),
-    w_photo_percep: float = typer.Option(0.0, "--w-photo-percep"),
+    w_photo_pixel:  float = typer.Option(1.0, "--w-photo-pixel",
+        help="Weight of the per-pixel photo loss; only used with --photos."),
+    w_photo_percep: float = typer.Option(0.0, "--w-photo-percep",
+        help="Weight of the perceptual (VGG) photo loss; only used with --photos."),
     w_shape_surface: float = typer.Option(1.0, "--w-shape-surface"),
     w_shape_volume: float = typer.Option(2.0, "--w-shape-volume"),
     w_color: float = typer.Option(1.0, "--w-color"),
@@ -944,8 +946,10 @@ def semantic(
         try:
             import torch
             import numpy as np
-        except ImportError:
-            console.print("[yellow]--soft-train requires PyTorch; skipping[/yellow]")
+        except ImportError as exc:
+            raise typer.BadParameter(
+                "--soft-train needs PyTorch (pip install torch); run without it "
+                "or install torch") from exc
         else:
             from .semantic_v2 import (SoftAssembly, SoftLoss, SoftLossWeights,
                                         SoftTrainer, SoftRenderer, MeshTarget)
@@ -1013,7 +1017,7 @@ def semantic(
                 per_region_palette = _build_region_cell_masks(
                     target, result.regions, pi, occ)
             sa = SoftAssembly.from_placements(
-                occ.shape, result.placements, n_col,
+                occ.shape, final_placements, n_col,
                 geometric_prior=geo_prior,
                 allowed_palette=allowed_palette,
                 per_region_palette=per_region_palette or None)

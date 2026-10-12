@@ -8,6 +8,7 @@ become plates. Tiles are used for exposed top surfaces if requested.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -1019,6 +1020,9 @@ def apply_architectural_style(placements: list[Placement], *,
     idx_by_code = {c.code: i for i, c in enumerate(pal)}
 
     def _to_idx(code: int, fallback: int) -> int:
+        if code not in idx_by_code:
+            warnings.warn(f"LDraw colour {code} is not in the palette; using {pal[fallback].name}",
+                          RuntimeWarning, stacklevel=2)
         return idx_by_code.get(code, fallback)
 
     default_idx = 0
