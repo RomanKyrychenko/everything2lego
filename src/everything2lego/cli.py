@@ -88,6 +88,7 @@ def _print_summary(placements, outputs: dict[str, Path],
 
 def _run(grid, out: Path, model_name: str, use_tiles: bool, supports: bool = True,
          use_slopes: bool = True, texture: str = "default",
+         use_cheese: bool = True,
          color_swaps: dict[int, str] | None = None,
          detect_features: bool = False, color_smoothing: bool = True,
          variety: bool = False, brace_mode: str = "auto",
@@ -95,7 +96,8 @@ def _run(grid, out: Path, model_name: str, use_tiles: bool, supports: bool = Tru
     console.rule("[bold]packing bricks[/bold]")
     try:
         result = pipeline.assemble(grid, use_tiles=use_tiles, use_slopes=use_slopes,
-                                    supports=supports, brace_mode=brace_mode)
+                                    supports=supports, brace_mode=brace_mode,
+                                    use_cheese=use_cheese)
     except (ValueError, RuntimeError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     placements = result.placements
@@ -305,6 +307,8 @@ def build(
                                     help="Replace top-exposed plates with tiles."),
     use_slopes: bool = typer.Option(True, "--slopes/--no-slopes",
                                      help="Swap top-of-column bricks for slopes at 1-brick step edges."),
+    use_cheese: bool = typer.Option(True, "--cheese/--no-cheese",
+                                     help="Cheese slopes on one-plate step runs (about a third more parts on organic shapes)."),
     supports: bool = typer.Option(True, "--supports/--no-supports", help="Add a foundation and internal bracing."),
     brace_mode: str = typer.Option("auto", "--brace-mode",
                                     help="auto (floors for hollow, columns for solid), floors (internal-floor slabs), columns (legacy vertical), or none (just foundation)."),
@@ -406,7 +410,7 @@ def build(
     _parse(doors_color,   "60623.dat")
     _parse(panels_color,  "4865.dat")
 
-    _run(grid, out, model_name=mesh.stem, use_tiles=use_tiles, use_slopes=use_slopes,
+    _run(grid, out, model_name=mesh.stem, use_tiles=use_tiles, use_slopes=use_slopes, use_cheese=use_cheese,
          supports=supports, texture=texture, color_swaps=color_swaps,
          detect_features=detect_features, color_smoothing=color_smoothing,
          variety=variety, brace_mode=brace_mode,

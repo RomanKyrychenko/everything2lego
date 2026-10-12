@@ -38,7 +38,8 @@ def structure_report(placements: list[pack.Placement],
 
 
 def assemble(grid: VoxelGrid, *, use_tiles: bool = True, use_slopes: bool = True,
-             supports: bool = True, brace_mode: str = "auto") -> BuildResult:
+             supports: bool = True, brace_mode: str = "auto",
+             use_cheese: bool = True) -> BuildResult:
     """Assemble a voxel grid into a packed LEGO model with a stability report.
 
     `brace_mode`:
@@ -99,7 +100,8 @@ def assemble(grid: VoxelGrid, *, use_tiles: bool = True, use_slopes: bool = True
     for attempt in range(voxels.shape[0] + 1):
         prepared = VoxelGrid(voxels)
         placements = pack.pack(prepared, use_tiles=use_tiles, use_slopes=use_slopes,
-                               foundation_layers=2 if supports else 0)
+                               foundation_layers=2 if supports else 0,
+                               use_cheese=use_cheese)
         check = stability.check(placements)
         if not supports:
             break

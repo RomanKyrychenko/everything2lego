@@ -11,9 +11,9 @@ from everything2lego.cli import app
 from everything2lego.colors import palette
 
 VIEWS = Path(__file__).resolve().parents[1] / "examples" / "views"
-CARVE_16 = budget.Measurement(16, False, 632, 1)
+CARVE_16 = budget.Measurement(16, False, 841, 1)
 # Measured on examples/views with pipeline.assemble defaults.
-CARVE_ACTUAL = {16: 632, 24: 1601, 32: 3550}
+CARVE_ACTUAL = {16: 841, 20: 1523, 24: 2071, 32: 4459}
 
 
 def fake_measure(parts=600, colors=6):

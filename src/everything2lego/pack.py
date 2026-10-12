@@ -168,7 +168,8 @@ def _place_parts(voxels: np.ndarray, filled: np.ndarray,
 
 
 def pack(grid: VoxelGrid, *, use_tiles: bool = True, use_slopes: bool = True,
-         foundation_layers: int = 0, use_tall: bool = True) -> list[Placement]:
+         foundation_layers: int = 0, use_tall: bool = True,
+         use_cheese: bool = True) -> list[Placement]:
     """Pack a voxel grid into real LEGO parts.
 
     Placement strategy:
@@ -260,7 +261,7 @@ def pack(grid: VoxelGrid, *, use_tiles: bool = True, use_slopes: bool = True,
     if use_tiles:
         placements = _tile_top(voxels, placements)
     if use_slopes:
-        placements = _refine_slopes(voxels, placements)
+        placements = _refine_slopes(voxels, placements, cheese=use_cheese)
 
     return placements
 
@@ -874,14 +875,23 @@ def _tile_run(asm: _Assembly, fam: _SlopeFamily, d: str, edge: int, top: int,
     return failed
 
 
+# A cheese slope on a lone one-plate step is noise, not a roof: an organic
+# shape has hundreds of such steps, and swapping each for a cheese slope and
+# the plates split around it half again as many parts.  Cheese courses need
+# a run of this many studs along the edge; the other families take any run.
+_MIN_RUN = {"cheese": 3}
+
+
 def _refine_slopes(voxels: np.ndarray, placements: list[Placement], *,
-                   tile_ridges: bool = True) -> list[Placement]:
+                   tile_ridges: bool = True, cheese: bool = True) -> list[Placement]:
     """Post-pack pass: fit roof parts to the step edges of the column-top map.
 
     Order: ridges are tiled, valleys get the concave corner, outside corners
     the convex one, then step edges are covered run by run from the steepest
     family down (75°, 65°, 33° falling back to 45°, 45°, cheese).  Every swap
-    is volume-preserving (see `_Assembly.replace_box`)."""
+    is volume-preserving (see `_Assembly.replace_box`).  `cheese=False`
+    leaves one-plate steps as plates: on an organic shape with hundreds of
+    them, cheese courses add about a third more parts."""
     asm = _Assembly(voxels, placements)
     col_top = asm.col_top
     W, D = col_top.shape
@@ -958,7 +968,8 @@ def _refine_slopes(voxels: np.ndarray, placements: list[Placement], *,
             dx, dz = _DIR_VEC[d]
             here = _tread(col_top, x, z, -dx, -dz, top)
             beyond = _tread(col_top, x + dx, z + dz, dx, dz, top - drop)
-            fams = [f for f in _families_for(drop, here, beyond) if families[f].parts]
+            fams = [f for f in _families_for(drop, here, beyond)
+                    if families[f].parts and (cheese or f != "cheese")]
             if not fams:
                 continue
             edge, perp = (x, z) if dx else (z, x)
@@ -983,6 +994,8 @@ def _refine_slopes(voxels: np.ndarray, placements: list[Placement], *,
         (fname, d, edge, top, color), coords = pending.pop(0)
         failed: list[int] = []
         for run in runs(coords):
+            if len(run) < _MIN_RUN.get(fname, 1):
+                continue
             failed += _tile_run(asm, families[fname], d, edge, top, run, color)
         nxt = fallback.get((fname, d, edge, top, color))
         if failed and nxt:
