@@ -62,6 +62,10 @@ class BuilderConfig:
     mm_per_plate: float = 3.2
     diversity_weight: float = 0.02
     milp_time_limit_s: float = 5.0
+    # Find window frames and doors on the mesh's wall colours and pack the
+    # walls around them (see openings.py).
+    detect_openings: bool = True
+    opening_delta_e: float = 22.0
 
 
 class RegionBuilder(ABC):
@@ -148,10 +152,20 @@ class PlanarWallBuilder(RegionBuilder):
 
     def build(self, region: Region, target: MeshTarget) -> list[Placement]:
         assert isinstance(region, PlanarRegion)
-        return _pack_vertical_wall(
+        openings: list[Placement] = []
+        reserved = None
+        if self.config.detect_openings:
+            from .openings import find_openings, reserved_cells, wall_frame
+            frame = wall_frame(region, target)
+            openings = find_openings(region, target, frame=frame,
+                                     min_delta_e=self.config.opening_delta_e)
+            if openings:
+                reserved = reserved_cells(openings, frame)
+        return openings + _pack_vertical_wall(
             region, target=target,
             part_family=self._brick_parts(),
             config=self.config,
+            reserved=reserved,
         )
 
 
@@ -319,10 +333,13 @@ def _pack_horizontal_slab(region: PlanarRegion, *,
 def _pack_vertical_wall(region: PlanarRegion, *,
                          target: MeshTarget,
                          part_family: list[Part],
-                         config: BuilderConfig) -> list[Placement]:
+                         config: BuilderConfig,
+                         reserved: np.ndarray | None = None) -> list[Placement]:
     """Discretise the vertical plane into brick courses and pack each course.
 
     Uses target.mesh_to_voxel for correct stud/plate quantisation.
+    `reserved` is a (length, height) mask of cells that openings occupy;
+    a course leaves out every stud column an opening crosses in it.
     """
     mn_vox = target.mm_point_to_voxel(region.bounds[0])
     mx_vox = target.mm_point_to_voxel(region.bounds[1])
@@ -366,6 +383,12 @@ def _pack_vertical_wall(region: PlanarRegion, *,
         y = y_bottom + course * course_plates
         mask = np.zeros((length_studs, other_axis_ext), dtype=bool)
         mask[coverage, 0] = True
+        if reserved is not None:
+            y_rel = y - y_bottom
+            blocked = reserved[:, y_rel:y_rel + course_plates].any(axis=1)
+            mask[blocked, 0] = False
+        if not mask.any():
+            continue
         result = packer.pack(mask)
         for pl in result.placements:
             fw, fd = footprints[pl.part_index]
