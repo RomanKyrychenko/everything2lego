@@ -29,7 +29,7 @@ from scipy.sparse.csgraph import connected_components
 
 from . import bricks
 from .colors import palette
-from .pack import Placement
+from .pack import Placement, slope_world_low
 
 
 COS30 = math.cos(math.pi / 6)
@@ -89,29 +89,7 @@ def _draw_stud(draw: ImageDraw.ImageDraw, sx: float, sy: float, sz: float,
     draw.ellipse([u - a, v1 - b, u + a, v1 + b], fill=tones["top"], outline=tones["line"])
 
 
-# Order of world-low directions cycled by 90° Y-rotations, matching pack.py
-_LOW_DIR_CYCLE = ("+x", "-z", "-x", "+z")
-
-
-def _slope_world_low(p: Placement) -> str | None:
-    """World direction ("+x" / "-z" / "-x" / "+z" / "+x+z" / "+x-z" /
-    "-x+z" / "-x-z") that this slope's low side points to, accounting for
-    the part's default slope_dir + placement rotation. None if not a slope."""
-    part = p.part
-    if part.shape not in ("slope", "slope_inv", "slope_corner"):
-        return None
-    default = part.slope_dir or ("+x+z" if part.shape == "slope_corner" else "+x")
-    rot_steps = (p.rotation_deg // 90) % 4
-    if part.shape == "slope_corner":
-        corner_cycle = ("+x+z", "+x-z", "-x-z", "-x+z")
-        if default not in corner_cycle:
-            default = "+x+z"
-        idx = corner_cycle.index(default)
-        return corner_cycle[(idx + rot_steps) % 4]
-    if default not in _LOW_DIR_CYCLE:
-        default = "+x"
-    idx = _LOW_DIR_CYCLE.index(default)
-    return _LOW_DIR_CYCLE[(idx + rot_steps) % 4]
+_slope_world_low = slope_world_low
 
 
 def _stud_cells(p: Placement) -> list[tuple[int, int]]:

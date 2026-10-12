@@ -380,6 +380,21 @@ def _step_down_direction(col_top: np.ndarray, p: Placement,
     return None
 
 
+def slope_world_low(p: Placement) -> str | None:
+    """World direction a placed slope's low side points to ("+x", "-z",
+    "+x+z" for a corner...), from the part's default and the placement's
+    rotation; None for anything that is not a slope."""
+    part = p.part
+    if part.shape not in ("slope", "slope_inv", "slope_corner"):
+        return None
+    steps = (p.rotation_deg // 90) % 4
+    if part.shape == "slope_corner":
+        default = part.slope_dir if part.slope_dir in _CORNER_LOW_CYCLE else "+x+z"
+        return _CORNER_LOW_CYCLE[(_CORNER_LOW_CYCLE.index(default) + steps) % 4]
+    default = part.slope_dir if part.slope_dir in _LOW_DIR_CYCLE else "+x"
+    return _LOW_DIR_CYCLE[(_LOW_DIR_CYCLE.index(default) + steps) % 4]
+
+
 def _slope_rotation(slope: Part, world_footprint: tuple[int, int],
                     low_dir: str) -> int | None:
     """Rotation (deg) that yields the requested world footprint AND world low

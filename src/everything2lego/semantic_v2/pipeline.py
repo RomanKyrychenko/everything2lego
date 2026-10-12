@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..pack import Placement
+from ..pipeline import brace, resolve_overlaps
 from .builders import BuilderRegistry, BuilderConfig
 from .detector import RegionDetector, DetectorConfig
 from .interior import InteriorVolumeFiller, InteriorConfig
@@ -31,6 +32,9 @@ class PipelineConfig:
     builder: BuilderConfig = field(default_factory=BuilderConfig)
     interior: InteriorConfig = field(default_factory=InteriorConfig)
     fill_interior: bool = True
+    # Drop region placements that overlap earlier ones (refilling what they
+    # alone covered) and hold up floating parts with 1x1 pegs and columns.
+    validate_structure: bool = True
 
 
 @dataclass
@@ -40,6 +44,8 @@ class PipelineResult:
     interior_placements: list[Placement]
     regions: list[Region]
     per_region_counts: dict[str, int] = field(default_factory=dict)
+    dropped_overlaps: int = 0
+    added_supports: int = 0
 
 
 class SemanticLegoPipeline:
@@ -84,10 +90,21 @@ class SemanticLegoPipeline:
             interior = self.interior_filler.fill(target, surface)
             counts["interior:InteriorVolumeFiller"] = len(interior)
 
+        placements = surface + interior
+        dropped = added = 0
+        if self.config.validate_structure and placements:
+            # Regions are built independently, so two of them can claim the
+            # same cell; the surface placements come first and win.
+            placements, dropped = resolve_overlaps(placements)
+            placements, added = brace(placements)
+            counts["structure:dropped_overlaps"] = dropped
+            counts["structure:added_supports"] = added
         return PipelineResult(
-            placements=surface + interior,
+            placements=placements,
             surface_placements=surface,
             interior_placements=interior,
             regions=regions,
             per_region_counts=counts,
+            dropped_overlaps=dropped,
+            added_supports=added,
         )

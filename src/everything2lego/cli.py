@@ -128,7 +128,9 @@ def _run(grid, out: Path, model_name: str, use_tiles: bool, supports: bool = Tru
     console.rule("[bold]writing outputs[/bold]")
     outputs = _write_outputs(placements, out, model_name=model_name, report=report)
     _print_summary(placements, outputs, check)
-    if supports and not report["geometrically_connected"]:
+    if not report["geometrically_connected"]:
+        # With --no-supports or a brace mode that leaves parts floating the
+        # files are still written, but the model is not buildable as is.
         console.print("[red]The exported model needs structural review; see report.json.[/red]")
         raise typer.Exit(1)
 
@@ -1058,13 +1060,17 @@ def semantic(
             refine_report["soft_n_parts"] = len(sres.placements)
 
     if final_placements:
+        check = stability.check(final_placements)
         outputs = _write_outputs(final_placements, out,
                                   model_name="semantic",
-                                  report={"parts": len(final_placements),
+                                  report={**pipeline.structure_report(final_placements, check),
                                           "regions": len(result.regions),
                                           "per_region": result.per_region_counts,
                                           "refine": refine_report})
-        _print_summary(final_placements, outputs)
+        _print_summary(final_placements, outputs, check)
+        if not check.ok:
+            console.print("[red]The exported model needs structural review; see report.json.[/red]")
+            raise typer.Exit(1)
     else:
         console.print("[yellow]no placements produced — check detector output[/yellow]")
 

@@ -9,32 +9,14 @@ from typing import Iterable
 
 from . import bricks
 from .colors import palette
-from .pack import Placement
+from .pack import Placement, slope_world_low
 
 
 _LOW_DIR_CYCLE = ("+x", "-z", "-x", "+z")
 _CORNER_LOW_CYCLE = ("+x+z", "+x-z", "-x-z", "-x+z")
 
 
-def _slope_world_low(p: Placement) -> str | None:
-    """World low direction for a slope placement — same logic as pack.py's
-    slope refinement.  Returns e.g. "+x", "-z", or "+x+z" for corner slopes;
-    None if the part isn't a slope."""
-    part = p.part
-    if part.shape not in ("slope", "slope_inv", "slope_corner"):
-        return None
-    rot_steps = (p.rotation_deg // 90) % 4
-    if part.shape == "slope_corner":
-        default = part.slope_dir or "+x+z"
-        if default not in _CORNER_LOW_CYCLE:
-            default = "+x+z"
-        idx = _CORNER_LOW_CYCLE.index(default)
-        return _CORNER_LOW_CYCLE[(idx + rot_steps) % 4]
-    default = part.slope_dir or "+x"
-    if default not in _LOW_DIR_CYCLE:
-        default = "+x"
-    idx = _LOW_DIR_CYCLE.index(default)
-    return _LOW_DIR_CYCLE[(idx + rot_steps) % 4]
+_slope_world_low = slope_world_low
 
 
 def _scene_dict(placements: Iterable[Placement]) -> dict:
