@@ -194,6 +194,37 @@ Without that hardware, `--segmenter builtin` and hand-painted labels give the
 same pipeline its parts.  None of this is required: without `--parts` or
 `--segmenter` the facet detector runs as before.
 
+### Naming the parts with a vision model (optional)
+
+A segmenter says where the parts are, not what they are, and the builders
+only treat a part as a window, door, roof, wall or foundation when it is
+named one.  Geometry can guess at a house; it cannot at a car or a chair.
+`--label-parts` draws the object with each part highlighted (a PIL
+rasteriser, no GPU), shows the pictures to Claude and asks what every part
+is and how a LEGO builder should treat it:
+
+```bash
+pip install 'everything2lego[vlm]'        # the anthropic SDK
+export ANTHROPIC_API_KEY=...
+
+# Name the parts while building (uses --parts, or the builtin segmenter).
+.venv/bin/everything2lego semantic truck.glb --label-parts --hint "a 1960s pickup" --out out/
+
+# Or name them once, keep the result, and build from it any number of times.
+.venv/bin/everything2lego label-parts truck.glb -o truck.parts.glb
+.venv/bin/everything2lego semantic truck.glb --parts truck.parts.glb --out out/
+```
+
+The command prints what the model saw ("object: a pickup truck", "part 4:
+windscreen -> window", "part 7: left front wheel") and keeps the renders
+under `out/parts/`.  Names already in a sidecar win over the model's;
+answers are cached per mesh and segmentation, so a second run is free.
+One mesh costs a few cents (two overview pictures and one per part, at
+most sixteen parts per request).  Requests opt into the API's default
+refusal fallback, so a declined picture is retried on another model
+inside the same call.  Without the package, a key or a network the
+pipeline warns and carries on with unnamed parts.
+
 ### `build` styling flags
 
 `build` (and `carve`, `triposr`, `hunyuan`...) packs voxels with the classical

@@ -25,6 +25,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+# Naming segmented parts with a vision model (`semantic --label-parts`,
+# `label-parts`); needs an Anthropic API key.
+vlm = ["anthropic>=1.0"]
 # Heavy photo -> 3D backends (Hunyuan3D, TripoSR, DUSt3R, U^2-Net).  Not
 # needed for the mesh -> LEGO pipeline or the test suite; tests that need
 # torch skip when it is absent.

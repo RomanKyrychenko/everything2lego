@@ -40,6 +40,9 @@ class PartLabels:
     labels: np.ndarray                      # (F,) int, -1 for unlabelled
     names: dict[int, str] = field(default_factory=dict)
     colours: dict[int, tuple[int, int, int]] = field(default_factory=dict)
+    # Free-form names ("chimney", "left wheel") from the vision labeller;
+    # `names` holds the builder vocabulary (wall, roof, window, ...).
+    descriptions: dict[int, str] = field(default_factory=dict)
 
     @property
     def ids(self) -> list[int]:
@@ -96,13 +99,14 @@ def _quantise(rgb: np.ndarray, step: int) -> np.ndarray:
 
 def labels_from_mesh(labelled: trimesh.Trimesh, mesh: trimesh.Trimesh | None = None,
                      *, colour_step: int = 16, min_fraction: float = 0.002,
-                     merge_distance: int = 60) -> PartLabels:
+                     merge_distance: int = 60, known: list | None = None) -> PartLabels:
     """Per-face labels from a colour-coded mesh: one label per distinct
     (quantised) colour, with labels below `min_fraction` of the faces
-    (blended boundary colours) absorbed into their neighbours.  When
-    `mesh` differs from `labelled` (the segmenter remeshed or decimated
-    it), each of `mesh`'s faces takes the label of the nearest labelled
-    face centre."""
+    (blended boundary colours) absorbed into their neighbours.  Colours
+    in `known` (a sidecar names them) are parts whatever their face count
+    or position among the others.  When `mesh` differs from `labelled`
+    (the segmenter remeshed or decimated it), each of `mesh`'s faces takes
+    the label of the nearest labelled face centre."""
     rgb = _face_colours(labelled)
     if rgb is None:
         raise ValueError("the labelled mesh has no face or vertex colours")
@@ -115,7 +119,8 @@ def labels_from_mesh(labelled: trimesh.Trimesh, mesh: trimesh.Trimesh | None = N
     # a colour is also rejected as a part when it lies on the line between
     # two part colours already found; every rejected colour joins the
     # nearest part colour.
-    seeds: list[np.ndarray] = []
+    seeds: list[np.ndarray] = [np.asarray(c, dtype=float) for c in (known or [])]
+    n_known = len(seeds)
     assign = np.zeros(len(uniq), dtype=int)
     for i in np.argsort(-counts):
         c = uniq[i].astype(float)
@@ -135,7 +140,7 @@ def labels_from_mesh(labelled: trimesh.Trimesh, mesh: trimesh.Trimesh | None = N
         changed = False
         for k in np.argsort(seed_counts):
             others = [s for j, s in enumerate(seeds) if j != k]
-            if _is_blend(seeds[k], others, merge_distance):
+            if k >= n_known and _is_blend(seeds[k], others, merge_distance):
                 keep = [j for j in range(len(seeds)) if j != k]
                 nearest = {j: int(np.argmin([np.abs(uniq[j] - seeds[m]).sum() for m in keep]))
                            for j in np.flatnonzero(assign == k)}
@@ -182,22 +187,30 @@ def load_part_labels(path: str | Path, mesh: trimesh.Trimesh | None = None) -> P
     loaded = trimesh.load(path, force="mesh", process=False)
     if isinstance(loaded, trimesh.Scene):
         loaded = loaded.dump(concatenate=True)
-    labels = labels_from_mesh(loaded, mesh)
+    names: dict[str, str] = {}
     for sidecar in (path.with_suffix(".json"), path.with_suffix(".labels.json")):
         if sidecar.exists():
             names = json.loads(sidecar.read_text())
-            labels.names = _match_names(labels.colours, names)
             break
+    known = [c for c, _ in _parse_names(names)]
+    labels = labels_from_mesh(loaded, mesh, known=known)
+    if names:
+        labels.names = _match_names(labels.colours, names)
     return labels
 
 
-def _match_names(colours: dict[int, tuple[int, int, int]], names: dict[str, str]) -> dict[int, str]:
-    """Each label takes the name of the sidecar colour nearest its own."""
+def _parse_names(names: dict[str, str]) -> list[tuple[np.ndarray, str]]:
     parsed = []
     for key, name in names.items():
         k = key.lstrip("#")
         if len(k) == 6:
             parsed.append((np.array([int(k[i:i + 2], 16) for i in (0, 2, 4)]), name.strip().lower()))
+    return parsed
+
+
+def _match_names(colours: dict[int, tuple[int, int, int]], names: dict[str, str]) -> dict[int, str]:
+    """Each label takes the name of the sidecar colour nearest its own."""
+    parsed = _parse_names(names)
     out = {}
     for label, rgb in colours.items():
         if parsed:
@@ -432,7 +445,11 @@ def regions_from_labels(target: MeshTarget, labels: PartLabels, *,
         planar = p["planarity"] >= planar_tolerance
         extents = np.sort(p["mx"] - p["mn"])
         big_enough = extents[1] >= min_extent
-        if name in OPENING_NAMES or (planar and abs(ny) < vertical_ny and p["area"] < 0.03 * total_area
+        # A part someone named is what they said: a small "wall" fragment
+        # in the plane of a bigger wall is not a window.
+        named = name in WALL_NAMES | ROOF_NAMES | GROUND_NAMES
+        if name in OPENING_NAMES or (not named and planar and abs(ny) < vertical_ny
+                                     and p["area"] < 0.03 * total_area
                                      and big_enough and _in_plane_of_a_wall(p, walls)):
             openings.append({"min": p["mn"].tolist(), "max": p["mx"].tolist(),
                              "normal": p["normal"].tolist(), "name": name or "window",
