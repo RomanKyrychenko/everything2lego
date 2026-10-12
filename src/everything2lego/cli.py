@@ -12,15 +12,19 @@ Neural backends require the arm64 venv (see README) and vendor/TripoSR checkout.
 from __future__ import annotations
 
 from pathlib import Path
+import importlib.util
 import json
 import re
-from typing import List, Optional
+import subprocess
+import sys
+from typing import Callable, List, Optional
 
+import numpy as np
 import typer
 from rich.console import Console
 from rich.table import Table
 
-from . import backends, io_bricklink, io_ldraw, io_stl, instructions, pack, pipeline, stability, viewer_export, voxelize
+from . import backends, budget, colors, io_bricklink, io_ldraw, io_stl, instructions, pack, pipeline, stability, viewer_export, voxelize
 
 app = typer.Typer(help="Convert a 3D mesh or a set of images of one object into real LEGO bricks.")
 console = Console()
@@ -138,11 +142,157 @@ def _run(grid, out: Path, model_name: str, use_tiles: bool, supports: bool = Tru
         raise typer.Exit(1)
 
 
+# ---------------------------------------------------------------------------
+# Shared option plumbing: part budget, palette, speckle smoothing, delighting.
+
+MAX_PARTS_HELP = ("Target part count. Picks the largest --max-studs, then hollowing, then the "
+                  "colour-cluster count that fits; overrides --max-studs when both are given.")
+PALETTE_HELP = ("house: snap colours to a small set of building colours (white, tan, greys, "
+                "reddish brown, red, dark red, black, glass); auto: cluster to --color-clusters "
+                "LDraw colours; full: keep every LDraw colour.")
+MIN_COLOR_REGION_HELP = ("Same-colour voxel regions smaller than this take their neighbours' "
+                         "majority colour before packing (0 or 1 disables).")
+COLOR_CLUSTERS_HELP = "Colour clusters kept by --palette auto (0 keeps all)."
+DELIGHT_HELP = ("Run tools/delight.py (Hunyuan3D-delight) on the photos first when torch and "
+                "diffusers are installed; skipped with a note otherwise.")
+
+
+def _palette_option(value: str) -> str:
+    value = value.lower()
+    if value not in colors.PALETTE_MODES:
+        raise typer.BadParameter(f"--palette must be one of {', '.join(colors.PALETTE_MODES)}")
+    return value
+
+
+def _measurer(make_grid: Callable[[int, bool], "voxelize.VoxelGrid"],
+              **assemble_kwargs) -> Callable[[int, bool], budget.Measurement]:
+    """A `budget.choose` measurement: build the grid at a low resolution,
+    pack it the way `_run` will, count the parts."""
+    def measure(max_studs: int, hollow: bool) -> budget.Measurement:
+        grid = make_grid(max_studs, hollow)
+        result = pipeline.assemble(grid, **assemble_kwargs)
+        n_colors = len(np.unique(grid.palette_idx[grid.palette_idx >= 0]))
+        return budget.Measurement(max_studs, hollow, len(result.placements), max(1, n_colors))
+    return measure
+
+
+def _apply_budget(max_parts: int, make_grid: Callable[[int, bool], "voxelize.VoxelGrid"], *,
+                  max_studs: Optional[int], hollow: Optional[bool],
+                  max_studs_cap: int = 128, allow_colors: bool = True,
+                  **assemble_kwargs) -> budget.Choice:
+    """Choose resolution / hollowing / colour count for `max_parts` and
+    print the choice.  `max_studs` is what the user passed (None when they
+    did not); --max-parts wins over it."""
+    console.rule(f"[bold]part budget[/bold] {max_parts} parts")
+    if max_studs is not None:
+        console.print(f"--max-parts {max_parts} overrides --max-studs {max_studs}")
+    try:
+        choice = budget.choose(max_parts, _measurer(make_grid, **assemble_kwargs),
+                               max_studs_cap=max_studs_cap, hollow=hollow,
+                               allow_colors=allow_colors)
+    except (ValueError, RuntimeError) as exc:
+        raise typer.BadParameter(f"could not estimate the part count: {exc}") from exc
+    console.print(f"chose {choice.describe()}")
+    if not choice.fits:
+        console.print(f"[yellow]no setting is predicted to fit {max_parts} parts; "
+                      f"using the smallest.[/yellow]")
+    return choice
+
+
+def _budget_clusters(color_clusters: int, choice: budget.Choice) -> int:
+    """The colour-cluster count to quantise to after a budget choice: the
+    chooser's count, or the user's when that is already lower."""
+    if choice.color_clusters >= choice.measurement.colors:
+        return color_clusters
+    return min(color_clusters, choice.color_clusters) if color_clusters > 0 else choice.color_clusters
+
+
+def _prepare_grid(grid: "voxelize.VoxelGrid", *, palette: str = "auto",
+                  color_clusters: int = 10, min_color_region: int = 4) -> "voxelize.VoxelGrid":
+    """Colour post-processing on a voxel grid before packing: palette
+    mode, then per-region speckle smoothing."""
+    palette = _palette_option(palette)
+    idx = grid.palette_idx
+    before = len(np.unique(idx[idx >= 0]))
+    if palette == "house":
+        idx = colors.remap_to_house(idx)
+    if palette != "full" and color_clusters > 0:
+        idx = colors.reduce_palette(idx, color_clusters)
+    after = len(np.unique(idx[idx >= 0]))
+    if after != before or palette == "house":
+        console.print(f"palette '{palette}': {before} -> {after} colours")
+    if min_color_region > 1:
+        smoothed = voxelize.smooth_color_regions(idx, min_color_region)
+        changed = int(((smoothed != idx) & (idx >= 0)).sum())
+        console.print(f"colour regions under {min_color_region} voxels: recoloured {changed} voxels")
+        idx = smoothed
+    return voxelize.VoxelGrid(palette_idx=idx, metadata={**grid.metadata, "palette": palette,
+                                                         "min_color_region": min_color_region})
+
+
+def _delight_available() -> bool:
+    return all(importlib.util.find_spec(m) is not None for m in ("torch", "diffusers"))
+
+
+def _maybe_delight(images: List[Path], out: Path, enabled: bool = True) -> List[Path]:
+    """Run tools/delight.py over `images` into out/delit/ when it can run;
+    otherwise say so once and return the originals."""
+    if not enabled:
+        return images
+    script = Path(__file__).resolve().parents[2] / "tools" / "delight.py"
+    if not _delight_available():
+        console.print("delight: torch/diffusers not installed, using the photos as they are")
+        return images
+    if not script.exists():
+        console.print(f"delight: {script} not found, using the photos as they are")
+        return images
+    console.rule("[bold]delighting[/bold] photos")
+    target = out / "delit"
+    target.mkdir(parents=True, exist_ok=True)
+    delit: List[Path] = []
+    for img in images:
+        dst = target / f"{img.stem}.png"
+        try:
+            subprocess.run([sys.executable, str(script), str(img), str(dst)], check=True)
+        except (subprocess.CalledProcessError, OSError) as exc:
+            console.print(f"[yellow]delight failed on {img.name} ({exc}); using the original[/yellow]")
+            delit.append(img)
+            continue
+        delit.append(dst)
+    return delit
+
+
+def _photo_grid(grid: "voxelize.VoxelGrid", *, max_parts: Optional[int], max_studs: Optional[int],
+                native_studs: int, supports: bool, use_tiles: bool, palette: str,
+                color_clusters: int, min_color_region: int) -> "voxelize.VoxelGrid":
+    """Budget + colour handling for backends that already produced their
+    grid at `native_studs`: lower resolutions come from resampling that
+    grid, so the chosen resolution never exceeds the native one."""
+    if max_parts is not None:
+        def make_grid(studs: int, hollow: bool) -> "voxelize.VoxelGrid":
+            g = grid if studs == native_studs else voxelize.resample_grid(grid, studs)
+            return voxelize.hollow_grid(g) if hollow else g
+        choice = _apply_budget(max_parts, make_grid, max_studs=max_studs, hollow=None,
+                               max_studs_cap=native_studs, allow_colors=palette != "full",
+                               supports=supports, use_tiles=use_tiles)
+        grid = make_grid(choice.max_studs, choice.hollow)
+        color_clusters = _budget_clusters(color_clusters, choice)
+        console.print(f"voxel grid: {grid.shape_yxz}")
+    return _prepare_grid(grid, palette=palette, color_clusters=color_clusters,
+                         min_color_region=min_color_region)
+
+
 @app.command()
 def build(
     mesh: Path = typer.Argument(..., exists=True, dir_okay=False, help="Input .glb/.obj/.stl mesh."),
     out: Path = typer.Option(Path("out"), "--out", "-o", help="Output directory."),
-    max_studs: int = typer.Option(32, "--max-studs", min=1, max=128, help="Longer horizontal size in studs."),
+    max_studs: Optional[int] = typer.Option(None, "--max-studs", min=1, max=128,
+                                            help="Longer horizontal size in studs (default 32)."),
+    max_parts: Optional[int] = typer.Option(None, "--max-parts", min=1, help=MAX_PARTS_HELP),
+    palette: str = typer.Option("auto", "--palette", help=PALETTE_HELP),
+    color_clusters: int = typer.Option(10, "--color-clusters", min=0, max=64, help=COLOR_CLUSTERS_HELP),
+    min_color_region: int = typer.Option(4, "--min-color-region", min=0, max=64,
+                                         help=MIN_COLOR_REGION_HELP),
     color_samples: int = typer.Option(200_000, "--color-samples",
                                        min=1, help="Surface samples for color transfer."),
     use_tiles: bool = typer.Option(True, "--tiles/--no-tiles",
@@ -209,15 +359,34 @@ def build(
         except Exception as exc:
             console.print(f"[yellow]warning: could not save input mesh ({exc})[/yellow]")
 
+    palette = _palette_option(palette)
+
+    def make_grid(studs: int, hollow_: bool) -> voxelize.VoxelGrid:
+        return voxelize.voxelize(m, max_studs=studs, color_samples=color_samples,
+                                 hollow=hollow_, wall_thickness=wall_thickness,
+                                 color_k=color_k, color_mode=color_mode,
+                                 subvoxels=subvoxels)
+
+    if max_parts is not None:
+        # --hollow pins hollowing on; --solid (the default) lets the budget decide.
+        choice = _apply_budget(max_parts, make_grid, max_studs=max_studs,
+                               hollow=True if hollow else None,
+                               allow_colors=palette != "full",
+                               use_tiles=use_tiles, use_slopes=use_slopes,
+                               supports=supports, brace_mode=brace_mode)
+        max_studs, hollow = choice.max_studs, choice.hollow
+        color_clusters = _budget_clusters(color_clusters, choice)
+    else:
+        max_studs = 32 if max_studs is None else max_studs
+
     console.rule("[bold]voxelizing[/bold]")
     try:
-        grid = voxelize.voxelize(m, max_studs=max_studs, color_samples=color_samples,
-                                  hollow=hollow, wall_thickness=wall_thickness,
-                                  color_k=color_k, color_mode=color_mode,
-                                  subvoxels=subvoxels)
+        grid = make_grid(max_studs, hollow)
     except (ValueError, RuntimeError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     console.print(f"voxel grid: {grid.shape_yxz} (y=plates, x=studs, z=studs)")
+    grid = _prepare_grid(grid, palette=palette, color_clusters=color_clusters,
+                         min_color_region=min_color_region)
 
     color_swaps: dict[int, str] = {}
     def _parse(codes: str | None, target: str):
@@ -243,7 +412,15 @@ def carve(
     images: List[Path] = typer.Argument(..., exists=True,
                                          help="Turntable images of one object."),
     out: Path = typer.Option(Path("out"), "--out", "-o", help="Output directory."),
-    max_studs: int = typer.Option(32, "--max-studs", min=1, max=128, help="Longer horizontal size in studs."),
+    max_studs: Optional[int] = typer.Option(None, "--max-studs", min=1, max=128,
+                                            help="Longer horizontal size in studs (default 32)."),
+    max_parts: Optional[int] = typer.Option(None, "--max-parts", min=1, help=MAX_PARTS_HELP),
+    hollow: bool = typer.Option(False, "--hollow/--solid",
+                                help="Carve out the interior of the voxel grid, leaving a 2-voxel shell."),
+    palette: str = typer.Option("auto", "--palette", help=PALETTE_HELP),
+    color_clusters: int = typer.Option(10, "--color-clusters", min=0, max=64, help=COLOR_CLUSTERS_HELP),
+    min_color_region: int = typer.Option(4, "--min-color-region", min=0, max=64,
+                                         help=MIN_COLOR_REGION_HELP),
     background: Optional[str] = typer.Option(None, "--background",
                                               help="Hex color of the background (e.g. #ffffff). "
                                                    "Auto-detected from image corners if omitted."),
@@ -270,17 +447,37 @@ def carve(
             expanded.append(path)
     images = expanded
 
-    console.rule(f"[bold]carving[/bold] {len(images)} views")
-    try:
-        parsed_angles = [float(a) for a in angles.split(",")] if angles else None
-        grid = backends.build(
-            "carve", images, max_studs=max_studs, angles=parsed_angles,
+    palette = _palette_option(palette)
+    parsed_angles = [float(a) for a in angles.split(",")] if angles else None
+
+    def make_grid(studs: int, hollow_: bool) -> voxelize.VoxelGrid:
+        g = backends.build(
+            "carve", images, max_studs=studs, angles=parsed_angles,
             background_hex=background, tolerance=tolerance,
             min_views_fraction=min_views_fraction, masks=masks,
         )
+        return voxelize.hollow_grid(g) if hollow_ else g
+
+    if max_parts is not None:
+        if len(images) < 2:
+            raise typer.BadParameter("At least two views are required")
+        choice = _apply_budget(max_parts, make_grid, max_studs=max_studs,
+                               hollow=True if hollow else None,
+                               allow_colors=palette != "full",
+                               use_tiles=use_tiles, supports=supports)
+        max_studs, hollow = choice.max_studs, choice.hollow
+        color_clusters = _budget_clusters(color_clusters, choice)
+    else:
+        max_studs = 32 if max_studs is None else max_studs
+
+    console.rule(f"[bold]carving[/bold] {len(images)} views")
+    try:
+        grid = make_grid(max_studs, hollow)
     except (ValueError, RuntimeError, OSError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     console.print(f"voxel grid: {grid.shape_yxz}")
+    grid = _prepare_grid(grid, palette=palette, color_clusters=color_clusters,
+                         min_color_region=min_color_region)
     _run(grid, out, model_name=images[0].stem, use_tiles=use_tiles, supports=supports)
 
 
@@ -304,7 +501,14 @@ def triposr(
     images: List[Path] = typer.Argument(..., exists=True,
                                          help="Input image(s). Only the first is used for reconstruction."),
     out: Path = typer.Option(Path("out"), "--out", "-o", help="Output directory."),
-    max_studs: int = typer.Option(32, "--max-studs", min=1, max=128),
+    max_studs: Optional[int] = typer.Option(None, "--max-studs", min=1, max=128,
+                                            help="Longer horizontal size in studs (default 32)."),
+    max_parts: Optional[int] = typer.Option(None, "--max-parts", min=1, help=MAX_PARTS_HELP),
+    palette: str = typer.Option("auto", "--palette", help=PALETTE_HELP),
+    color_clusters: int = typer.Option(10, "--color-clusters", min=0, max=64, help=COLOR_CLUSTERS_HELP),
+    min_color_region: int = typer.Option(4, "--min-color-region", min=0, max=64,
+                                         help=MIN_COLOR_REGION_HELP),
+    delight: bool = typer.Option(True, "--delight/--no-delight", help=DELIGHT_HELP),
     mc_resolution: int = typer.Option(128, "--mc-resolution", min=32, max=512,
                                        help="Marching-cubes grid resolution for mesh extraction."),
     front_view: int = typer.Option(0, "--front-view", min=0,
@@ -314,15 +518,22 @@ def triposr(
 ) -> None:
     """Neural single-image reconstruction with TripoSR (Stability AI + VAST) -> LEGO."""
     images = _expand_images(images)
+    palette = _palette_option(palette)
+    native_studs = 32 if max_studs is None else max_studs
     console.rule(f"[bold]TripoSR[/bold] reconstructing from {images[front_view].name}")
+    images = _maybe_delight(images, out, delight)
     try:
         grid = backends.build(
-            "triposr", images, max_studs=max_studs,
+            "triposr", images, max_studs=native_studs,
             mc_resolution=mc_resolution, front_view=front_view,
         )
     except (ValueError, RuntimeError, OSError, ImportError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     console.print(f"voxel grid: {grid.shape_yxz}")
+    grid = _photo_grid(grid, max_parts=max_parts, max_studs=max_studs,
+                       native_studs=native_studs, supports=supports, use_tiles=use_tiles,
+                       palette=palette, color_clusters=color_clusters,
+                       min_color_region=min_color_region)
     _run(grid, out, model_name=images[front_view].stem, use_tiles=use_tiles, supports=supports)
 
 
@@ -331,7 +542,14 @@ def hybrid(
     images: List[Path] = typer.Argument(..., exists=True,
                                          help="Turntable images of one object."),
     out: Path = typer.Option(Path("out"), "--out", "-o", help="Output directory."),
-    max_studs: int = typer.Option(32, "--max-studs", min=1, max=128),
+    max_studs: Optional[int] = typer.Option(None, "--max-studs", min=1, max=128,
+                                            help="Longer horizontal size in studs (default 32)."),
+    max_parts: Optional[int] = typer.Option(None, "--max-parts", min=1, help=MAX_PARTS_HELP),
+    palette: str = typer.Option("auto", "--palette", help=PALETTE_HELP),
+    color_clusters: int = typer.Option(10, "--color-clusters", min=0, max=64, help=COLOR_CLUSTERS_HELP),
+    min_color_region: int = typer.Option(4, "--min-color-region", min=0, max=64,
+                                         help=MIN_COLOR_REGION_HELP),
+    delight: bool = typer.Option(True, "--delight/--no-delight", help=DELIGHT_HELP),
     mc_resolution: int = typer.Option(128, "--mc-resolution", min=32, max=512),
     front_view: int = typer.Option(0, "--front-view", min=0),
     background: Optional[str] = typer.Option(None, "--background"),
@@ -343,11 +561,14 @@ def hybrid(
 ) -> None:
     """TripoSR mesh intersected with the multi-view silhouette hull -> LEGO."""
     images = _expand_images(images)
+    palette = _palette_option(palette)
+    native_studs = 32 if max_studs is None else max_studs
     console.rule(f"[bold]hybrid[/bold] TripoSR + silhouette on {len(images)} views")
+    images = _maybe_delight(images, out, delight)
     try:
         parsed_angles = [float(a) for a in angles.split(",")] if angles else None
         grid = backends.build(
-            "hybrid", images, max_studs=max_studs,
+            "hybrid", images, max_studs=native_studs,
             mc_resolution=mc_resolution, front_view=front_view,
             angles=parsed_angles, background_hex=background,
             tolerance=tolerance, min_views_fraction=min_views_fraction,
@@ -355,6 +576,10 @@ def hybrid(
     except (ValueError, RuntimeError, OSError, ImportError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     console.print(f"voxel grid: {grid.shape_yxz}")
+    grid = _photo_grid(grid, max_parts=max_parts, max_studs=max_studs,
+                       native_studs=native_studs, supports=supports, use_tiles=use_tiles,
+                       palette=palette, color_clusters=color_clusters,
+                       min_color_region=min_color_region)
     _run(grid, out, model_name=images[front_view].stem, use_tiles=use_tiles, supports=supports)
 
 
@@ -363,7 +588,14 @@ def hunyuan(
     images: List[Path] = typer.Argument(..., exists=True,
                                          help="Input image(s). Only the first is used for reconstruction."),
     out: Path = typer.Option(Path("out"), "--out", "-o"),
-    max_studs: int = typer.Option(40, "--max-studs", min=1, max=128),
+    max_studs: Optional[int] = typer.Option(None, "--max-studs", min=1, max=128,
+                                            help="Longer horizontal size in studs (default 40)."),
+    max_parts: Optional[int] = typer.Option(None, "--max-parts", min=1, help=MAX_PARTS_HELP),
+    palette: str = typer.Option("auto", "--palette", help=PALETTE_HELP),
+    color_clusters: int = typer.Option(10, "--color-clusters", min=0, max=64, help=COLOR_CLUSTERS_HELP),
+    min_color_region: int = typer.Option(4, "--min-color-region", min=0, max=64,
+                                         help=MIN_COLOR_REGION_HELP),
+    delight: bool = typer.Option(True, "--delight/--no-delight", help=DELIGHT_HELP),
     steps: int = typer.Option(50, "--steps", min=5, max=200,
                                help="Flow-matching inference steps."),
     resolution: int = typer.Option(384, "--resolution", min=64, max=512,
@@ -388,13 +620,16 @@ def hunyuan(
     photo->LEGO commands on Apple Silicon.
     """
     images = _expand_images(images)
+    palette = _palette_option(palette)
+    native_studs = 40 if max_studs is None else max_studs
     console.rule(f"[bold]Hunyuan3D-2[/bold] reconstructing from {images[front_view].name}")
+    images = _maybe_delight(images, out, delight)
     out.mkdir(parents=True, exist_ok=True)
     stl_path = out / "model.stl" if save_mesh else None
     glb_path = out / "model.glb" if (save_mesh and project_colors) else None
     try:
         grid = backends.build(
-            "hunyuan3d", images, max_studs=max_studs,
+            "hunyuan3d", images, max_studs=native_studs,
             num_inference_steps=steps, octree_resolution=resolution,
             guidance_scale=guidance, front_view=front_view,
             project_colors=project_colors, forward_axis=forward_axis,
@@ -404,6 +639,10 @@ def hunyuan(
     except (ValueError, RuntimeError, OSError, ImportError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     console.print(f"voxel grid: {grid.shape_yxz}")
+    grid = _photo_grid(grid, max_parts=max_parts, max_studs=max_studs,
+                       native_studs=native_studs, supports=supports, use_tiles=use_tiles,
+                       palette=palette, color_clusters=color_clusters,
+                       min_color_region=min_color_region)
     _run(grid, out, model_name=images[front_view].stem, use_tiles=use_tiles, supports=supports)
     if stl_path and stl_path.exists():
         console.print(f"  [green]mesh (stl)[/green] {stl_path}")
@@ -416,7 +655,14 @@ def hunyuan21(
     images: List[Path] = typer.Argument(..., exists=True,
                                          help="Input image(s). Only the first is used for reconstruction."),
     out: Path = typer.Option(Path("out"), "--out", "-o"),
-    max_studs: int = typer.Option(40, "--max-studs", min=1, max=128),
+    max_studs: Optional[int] = typer.Option(None, "--max-studs", min=1, max=128,
+                                            help="Longer horizontal size in studs (default 40)."),
+    max_parts: Optional[int] = typer.Option(None, "--max-parts", min=1, help=MAX_PARTS_HELP),
+    palette: str = typer.Option("auto", "--palette", help=PALETTE_HELP),
+    color_clusters: int = typer.Option(10, "--color-clusters", min=0, max=64, help=COLOR_CLUSTERS_HELP),
+    min_color_region: int = typer.Option(4, "--min-color-region", min=0, max=64,
+                                         help=MIN_COLOR_REGION_HELP),
+    delight: bool = typer.Option(True, "--delight/--no-delight", help=DELIGHT_HELP),
     steps: int = typer.Option(50, "--steps", min=5, max=200),
     resolution: int = typer.Option(384, "--resolution", min=64, max=512),
     guidance: float = typer.Option(5.0, "--guidance", min=0.0, max=20.0),
@@ -435,13 +681,16 @@ def hunyuan21(
     Higher-quality geometry than the 2.0 backend.
     """
     images = _expand_images(images)
+    palette = _palette_option(palette)
+    native_studs = 40 if max_studs is None else max_studs
     console.rule(f"[bold]Hunyuan3D-2.1[/bold] reconstructing from {images[front_view].name}")
+    images = _maybe_delight(images, out, delight)
     out.mkdir(parents=True, exist_ok=True)
     stl_path = out / "model.stl" if save_mesh else None
     glb_path = out / "model.glb" if (save_mesh and project_colors) else None
     try:
         grid = backends.build(
-            "hunyuan3d_v21", images, max_studs=max_studs,
+            "hunyuan3d_v21", images, max_studs=native_studs,
             num_inference_steps=steps, octree_resolution=resolution,
             guidance_scale=guidance, front_view=front_view,
             project_colors=project_colors, forward_axis=forward_axis,
@@ -451,6 +700,10 @@ def hunyuan21(
     except (ValueError, RuntimeError, OSError, ImportError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     console.print(f"voxel grid: {grid.shape_yxz}")
+    grid = _photo_grid(grid, max_parts=max_parts, max_studs=max_studs,
+                       native_studs=native_studs, supports=supports, use_tiles=use_tiles,
+                       palette=palette, color_clusters=color_clusters,
+                       min_color_region=min_color_region)
     _run(grid, out, model_name=images[front_view].stem, use_tiles=use_tiles, supports=supports)
     if stl_path and stl_path.exists():
         console.print(f"  [green]mesh (stl)[/green] {stl_path}")
@@ -463,7 +716,14 @@ def hunyuan_mv(
     images: List[Path] = typer.Argument(..., exists=True,
                                          help="1-4 canonical views (front, back, left, right in this order)."),
     out: Path = typer.Option(Path("out"), "--out", "-o"),
-    max_studs: int = typer.Option(40, "--max-studs", min=1, max=128),
+    max_studs: Optional[int] = typer.Option(None, "--max-studs", min=1, max=128,
+                                            help="Longer horizontal size in studs (default 40)."),
+    max_parts: Optional[int] = typer.Option(None, "--max-parts", min=1, help=MAX_PARTS_HELP),
+    palette: str = typer.Option("auto", "--palette", help=PALETTE_HELP),
+    color_clusters: int = typer.Option(10, "--color-clusters", min=0, max=64, help=COLOR_CLUSTERS_HELP),
+    min_color_region: int = typer.Option(4, "--min-color-region", min=0, max=64,
+                                         help=MIN_COLOR_REGION_HELP),
+    delight: bool = typer.Option(True, "--delight/--no-delight", help=DELIGHT_HELP),
     steps: int = typer.Option(50, "--steps", min=5, max=200),
     resolution: int = typer.Option(384, "--resolution", min=64, max=512),
     guidance: float = typer.Option(5.0, "--guidance", min=0.0, max=20.0),
@@ -480,13 +740,16 @@ def hunyuan_mv(
     cost of needing multiple aligned photos of the *same* physical subject.
     """
     images = _expand_images(images)
+    palette = _palette_option(palette)
+    native_studs = 40 if max_studs is None else max_studs
     console.rule(f"[bold]Hunyuan3D-2mv[/bold] reconstructing from {len(images)} views")
+    images = _maybe_delight(images, out, delight)
     out.mkdir(parents=True, exist_ok=True)
     stl_path = out / "model.stl" if save_mesh else None
     glb_path = out / "model.glb" if (save_mesh and project_colors) else None
     try:
         grid = backends.build(
-            "hunyuan3d_mv", images, max_studs=max_studs,
+            "hunyuan3d_mv", images, max_studs=native_studs,
             num_inference_steps=steps, octree_resolution=resolution,
             guidance_scale=guidance,
             project_colors=project_colors, forward_axis=forward_axis,
@@ -496,6 +759,10 @@ def hunyuan_mv(
     except (ValueError, RuntimeError, OSError, ImportError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     console.print(f"voxel grid: {grid.shape_yxz}")
+    grid = _photo_grid(grid, max_parts=max_parts, max_studs=max_studs,
+                       native_studs=native_studs, supports=supports, use_tiles=use_tiles,
+                       palette=palette, color_clusters=color_clusters,
+                       min_color_region=min_color_region)
     _run(grid, out, model_name=images[0].stem, use_tiles=use_tiles, supports=supports)
 
 
@@ -504,8 +771,14 @@ def photos(
     images: List[Path] = typer.Argument(..., exists=True,
                                          help="Unstructured photos of one subject (any angles)."),
     out: Path = typer.Option(Path("out"), "--out", "-o"),
-    max_studs: int = typer.Option(40, "--max-studs", min=1, max=128,
-                                   help="Longer horizontal size in studs."),
+    max_studs: Optional[int] = typer.Option(None, "--max-studs", min=1, max=128,
+                                            help="Longer horizontal size in studs (default 40)."),
+    max_parts: Optional[int] = typer.Option(None, "--max-parts", min=1, help=MAX_PARTS_HELP),
+    palette: str = typer.Option("auto", "--palette", help=PALETTE_HELP),
+    color_clusters: int = typer.Option(10, "--color-clusters", min=0, max=64, help=COLOR_CLUSTERS_HELP),
+    min_color_region: int = typer.Option(4, "--min-color-region", min=0, max=64,
+                                         help=MIN_COLOR_REGION_HELP),
+    delight: bool = typer.Option(True, "--delight/--no-delight", help=DELIGHT_HELP),
     image_size: int = typer.Option(512, "--image-size",
                                     help="Image resize resolution fed to DUSt3R (224 is faster, 512 more accurate)."),
     niter: int = typer.Option(300, "--niter",
@@ -535,14 +808,17 @@ def photos(
     around the subject, no turntable needed. See the README for photo tips.
     """
     images = _expand_images(images)
+    palette = _palette_option(palette)
+    native_studs = 40 if max_studs is None else max_studs
     if len(images) < 2:
         raise typer.BadParameter("Provide at least two photos.")
     console.rule(f"[bold]DUSt3R[/bold] reconstructing from {len(images)} photos")
+    images = _maybe_delight(images, out, delight)
     if raw_points:
         drop_background = drop_outliers = snap_ground = False
     try:
         grid = backends.build(
-            "dust3r", images, max_studs=max_studs,
+            "dust3r", images, max_studs=native_studs,
             image_size=image_size, niter=niter, min_conf=min_conf,
             drop_background=drop_background,
             background_tolerance=background_tolerance,
@@ -552,6 +828,10 @@ def photos(
     except (ValueError, RuntimeError, OSError, ImportError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     console.print(f"voxel grid: {grid.shape_yxz}  ({grid.metadata.get('num_points', 0)} points)")
+    grid = _photo_grid(grid, max_parts=max_parts, max_studs=max_studs,
+                       native_studs=native_studs, supports=supports, use_tiles=use_tiles,
+                       palette=palette, color_clusters=color_clusters,
+                       min_color_region=min_color_region)
     _run(grid, out, model_name="photos", use_tiles=use_tiles, supports=supports)
 
 
@@ -774,7 +1054,10 @@ def optimize(
 def semantic(
     mesh: Path = typer.Argument(..., exists=True, help="Path to .stl/.glb/.ply mesh."),
     out: Path = typer.Option(Path("out"), "--out", "-o", help="Output directory."),
-    max_studs: int = typer.Option(32, "--max-studs", min=6, max=128),
+    max_studs: Optional[int] = typer.Option(None, "--max-studs", min=6, max=128,
+                                            help="Longer horizontal size in studs (default 32)."),
+    max_parts: Optional[int] = typer.Option(None, "--max-parts", min=1,
+        help=MAX_PARTS_HELP + " Estimated with the classical packer; colours are not changed."),
     n_samples: int = typer.Option(100_000, "--n-samples",
         help="Surface point samples for the RegionDetector."),
     subvoxels: int = typer.Option(1, "--subvoxels", min=1, max=4,
@@ -824,6 +1107,23 @@ def semantic(
     from .semantic_v2.detector import DetectorConfig
     from .semantic_v2.builders import BuilderConfig
     from .semantic_v2.interior import InteriorConfig
+    if max_parts is not None:
+        try:
+            m = voxelize.load_mesh(mesh)
+        except (ValueError, OSError) as exc:
+            raise typer.BadParameter(str(exc)) from exc
+
+        def make_grid(studs: int, hollow_: bool) -> voxelize.VoxelGrid:
+            return voxelize.voxelize(m, max_studs=studs, hollow=hollow_,
+                                     wall_thickness=shell_thickness, subvoxels=subvoxels)
+
+        # The MILP builders are not the classical packer, so this is an
+        # estimate; colours stay as the mesh has them.
+        choice = _apply_budget(max_parts, make_grid, max_studs=max_studs,
+                               hollow=True if hollow else None, allow_colors=False)
+        max_studs, hollow = choice.max_studs, choice.hollow
+    else:
+        max_studs = 32 if max_studs is None else max_studs
     cfg = PipelineConfig(
         max_studs=max_studs,
         n_samples=n_samples,
