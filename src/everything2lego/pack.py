@@ -301,13 +301,35 @@ def _tile_top(voxels: np.ndarray, placements: list[Placement]) -> list[Placement
 
 
 # -- Slope refinement --------------------------------------------------------
+
+import re  # noqa: E402  (slope-family name parsing)
+from dataclasses import field  # noqa: E402
 #
-# LDraw 45-degree slope parts (3040/3039/3038/3037) claim the same voxel volume
-# as their rectangular-brick counterparts, but their top surface is a diagonal
-# ramp instead of a flat plate. Where the packer placed a full brick at the top
-# of a column and the neighbouring column drops down by exactly one brick
-# height, swapping in a slope produces a smoother silhouette without changing
-# the source geometry.
+# Post-pack pass that turns the staircase a voxel roof packs into onto real
+# roof parts.  A sloped brick claims the same voxel volume as the box it is
+# cut from, so every replacement below is volume-preserving: the new part
+# (plus the leftovers of any box part it was cut out of) covers exactly the
+# cells the replaced parts covered.
+#
+# The local pitch is read off the column-top map: a step edge is a column at
+# the top of a tread whose neighbour in one direction is `drop` plates lower,
+# and the tread widths either side of the edge give rise over run.  Each
+# (drop, tread) pair maps to a slope family:
+#
+#   drop 1-2 plates            -> cheese slopes (30°, 54200), 2 plates tall
+#   drop 1 brick, tread 1      -> 45° slopes  (3040/3039/3038/3037...), 2 studs
+#   drop 1 brick, tread >= 2   -> 33° slopes  (4286/3298/4161/3297/3939), 3 studs
+#   drop 2 bricks, short tread -> 65° slopes  (60481/3678b), 2 studs, 2 bricks
+#   drop 3 bricks, short tread -> 75° slopes  (3684), 2 studs, 3 bricks
+#
+# A slope's low strip must be at column top; the high strip may be covered
+# by the next course up, which is how real slope roofs stack (each course
+# sits on the full-height back stud of the course below).  Along the ridge
+# direction, consecutive edge columns of one colour form a run that is tiled
+# with the widest parts of the family (2x4 over two 2x2), seams alternating
+# between courses.  Outside corners take the double-convex corner slope
+# (3045), valleys the double-concave one (3046), and a 1- or 2-stud ridge
+# between two opposite slopes is tiled instead of left as a studded brick.
 #
 # The rotation-to-low-direction cycle below is measured against `io_ldraw._ROT`;
 # CYCLE[i] is the world direction the slope's low side points to when the part
@@ -319,6 +341,8 @@ _LOW_DIR_CYCLE = ("+x", "-z", "-x", "+z")
 # rotating clockwise around +Y (in LDraw's Y-down convention). Indexed by
 # rotation // 90. Matches how corner-slope 3045 rotates.
 _CORNER_LOW_CYCLE = ("+x+z", "+x-z", "-x-z", "-x+z")
+
+_DIR_VEC = {"+x": (1, 0), "-x": (-1, 0), "+z": (0, 1), "-z": (0, -1)}
 
 
 def _column_tops(voxels: np.ndarray) -> np.ndarray:
@@ -332,53 +356,6 @@ def _column_tops(voxels: np.ndarray) -> np.ndarray:
     top = (voxels.shape[0] - 1 - top_from_top).astype(np.int32)
     top[~any_hit] = -1
     return top
-
-
-def _step_down_direction(col_top: np.ndarray, p: Placement,
-                          top_y: int, *,
-                          match_ratio: float = 0.6) -> str | None:
-    """Return the single world direction where the brick's neighbour columns
-    drop by about one brick-height (3 plates) along the majority of the edge.
-    `match_ratio` is the fraction of edge cells that must be at `target - 3`
-    for the edge to count as a step-down. Returns None if no direction, or
-    more than one, qualifies. 0.6 lets slopes fire on organic
-    (Hunyuan-generated) roofs where the pitch is gradual and doesn't
-    quantize cleanly across a whole edge."""
-    W, D = col_top.shape
-    x0, z0 = p.x_stud, p.z_stud
-    xw, zw = p.w_world, p.d_world
-    target = top_y - 3
-
-    def _edge_matches(coords: list[tuple[int, int]]) -> bool:
-        if not coords:
-            return False
-        matches = sum(
-            1 for x, z in coords
-            if 0 <= x < W and 0 <= z < D and col_top[x, z] == target
-        )
-        return matches / len(coords) >= match_ratio
-
-    edges = {
-        "+x": [(x0 + xw, z0 + dz) for dz in range(zw)] if x0 + xw < W else [],
-        "-x": [(x0 - 1, z0 + dz) for dz in range(zw)] if x0 > 0 else [],
-        "+z": [(x0 + dx, z0 + zw) for dx in range(xw)] if z0 + zw < D else [],
-        "-z": [(x0 + dx, z0 - 1) for dx in range(xw)] if z0 > 0 else [],
-    }
-    matches = [d for d, coords in edges.items() if _edge_matches(coords)]
-    if len(matches) == 1:
-        return matches[0]
-    if len(matches) == 2:
-        s = set(matches)
-        if s in ({"+x", "-x"}, {"+z", "-z"}):
-            # Ridge: adjacent-lower on both sides along one axis. Either
-            # direction smooths one face; pick +axis for determinism.
-            return "+x" if s == {"+x", "-x"} else "+z"
-        # Two adjacent directions -> outside corner. Encode as compound
-        # low-corner string, e.g. "+x+z".
-        x_dir = "+x" if "+x" in s else "-x"
-        z_dir = "+z" if "+z" in s else "-z"
-        return x_dir + z_dir
-    return None
 
 
 def slope_world_low(p: Placement) -> str | None:
@@ -430,8 +407,8 @@ def _slope_rotation(slope: Part, world_footprint: tuple[int, int],
 
 
 def _slope_rank(part: Part) -> int:
-    """Prefer canonical 45° slopes over specialty variants (parts with
-    "with", "Cutout", "Hollow", "Bottom Pin", "Stud Holder" in the name).
+    """Prefer canonical slopes over specialty variants (parts with "with",
+    "Cutout", "Hollow", "Bottom Pin", "Stud Holder" in the name).
 
     0 = plain "Slope 45 N x M" or "Slope 45 N x M Inverted"
     1 = named-angle variants (30°/33°/65°/75°) or plain "Slope Curved"
@@ -462,88 +439,560 @@ def _slope_rank(part: Part) -> int:
     return 2
 
 
-def _refine_slopes(voxels: np.ndarray, placements: list[Placement]) -> list[Placement]:
-    """Post-pack pass: replace top-of-column bricks at step-down edges with
-    equivalent slope parts.
+# -- slope families ----------------------------------------------------------
 
-    Candidate selection is ranked (see `_slope_rank`) so plain 3040-style
-    canonical slopes are chosen first; specialty variants (with pins,
-    grates, etc.) only surface when no canonical fit exists. Within a rank,
-    position-hash cycles for variety (curved vs flat, etc.)."""
-    # Group slopes by footprint AND rank so refinement picks canonical first.
-    slopes_by_footprint: dict[tuple[int, int], list[Part]] = {}
-    for slope in parts_by_shape("slope"):
-        if slope.height_units == 3:
-            slopes_by_footprint.setdefault(slope.footprint, []).append(slope)
-    for fp, opts in slopes_by_footprint.items():
-        opts.sort(key=lambda p: (_slope_rank(p), p.ldraw))
-    corners_by_footprint: dict[tuple[int, int], list[Part]] = {}
-    for slope in parts_by_shape("slope_corner"):
-        if slope.height_units == 3:
-            corners_by_footprint.setdefault(slope.footprint, []).append(slope)
-    for fp, opts in corners_by_footprint.items():
-        opts.sort(key=lambda p: (_slope_rank(p), p.ldraw))
+# A plain wedge: "Slope 45 2 x 1", "Brick Sloped 33° 3 x 1", "Slope 75 2 x 2
+# x 3", "Brick Sloped 30° 1 x 1 x 2/3 (Cheese Slope)".  Anything else (curved,
+# double, inverted, with-studs...) is not a roof-face part.
+_PLAIN_SLOPE_NAME = re.compile(
+    r"^(?:Slope|Brick Sloped) (\d+)°? \d+ x \d+(?: x \d+(?:/\d+)?)?(?: \(Cheese Slope\))?$")
 
-    col_top = _column_tops(voxels)
-    result: list[Placement] = []
-    for p in placements:
-        if p.part.shape != "brick" or p.part.height_units != 3:
-            result.append(p)
+
+@dataclass(frozen=True)
+class _SlopeFamily:
+    """One pitch class of roof slopes.
+
+    `run` is the footprint length along the slope (the part's declared x),
+    `height` its height in plates, `drops` the column-top drop beyond the low
+    edge that the part's face spans, `exposed` how many strips from the low
+    edge must be at column top (a 33° slope slants over two studs, a 45° one
+    over one).  `parts` maps ridge-direction width to the canonical part.
+    """
+    name: str
+    run: int
+    height: int
+    drops: tuple[int, ...]
+    exposed: int
+    angles: tuple[int, ...]
+    parts: dict[int, Part] = field(default_factory=dict)
+
+
+_FAMILY_SPECS: tuple[tuple[str, int, int, tuple[int, ...], int, tuple[int, ...]], ...] = (
+    ("75", 2, 9, (9,), 1, (75,)),
+    ("65", 2, 6, (6,), 1, (65,)),
+    ("33", 3, 3, (3,), 2, (33,)),
+    ("45", 2, 3, (3,), 1, (45,)),
+    ("cheese", 1, 2, (1, 2), 1, (30,)),
+)
+
+
+def _slope_families() -> dict[str, _SlopeFamily]:
+    """Slope families built from the catalog: for each (family, width) the
+    canonical plain wedge whose geometry matches the family's run and height."""
+    families = {spec[0]: _SlopeFamily(*spec) for spec in _FAMILY_SPECS}
+    for part in parts_by_shape("slope"):
+        m = _PLAIN_SLOPE_NAME.match(part.name)
+        if not m:
             continue
-        top_y = p.y_plate + p.part.height_units - 1
-        studs = [(p.x_stud + dx, p.z_stud + dz)
-                 for dx in range(p.w_world) for dz in range(p.d_world)]
-        if not all(col_top[x, z] == top_y for x, z in studs):
-            result.append(p)
+        angle = int(m.group(1))
+        run, width = part.footprint
+        for fam in families.values():
+            if angle in fam.angles and run == fam.run and part.height_units == fam.height:
+                have = fam.parts.get(width)
+                if have is None or (_slope_rank(part), part.ldraw) < (_slope_rank(have), have.ldraw):
+                    fam.parts[width] = part
+    return families
+
+
+def _corner_parts() -> tuple[Part | None, Part | None]:
+    """(outside corner, valley corner) 2x2 brick-height corner slopes: the
+    double-convex and double-concave 45° corners. Inverted corners are
+    underside parts and never top a column."""
+    convex: Part | None = None
+    concave: Part | None = None
+    for part in sorted(parts_by_shape("slope_corner"), key=lambda p: p.ldraw):
+        if part.height_units != 3 or part.footprint != (2, 2):
             continue
-        low_dir = _step_down_direction(col_top, p, top_y)
-        if low_dir is None:
-            result.append(p)
+        lname = part.name.lower()
+        if "inverted" in lname:
             continue
-        world_fp = (p.w_world, p.d_world)
-        is_corner = len(low_dir) == 4
-        source_maps = ((corners_by_footprint, slopes_by_footprint) if is_corner
-                       else (slopes_by_footprint, corners_by_footprint))
-        slope: Part | None = None
-        rot: int | None = None
-        # Position-hash cycles through equivalent parts so a roof edge uses
-        # a mix of 3040 (45), 15068 (curved), 3298 (33) etc — much more
-        # varied than always picking the first-declared.
-        seed = (p.x_stud * 73856093) ^ (p.y_plate * 19349663) ^ (p.z_stud * 83492791)
-        for m in source_maps:
-            options = m.get(world_fp) or m.get((world_fp[1], world_fp[0])) or []
-            if not options:
+        if "convex" in lname and convex is None:
+            convex = part
+        elif "concave" in lname and concave is None:
+            concave = part
+    return convex, concave
+
+
+# -- geometry of the packed model --------------------------------------------
+
+def _plain_box_part(part: Part) -> bool:
+    """A part that fills its box: the pre-pass packs tall bricks and panels
+    into covered interior columns as solid fill, so they cut like bricks."""
+    return part.plain and part.shape in ("brick", "plate", "tile", "brick_tall", "panel")
+
+
+_PLAIN_BOX_NAME = re.compile(r"^(?:Brick|Plate|Tile) \d+ x \d+$")
+
+
+def _box_cover_parts(shape: str, height: int) -> tuple[Part, ...]:
+    """Catalog parts of one box shape and height, largest first, canonical
+    names ahead of textured and side-stud variants of the same size."""
+    opts = [p for p in parts_by_shape(shape) if p.height_units == height and p.plain]
+    return tuple(sorted(opts, key=lambda p: (-p.w * p.d, -max(p.w, p.d),
+                                             not _PLAIN_BOX_NAME.match(p.name), p.ldraw)))
+
+
+def _cover_rect(shape: str, height: int, color_idx: int,
+                x0: int, z0: int, w: int, d: int, y: int) -> list[Placement] | None:
+    """Greedily cover a (w, d) rectangle at level y with parts of one shape
+    and height. None if the shape has no parts that can cover it."""
+    opts = _box_cover_parts(shape, height)
+    if not opts:
+        return None
+    free = np.ones((w, d), dtype=bool)
+    out: list[Placement] = []
+    for ix in range(w):
+        for iz in range(d):
+            if not free[ix, iz]:
                 continue
-            # Only cycle within the best rank tier — specialty (rank 3)
-            # slopes are last-resort, not part of the variety pool.
-            best_rank = _slope_rank(options[0])
-            tier = [q for q in options if _slope_rank(q) == best_rank]
-            for offset in range(len(tier)):
-                candidate = tier[(seed + offset) % len(tier)]
-                rot = _slope_rotation(candidate, world_fp, low_dir)
-                if rot is not None:
-                    slope = candidate
+            placed = False
+            for part in opts:
+                for pw, pd in part.orientations():
+                    if ix + pw > w or iz + pd > d or not free[ix:ix + pw, iz:iz + pd].all():
+                        continue
+                    free[ix:ix + pw, iz:iz + pd] = False
+                    out.append(Placement(
+                        part=part, color_idx=color_idx,
+                        x_stud=x0 + ix, z_stud=z0 + iz, y_plate=y,
+                        w_world=pw, d_world=pd,
+                        rotation_deg=0 if (pw, pd) == part.footprint else 90))
+                    placed = True
                     break
-            if slope is not None:
-                break
-            # Fall through to later tiers if best-rank candidates couldn't
-            # produce a valid rotation for this world footprint/low direction.
-            for candidate in options[len(tier):]:
-                rot = _slope_rotation(candidate, world_fp, low_dir)
-                if rot is not None:
-                    slope = candidate
+                if placed:
                     break
-            if slope is not None:
-                break
-        if slope is None or rot is None:
-            result.append(p)
+            if not placed:
+                return None
+    return out
+
+
+def _cover_block(owner: Part, color_idx: int, x0: int, z0: int, w: int, d: int,
+                 y0: int, y1: int) -> list[Placement] | None:
+    """Cover a (w, d) rectangle over plate levels [y0, y1) with the parts the
+    leftover of `owner` should become: plates or tiles stay their shape;
+    anything taller is rebuilt from brick courses with plates on top."""
+    if y1 <= y0:
+        return []
+    if owner.shape in ("plate", "tile"):
+        out: list[Placement] = []
+        for y in range(y0, y1):
+            cover = _cover_rect(owner.shape, 1, color_idx, x0, z0, w, d, y)
+            if cover is None:
+                return None
+            out += cover
+        return out
+    out = []
+    y = y0
+    while y1 - y >= 3:
+        cover = _cover_rect("brick", 3, color_idx, x0, z0, w, d, y)
+        if cover is None:
+            return None
+        out += cover
+        y += 3
+    while y < y1:
+        cover = _cover_rect("plate", 1, color_idx, x0, z0, w, d, y)
+        if cover is None:
+            return None
+        out += cover
+        y += 1
+    return out
+
+
+def _rect_minus(ax0: int, az0: int, aw: int, ad: int,
+                bx0: int, bz0: int, bw: int, bd: int) -> list[tuple[int, int, int, int]]:
+    """Rectangle A minus rectangle B as up to four rectangles (x0, z0, w, d)."""
+    ax1, az1 = ax0 + aw, az0 + ad
+    bx1, bz1 = bx0 + bw, bz0 + bd
+    ix0, ix1 = max(ax0, bx0), min(ax1, bx1)
+    iz0, iz1 = max(az0, bz0), min(az1, bz1)
+    if ix0 >= ix1 or iz0 >= iz1:
+        return [(ax0, az0, aw, ad)]
+    out = []
+    if ix0 > ax0:
+        out.append((ax0, az0, ix0 - ax0, ad))
+    if ix1 < ax1:
+        out.append((ix1, az0, ax1 - ix1, ad))
+    if iz0 > az0:
+        out.append((ix0, az0, ix1 - ix0, iz0 - az0))
+    if iz1 < az1:
+        out.append((ix0, iz1, ix1 - ix0, az1 - iz1))
+    return out
+
+
+class _Assembly:
+    """Mutable view of the packed model: which placement owns each voxel."""
+
+    def __init__(self, voxels: np.ndarray, placements: list[Placement]) -> None:
+        self.voxels = voxels
+        self.col_top = _column_tops(voxels)
+        self.owner = np.full(voxels.shape, -1, dtype=np.int32)
+        self.alive: dict[int, Placement] = {}
+        for p in placements:
+            self._add(p)
+
+    def _add(self, p: Placement) -> int:
+        idx = len(self.alive)
+        while idx in self.alive:
+            idx += 1
+        self.alive[idx] = p
+        self.owner[p.y_plate:p.y_plate + p.part.height_units,
+                   p.x_stud:p.x_stud + p.w_world,
+                   p.z_stud:p.z_stud + p.d_world] = idx
+        return idx
+
+    def placements(self) -> list[Placement]:
+        return [self.alive[i] for i in sorted(self.alive)]
+
+    def replace_box(self, x0: int, z0: int, w: int, d: int, y0: int, h: int,
+                    color: int, new: list[Placement]) -> bool:
+        """Replace whatever owns the (w, h, d) box at (x0, y0, z0) with `new`.
+
+        The box must be one colour and owned by plain box parts that lie
+        within its plate range; the parts of each owner outside the box are
+        re-covered by parts of the owner's shape, so the cells covered before
+        and after are the same. Returns False, changing nothing, if the box
+        cannot be cut out cleanly."""
+        H, W, D = self.voxels.shape
+        if x0 < 0 or z0 < 0 or y0 < 0 or x0 + w > W or z0 + d > D or y0 + h > H:
+            return False
+        if not (self.voxels[y0:y0 + h, x0:x0 + w, z0:z0 + d] == color).all():
+            return False
+        owners = np.unique(self.owner[y0:y0 + h, x0:x0 + w, z0:z0 + d])
+        if (owners < 0).any():
+            return False
+        remainders: list[Placement] = []
+        for idx in owners:
+            p = self.alive.get(int(idx))
+            if p is None or not _plain_box_part(p.part) or p.color_idx != color:
+                return False
+            py0, py1 = p.y_plate, p.y_plate + p.part.height_units
+            pieces: list[tuple[int, int, int, int, int, int]] = []
+            # Below and above the box, over the owner's whole footprint...
+            if py0 < y0:
+                pieces.append((p.x_stud, p.z_stud, p.w_world, p.d_world, py0, y0))
+            if py1 > y0 + h:
+                pieces.append((p.x_stud, p.z_stud, p.w_world, p.d_world, y0 + h, py1))
+            # ...and beside it over the plate levels the two share.
+            for rx, rz, rw, rd in _rect_minus(p.x_stud, p.z_stud, p.w_world, p.d_world,
+                                              x0, z0, w, d):
+                pieces.append((rx, rz, rw, rd, max(py0, y0), min(py1, y0 + h)))
+            for rx, rz, rw, rd, ya, yb in pieces:
+                cover = _cover_block(p.part, color, rx, rz, rw, rd, ya, yb)
+                if cover is None:
+                    return False
+                remainders.extend(cover)
+        removed = [self.alive[int(idx)] for idx in owners]
+        for idx in owners:
+            self._remove(int(idx))
+        added = [self._add(p) for p in new + remainders]
+        # Every new part must grip studs below it (or stand on the ground),
+        # otherwise the cut has turned a held part into a floating one.
+        if all(self._gripped(self.alive[i]) for i in added):
+            return True
+        for i in added:
+            self._remove(i)
+        for p in removed:
+            self._add(p)
+        return False
+
+    def _remove(self, idx: int) -> None:
+        p = self.alive.pop(idx)
+        self.owner[p.y_plate:p.y_plate + p.part.height_units,
+                   p.x_stud:p.x_stud + p.w_world,
+                   p.z_stud:p.z_stud + p.d_world] = -1
+
+    def _gripped(self, p: Placement) -> bool:
+        """Does `p` stand on the ground or on a stud of a part below it?"""
+        if p.y_plate == 0:
+            return True
+        from .stability import bottom_cells, top_studs
+        for x, z in bottom_cells(p):
+            idx = int(self.owner[p.y_plate - 1, x, z])
+            if idx >= 0 and (x, z) in top_studs(self.alive[idx]):
+                return True
+        return False
+
+
+def _tread(col_top: np.ndarray, x: int, z: int, dx: int, dz: int,
+           level: int, limit: int = 4) -> int:
+    """Consecutive columns from (x, z) along (dx, dz) whose top is `level`."""
+    W, D = col_top.shape
+    n = 0
+    while n < limit and 0 <= x < W and 0 <= z < D and col_top[x, z] == level:
+        n += 1
+        x += dx
+        z += dz
+    return n
+
+
+def _edge_drops(col_top: np.ndarray, x: int, z: int) -> dict[str, int]:
+    """Directions in which the column's in-grid neighbour is lower, with the
+    drop in plates. Out-of-grid neighbours are not steps."""
+    W, D = col_top.shape
+    top = int(col_top[x, z])
+    drops: dict[str, int] = {}
+    for name, (dx, dz) in _DIR_VEC.items():
+        nx, nz = x + dx, z + dz
+        if 0 <= nx < W and 0 <= nz < D and col_top[nx, nz] < top:
+            drops[name] = top - int(col_top[nx, nz])
+    return drops
+
+
+def _is_ridge(col_top: np.ndarray, x: int, z: int) -> bool:
+    """A column on a flat run of at most two studs along one axis that falls
+    away on both ends: the ridge between two roof faces."""
+    W, D = col_top.shape
+    top = int(col_top[x, z])
+    for dx, dz in ((1, 0), (0, 1)):
+        back = _tread(col_top, x - dx, z - dz, -dx, -dz, top, limit=3)
+        fwd = _tread(col_top, x + dx, z + dz, dx, dz, top, limit=3)
+        if back + 1 + fwd > 2:
             continue
-        result.append(Placement(
-            part=slope, color_idx=p.color_idx,
-            x_stud=p.x_stud, z_stud=p.z_stud, y_plate=p.y_plate,
-            w_world=p.w_world, d_world=p.d_world, rotation_deg=rot,
-        ))
-    return result
+        bx, bz = x - dx * (back + 1), z - dz * (back + 1)
+        fx, fz = x + dx * (fwd + 1), z + dz * (fwd + 1)
+        if (0 <= bx < W and 0 <= bz < D and col_top[bx, bz] < top
+                and 0 <= fx < W and 0 <= fz < D and col_top[fx, fz] < top):
+            return True
+    return False
+
+
+def _families_for(drop: int, tread_here: int, tread_beyond: int) -> list[str]:
+    """Slope families to try, best first, for a step edge with this rise and
+    these tread widths (studs at the upper and lower levels)."""
+    if drop in (1, 2):
+        return ["cheese"]
+    if drop == 3:
+        return ["33", "45"] if min(tread_here, tread_beyond) >= 2 else ["45"]
+    if drop in (6, 9) and tread_beyond <= 2:
+        return ["65" if drop == 6 else "75"]
+    return []
+
+
+def _tile_ridges(asm: _Assembly, ridge: set[tuple[int, int]]) -> int:
+    """Swap bricks whose whole top is ridge for two plates and a tile."""
+    swapped = 0
+    for idx in sorted(asm.alive):
+        p = asm.alive[idx]
+        if p.part.shape != "brick" or p.part.height_units != 3 or not p.part.plain:
+            continue
+        cells = [(p.x_stud + dx, p.z_stud + dz)
+                 for dx in range(p.w_world) for dz in range(p.d_world)]
+        if not all(c in ridge and asm.col_top[c] == p.y_plate + 2 for c in cells):
+            continue
+        new: list[Placement] = []
+        ok = True
+        for dy, shape in ((0, "plate"), (1, "plate"), (2, "tile")):
+            cover = _cover_rect(shape, 1, p.color_idx, p.x_stud, p.z_stud,
+                                p.w_world, p.d_world, p.y_plate + dy)
+            if cover is None:
+                ok = False
+                break
+            new.extend(cover)
+        if ok and asm.replace_box(p.x_stud, p.z_stud, p.w_world, p.d_world,
+                                  p.y_plate, 3, p.color_idx, new):
+            swapped += 1
+    return swapped
+
+
+def _place_corner(asm: _Assembly, part: Part, x0: int, z0: int, top: int,
+                  low_dir: str, color: int, exposed: list[tuple[int, int]]) -> bool:
+    """A 2x2 corner slope whose top is at `top`; `exposed` are the cells of
+    its sloped faces, which nothing may sit on."""
+    rot = _slope_rotation(part, (2, 2), low_dir)
+    if rot is None:
+        return False
+    if any(asm.col_top[x, z] != top for x, z in exposed):
+        return False
+    new = Placement(part=part, color_idx=color, x_stud=x0, z_stud=z0,
+                    y_plate=top - 2, w_world=2, d_world=2, rotation_deg=rot)
+    return asm.replace_box(x0, z0, 2, 2, top - 2, 3, color, [new])
+
+
+def _place_edge_run(asm: _Assembly, fam: _SlopeFamily, d: str, edge: int,
+                    top: int, perp: tuple[int, int], color: int) -> bool:
+    """Place one `fam` slope whose low edge is the column line `edge` along
+    direction `d`, spanning perpendicular coordinates perp = (lo, hi)."""
+    dx, dz = _DIR_VEC[d]
+    width = perp[1] - perp[0] + 1
+    part = fam.parts.get(width)
+    if part is None:
+        return False
+    step = dx + dz  # +1 or -1 along the run axis
+    far = edge - step * (fam.run - 1)
+    lo_run, hi_run = min(edge, far), max(edge, far)
+    if dx:
+        x0, z0, w, dd = lo_run, perp[0], fam.run, width
+        world = (fam.run, width)
+    else:
+        x0, z0, w, dd = perp[0], lo_run, width, fam.run
+        world = (width, fam.run)
+    rot = _slope_rotation(part, world, d)
+    if rot is None:
+        return False
+    # The strips the face slants over must be at column top.
+    for i in range(fam.exposed):
+        c = edge - step * i
+        for q in range(perp[0], perp[1] + 1):
+            x, z = (c, q) if dx else (q, c)
+            if not (0 <= x < asm.col_top.shape[0] and 0 <= z < asm.col_top.shape[1]):
+                return False
+            if asm.col_top[x, z] != top:
+                return False
+    new = Placement(part=part, color_idx=color, x_stud=x0, z_stud=z0,
+                    y_plate=top - fam.height + 1, w_world=w, d_world=dd,
+                    rotation_deg=rot)
+    return asm.replace_box(x0, z0, w, dd, top - fam.height + 1, fam.height, color, [new])
+
+
+def _tile_run(asm: _Assembly, fam: _SlopeFamily, d: str, edge: int, top: int,
+              cells: list[int], color: int) -> list[int]:
+    """Cover a run of edge columns (perpendicular coordinates, consecutive)
+    with the widest parts of `fam` that fit. Returns the coordinates that
+    could not be covered. Odd courses are tiled from the far end so seams
+    alternate between courses."""
+    widths = sorted(fam.parts, reverse=True)
+    order = list(cells)
+    if (top // 3) % 2 == 1:
+        order.reverse()
+    failed: list[int] = []
+    i = 0
+    while i < len(order):
+        done = False
+        for wdt in widths:
+            if i + wdt > len(order):
+                continue
+            seg = order[i:i + wdt]
+            lo, hi = min(seg), max(seg)
+            if hi - lo + 1 != wdt:
+                continue
+            if _place_edge_run(asm, fam, d, edge, top, (lo, hi), color):
+                i += wdt
+                done = True
+                break
+        if not done:
+            failed.append(order[i])
+            i += 1
+    return failed
+
+
+def _refine_slopes(voxels: np.ndarray, placements: list[Placement], *,
+                   tile_ridges: bool = True) -> list[Placement]:
+    """Post-pack pass: fit roof parts to the step edges of the column-top map.
+
+    Order: ridges are tiled, valleys get the concave corner, outside corners
+    the convex one, then step edges are covered run by run from the steepest
+    family down (75°, 65°, 33° falling back to 45°, 45°, cheese).  Every swap
+    is volume-preserving (see `_Assembly.replace_box`)."""
+    asm = _Assembly(voxels, placements)
+    col_top = asm.col_top
+    W, D = col_top.shape
+    families = _slope_families()
+    convex, concave = _corner_parts()
+
+    drops: dict[tuple[int, int], dict[str, int]] = {}
+    ridge: set[tuple[int, int]] = set()
+    for x in range(W):
+        for z in range(D):
+            if col_top[x, z] < 0:
+                continue
+            dr = _edge_drops(col_top, x, z)
+            if dr:
+                drops[(x, z)] = dr
+            if _is_ridge(col_top, x, z):
+                ridge.add((x, z))
+
+    if tile_ridges and ridge:
+        _tile_ridges(asm, ridge)
+
+    def color_at(x: int, z: int) -> int:
+        return int(voxels[col_top[x, z], x, z])
+
+    # Valleys: a column whose two neighbours in adjacent directions are
+    # higher, whose opposite neighbours are level with it and whose far
+    # diagonal is a brick lower, is the low corner of a concave corner slope
+    # whose high L is covered by the course above.
+    if concave is not None:
+        for x in range(W):
+            for z in range(D):
+                top = int(col_top[x, z])
+                if top < 2 or (x, z) in ridge:
+                    continue
+                for sx in (1, -1):
+                    for sz in (1, -1):
+                        hx, hz = x + sx, z + sz
+                        lx, lz = x - sx, z - sz
+                        if not (0 <= hx < W and 0 <= hz < D and 0 <= lx < W and 0 <= lz < D):
+                            continue
+                        if not (col_top[hx, z] > top and col_top[x, hz] > top
+                                and col_top[hx, hz] > top
+                                and col_top[lx, z] == top and col_top[x, lz] == top
+                                and col_top[lx, lz] == top - 3):
+                            continue
+                        low_dir = ("+x" if sx < 0 else "-x") + ("+z" if sz < 0 else "-z")
+                        _place_corner(asm, concave, min(x, hx), min(z, hz), top,
+                                      low_dir, color_at(x, z), [(x, z)])
+
+    # Outside corners: a brick drop in two adjacent directions.
+    if convex is not None:
+        for (x, z), dr in drops.items():
+            if (x, z) in ridge or len(dr) != 2:
+                continue
+            xs = [k for k in dr if "x" in k]
+            zs = [k for k in dr if "z" in k]
+            if len(xs) != 1 or len(zs) != 1 or dr[xs[0]] != 3 or dr[zs[0]] != 3:
+                continue
+            sx, sz = _DIR_VEC[xs[0]][0], _DIR_VEC[zs[0]][1]
+            _place_corner(asm, convex, min(x, x - sx), min(z, z - sz), int(col_top[x, z]),
+                          xs[0] + zs[0], color_at(x, z), [(x, z), (x - sx, z), (x, z - sz)])
+
+    # Step edges, grouped into runs along the ridge direction.
+    # key: (family, direction, edge coordinate along the run axis, top, colour)
+    groups: dict[tuple[str, str, int, int, int], list[int]] = {}
+    fallback: dict[tuple[str, str, int, int, int], list[int]] = {}
+    for (x, z), dr in drops.items():
+        if (x, z) in ridge or len(dr) > 2:
+            continue
+        if len(dr) == 2 and len({k[1] for k in dr}) == 1:
+            continue  # opposite drops: a flat too wide to be a ridge, not a roof edge
+        top = int(col_top[x, z])
+        for d, drop in dr.items():
+            dx, dz = _DIR_VEC[d]
+            here = _tread(col_top, x, z, -dx, -dz, top)
+            beyond = _tread(col_top, x + dx, z + dz, dx, dz, top - drop)
+            fams = [f for f in _families_for(drop, here, beyond) if families[f].parts]
+            if not fams:
+                continue
+            edge, perp = (x, z) if dx else (z, x)
+            key = (fams[0], d, edge, top, color_at(x, z))
+            groups.setdefault(key, []).append(perp)
+            if len(fams) > 1:
+                fallback[key] = fams[1:]
+
+    def runs(coords: list[int]) -> list[list[int]]:
+        coords = sorted(set(coords))
+        out: list[list[int]] = []
+        for c in coords:
+            if out and c == out[-1][-1] + 1:
+                out[-1].append(c)
+            else:
+                out.append([c])
+        return out
+
+    order = {spec[0]: i for i, spec in enumerate(_FAMILY_SPECS)}
+    pending = sorted(groups.items(), key=lambda kv: (order[kv[0][0]], -kv[0][3], kv[0][1], kv[0][2]))
+    while pending:
+        (fname, d, edge, top, color), coords = pending.pop(0)
+        failed: list[int] = []
+        for run in runs(coords):
+            failed += _tile_run(asm, families[fname], d, edge, top, run, color)
+        nxt = fallback.get((fname, d, edge, top, color))
+        if failed and nxt:
+            key = (nxt[0], d, edge, top, color)
+            if len(nxt) > 1:
+                fallback[key] = nxt[1:]
+            pending.append((key, failed))
+            pending.sort(key=lambda kv: (order[kv[0][0]], -kv[0][3], kv[0][1], kv[0][2]))
+
+    return asm.placements()
 
 
 # -- Texture substitution ----------------------------------------------------
