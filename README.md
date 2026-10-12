@@ -39,12 +39,27 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
 ```
 
-Optional heavy deps for the photo → 3D backends:
+That installs the core mesh → LEGO pipeline plus `pytest`.  Nothing in it
+needs a GPU or PyTorch, so it works on a plain CI runner; the tests that
+touch the neural backends skip themselves when torch is absent.
+
+Extras (combine as `'.[dev,neural]'`):
+
+| extra    | what it adds                                                       |
+|----------|--------------------------------------------------------------------|
+| `dev`    | `pytest` — enough to run the whole suite                            |
+| `neural` | torch, torchvision, diffusers, transformers, einops, omegaconf, timm, scikit-image, opencv-python-headless, onnxruntime, scikit-learn, pymeshlab, pyyaml — the photo → 3D backends (Hunyuan3D, TripoSR, DUSt3R, U^2-Net) |
 
 ```bash
-.venv/bin/python -m pip install torch torchvision diffusers transformers \
-    einops omegaconf timm scikit-image opencv-python-headless onnxruntime \
-    scikit-learn pymeshlab pyyaml
+.venv/bin/python -m pip install -e '.[dev,neural]'
+```
+
+The interactive viewer's JavaScript bundle (`src/everything2lego/viewer/bundle.js`)
+is committed, so Node is only needed when you change `main.js`:
+
+```bash
+npm ci                    # three.js, lucide, esbuild, Playwright
+npm run build:viewer      # regenerate bundle.js (commit the result)
 ```
 
 External model checkpoints (~1.5 GB each) live on a directory you point at
@@ -156,10 +171,51 @@ model after all of them.
 | `--windows-color 71 --doors-color 70 --panels-color 71` | Swap stacks of bricks in those LDraw colours for window frames, doors and panels. |
 | `--detect-features` | Find window- and door-shaped colour clusters and swap in real parts. |
 | `--variety`, `--architectural-style` | Decorative part variation; foundation, cornice, ridge and quoin details. |
-| `--color-k`, `--color-mode`, `--subvoxels` | Colour quantisation and occupancy super-sampling. |
+| `--color-k`, `--color-mode`, `--subvoxels` | Colour sampling and occupancy super-sampling. |
+| `--max-parts N` | Target part count; picks resolution, hollowing and colour count for you (see below). |
+| `--palette house\|auto\|full` | Colour handling before packing: `house` snaps to building colours, `auto` (default) clusters to `--color-clusters` (10) LDraw colours, `full` keeps every colour. |
+| `--min-color-region 4` | Same-colour voxel regions smaller than this take their neighbours' majority colour, so speckles vanish. 0 disables. |
 
 Every command exits with status 1 when the model it wrote is not one
 supported assembly (see `report.json`), `--no-supports` included.
+
+### Photo colour handling
+
+The photo commands (`photos`, `hunyuan`, `hunyuan21`, `hunyuan-mv`,
+`triposr`, `hybrid`) run `tools/delight.py` on their input photos first
+when `torch` and `diffusers` are importable, so baked-in shadows and
+highlights do not become colour changes in the model; without those
+packages they print one line and continue.  `--no-delight` turns it off.
+
+`--palette house` is the right choice for buildings: every colour snaps
+(nearest CIE Lab) to white, tan, light / dark bluish grey, reddish brown,
+red, dark red or black; glass snaps to trans-light-blue, or to light bluish
+grey (71) when the transparent colour is not in the shipped palette.
+`--palette auto` keeps the k-means-style clustering (`--color-clusters`,
+default 10); `--palette full` disables quantisation.  Either way, the
+per-region speckle filter (`--min-color-region`) runs afterwards.
+
+### Part budget: `--max-parts`
+
+```bash
+.venv/bin/everything2lego carve examples/views --max-parts 1500 --out out/
+```
+
+`--max-parts N` replaces guessing at `--max-studs`.  The command packs the
+model once at 16 studs (a few seconds), then predicts the part count at
+every other setting with a power law calibrated on the table below and on
+the carve example (parts grow like resolution^2.3 for hollow shells and
+^2.5 for solids; hollowing saves ~30% at 80 studs; halving the colour count
+saves ~10%).  It then picks, in order, the largest resolution, then
+hollowing, then the smallest colour-count reduction that fits, and prints
+the choice.  When `--max-studs` is also given, `--max-parts` wins and says
+so.  Photo backends cannot be re-run cheaply, so there the budget only
+lowers the resolution below the one the backend produced; `semantic`
+estimates with the classical packer and leaves colours alone.
+
+On the carve example the prediction from the 16-stud measurement (632
+parts) is 1,742 at 24 studs (actual 1,601) and 3,575 at 32 studs (actual
+3,550); `--max-parts 1500` chooses 20 studs and builds 1,255 parts.
 
 ### Other commands
 
@@ -185,6 +241,7 @@ Stud resolution is the biggest lever.  Then colour cluster count — fewer
 clusters mean longer same-colour runs, so MILP finds bigger bricks.
 Aggressive hollowing (fewer floors / columns) is the last knob — watch the
 `connections` report for structural warnings if you push it hard.
+`--max-parts N` (see above) walks these levers for you.
 
 ---
 
@@ -249,9 +306,31 @@ tests/                          Pytest suite; regression tests for the packer,
 
 ## Testing
 
+Python suite (runs without torch; the three DUSt3R tests report as
+skipped unless the `neural` extra is installed):
+
 ```bash
-.venv/bin/python -m pytest tests/ -x
+.venv/bin/python -m pytest tests/ -q
 ```
+
+Viewer smoke test — rebuilds `bundle.js` in a temp dir and checks it matches
+the committed one, exports a small fixture scene with the Python package, then
+drives the exported page in headless Chromium at desktop, phone and 320px
+widths (orbit, step slider, auto-rotate, download links):
+
+```bash
+npm ci
+npx playwright install chromium   # once; or set CHROME_PATH to a Chrome/Chromium binary
+npm run test:viewer
+```
+
+The test finds the Python interpreter via `$PYTHON`, then `.venv/bin/python`,
+then `python3`.  Set `VIEWER_OUT=some/dir` to keep the fixture and the
+screenshots it takes.
+
+CI (`.github/workflows/ci.yml`) runs the Python suite on 3.10 and 3.12 and the
+viewer job (bundle up to date, Playwright Chromium) on every push and pull
+request.
 
 ---
 

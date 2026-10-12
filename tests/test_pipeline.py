@@ -92,9 +92,9 @@ def test_corner_slope_placed_on_outside_corner():
     corners = [p for p in placements if p.part.shape == "slope_corner"]
     assert len(corners) == 1
     c = corners[0]
-    # 3045 is the canonical outside corner; 3676 is the inverted alternative.
-    # Position-hash variety may pick either. Both are valid outside corners.
-    assert c.part.ldraw in ("3045.dat", "3676.dat")
+    # 3045 is the outside corner; 3676 is an inverted (underside) part and
+    # must never top a column.
+    assert c.part.ldraw == "3045.dat"
     assert (c.w_world, c.d_world) == (2, 2)
     assert c.rotation_deg == 0, "low corner should point toward (+x, +z)"
 
@@ -122,9 +122,11 @@ def test_corner_slope_rotation_matches_step_direction(origin, expected_rot):
 
 
 def test_slope_pre_bias_produces_slopes_on_a_wide_step_ramp():
-    """Three-tier ramp with 2-stud-deep step-backs. With the level-consistency
-    bias in pack(), the packer keeps 2x2 candidates at each step edge so the
-    refinement pass can swap them for slope 3039."""
+    """Three-tier ramp with 2-stud-deep step-backs: one brick of rise for
+    every two studs of run.  The lower step edge has three studs of the
+    same colour behind it and gets a 33° slope (3298, three studs long);
+    the top tier is only two studs from the grid edge, so it falls back to
+    the 45° 2x2 (3039).  Every slope points low toward +x."""
     grid_arr = np.full((9, 6, 2), -1, dtype=np.int16)
     grid_arr[0:3, 0:6, 0:2] = 4
     grid_arr[3:6, 0:4, 0:2] = 4
@@ -133,12 +135,13 @@ def test_slope_pre_bias_produces_slopes_on_a_wide_step_ramp():
 
     placements = pack.pack(grid, use_tiles=False, use_slopes=True)
     slopes = [p for p in placements if p.part.shape == "slope"]
-    assert len(slopes) >= 2, f"expected >=2 slopes at the two step edges, got {len(slopes)}"
-    # Position-hash variety may swap the 2x2 slope 3039 for another 2x2 slope
-    # (curved 15068 etc). Just check they're 2x2 slopes pointing +x.
+    assert len(slopes) == 2, f"expected one slope per step edge, got {len(slopes)}"
+    by_x = {s.x_stud: s for s in slopes}
+    assert by_x[0].part.ldraw == "3039.dat" and (by_x[0].w_world, by_x[0].d_world) == (2, 2)
+    assert by_x[1].part.ldraw == "3298.dat" and (by_x[1].w_world, by_x[1].d_world) == (3, 2)
     for s in slopes:
-        assert (s.w_world, s.d_world) == (2, 2)
         assert s.rotation_deg == 0, "low side should point toward +x on this ramp"
+        assert pack.slope_world_low(s) == "+x"
 
 
 def test_slope_rotation_covers_all_four_directions():
@@ -288,6 +291,7 @@ def test_neural_backends_registered():
 
 
 def test_dust3r_background_filter_removes_matching_colors():
+    pytest.importorskip("torch", reason="DUSt3R backend needs torch (pip install -e '.[neural]')")
     from everything2lego.backends import dust3r as _dust3r
     pts = np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [2.0, 2.0, 2.0]], dtype=np.float32)
     rgb = np.array([[100, 100, 100], [200, 40, 40], [98, 102, 101]], dtype=np.uint8)
@@ -298,6 +302,7 @@ def test_dust3r_background_filter_removes_matching_colors():
 
 
 def test_dust3r_outlier_filter_drops_far_points():
+    pytest.importorskip("torch", reason="DUSt3R backend needs torch (pip install -e '.[neural]')")
     from everything2lego.backends import dust3r as _dust3r
     rng = np.random.default_rng(0)
     pts = rng.normal(0, 1, size=(1000, 3)).astype(np.float32)
@@ -309,6 +314,7 @@ def test_dust3r_outlier_filter_drops_far_points():
 
 
 def test_dust3r_ground_snap_zeroes_bottom_and_drops_underground():
+    pytest.importorskip("torch", reason="DUSt3R backend needs torch (pip install -e '.[neural]')")
     from everything2lego.backends import dust3r as _dust3r
     rng = np.random.default_rng(1)
     pts = rng.uniform(0, 5, size=(500, 3)).astype(np.float32)

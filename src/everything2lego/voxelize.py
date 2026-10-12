@@ -41,6 +41,39 @@ def load_mesh(path: str | Path) -> trimesh.Trimesh:
     return scene_or_mesh
 
 
+def dominant_yaw(mesh: trimesh.Trimesh, *, min_vertical: float = 0.9) -> float:
+    """Angle (radians) by which the mesh's walls are turned away from the
+    x/z axes: the area-weighted circular mean, modulo 90°, of the heading
+    of every near-vertical face normal.  0 when there are no walls."""
+    n = np.asarray(mesh.face_normals, dtype=np.float64)
+    a = np.asarray(mesh.area_faces, dtype=np.float64)
+    horizontal = np.linalg.norm(n[:, [0, 2]], axis=1)
+    walls = horizontal >= min_vertical
+    if not walls.any():
+        return 0.0
+    heading = np.arctan2(n[walls, 2], n[walls, 0])
+    # Four headings 90° apart are one wall direction: fold with 4x.
+    folded = np.exp(4j * heading)
+    mean = (a[walls] * folded).sum()
+    if abs(mean) < 1e-9:
+        return 0.0
+    return float(np.angle(mean) / 4.0)
+
+
+def align_to_axes(mesh: trimesh.Trimesh, *, max_degrees: float = 44.0) -> trimesh.Trimesh:
+    """Turn the mesh about the vertical axis so its walls run along x and
+    z.  A photo-derived mesh is rarely square to the camera, and a wall a
+    few degrees off the grid voxelises as a staircase; squaring it first
+    gives straight walls and lets the region detector see one plane per
+    wall.  Returns a rotated copy; the original is left alone."""
+    yaw = dominant_yaw(mesh)
+    if abs(np.degrees(yaw)) < 0.05 or abs(np.degrees(yaw)) > max_degrees:
+        return mesh
+    aligned = mesh.copy()
+    aligned.apply_transform(trimesh.transformations.rotation_matrix(yaw, [0, 1, 0]))
+    return aligned
+
+
 def _fit_transform(mesh: trimesh.Trimesh, max_studs: int) -> np.ndarray:
     """Build a 4x4 transform mapping mesh coords into voxel-index space.
 
@@ -109,8 +142,11 @@ def _face_color_lookup(mesh: trimesh.Trimesh, points: np.ndarray,
 def voxelize(mesh: trimesh.Trimesh, max_studs: int = 32, color_samples: int = 200_000,
              hollow: bool = False, wall_thickness: int = 2,
              keep_floor: bool = True, color_k: int = 5,
-             color_mode: str = "closest_face", subvoxels: int = 1) -> VoxelGrid:
+             color_mode: str = "closest_face", subvoxels: int = 1,
+             align: bool = True) -> VoxelGrid:
     """Voxelize `mesh` at LEGO scale and return a colored grid.
+
+    `align` first squares the mesh's walls to the x/z axes (`align_to_axes`).
 
     `max_studs` sets the longer horizontal dimension in studs.
 
@@ -129,6 +165,8 @@ def voxelize(mesh: trimesh.Trimesh, max_studs: int = 32, color_samples: int = 20
     small features that vanish at coarse pitch. 1 = off, 2-4 = increasing
     detail (and cost).
     """
+    if align:
+        mesh = align_to_axes(mesh)
     if max_studs < 1 or color_samples < 1:
         raise ValueError("max_studs and color_samples must be positive")
     if mesh.is_empty or not np.isfinite(mesh.vertices).all():
@@ -168,16 +206,8 @@ def voxelize(mesh: trimesh.Trimesh, max_studs: int = 32, color_samples: int = 20
         dense_xyz[indices[:, 0], indices[:, 1], indices[:, 2]] = True
 
     if hollow and wall_thickness > 0:
-        from scipy.ndimage import binary_erosion
-        filled_before_hollow = dense_xyz.copy()
-        interior = binary_erosion(dense_xyz, iterations=wall_thickness)
-        dense_xyz = dense_xyz & ~interior
-        if keep_floor:
-            # Restore the bottom `wall_thickness` plates so the model has a
-            # closed floor and sits flat. In (x, y, z), vertical is y=1.
-            floor_slab = filled_before_hollow.copy()
-            floor_slab[:, wall_thickness:, :] = False
-            dense_xyz = dense_xyz | floor_slab
+        dense_xyz = hollow_occupancy(dense_xyz, wall_thickness, keep_floor,
+                                     vertical_axis=1)
 
     # Reorient to [y, x, z] with y ascending upward.
     dense_yxz = np.transpose(dense_xyz, (1, 0, 2))
@@ -257,6 +287,109 @@ def voxelize(mesh: trimesh.Trimesh, max_studs: int = 32, color_samples: int = 20
 
     return VoxelGrid(palette_idx=palette_idx, metadata={"method": "mesh", "color_samples": color_samples,
                                                       "max_studs": max_studs, "watertight": bool(mesh.is_watertight)})
+
+
+def hollow_occupancy(occupied: np.ndarray, wall_thickness: int = 2,
+                     keep_floor: bool = True, *, vertical_axis: int = 0) -> np.ndarray:
+    """Erode `occupied` so only a shell `wall_thickness` cells thick remains.
+    With `keep_floor` the bottom `wall_thickness` layers along
+    `vertical_axis` stay filled so the model has a closed floor and sits
+    flat."""
+    from scipy.ndimage import binary_erosion
+    if wall_thickness < 1:
+        return occupied.copy()
+    interior = binary_erosion(occupied, iterations=wall_thickness)
+    shell = occupied & ~interior
+    if keep_floor:
+        floor_slab = occupied.copy()
+        index = [slice(None)] * occupied.ndim
+        index[vertical_axis] = slice(wall_thickness, None)
+        floor_slab[tuple(index)] = False
+        shell = shell | floor_slab
+    return shell
+
+
+def hollow_grid(grid: VoxelGrid, wall_thickness: int = 2,
+                keep_floor: bool = True) -> VoxelGrid:
+    """`hollow_occupancy` applied to a finished grid: interior cells become
+    empty, the shell keeps its colours."""
+    shell = hollow_occupancy(grid.occupied(), wall_thickness, keep_floor,
+                             vertical_axis=0)
+    palette_idx = np.where(shell, grid.palette_idx, -1).astype(grid.palette_idx.dtype)
+    return VoxelGrid(palette_idx=palette_idx,
+                     metadata={**grid.metadata, "hollow": True,
+                               "wall_thickness": wall_thickness})
+
+
+def resample_grid(grid: VoxelGrid, max_studs: int) -> VoxelGrid:
+    """Nearest-neighbour rescale of a grid so its longer horizontal side is
+    `max_studs` studs.  Used to estimate part counts at another
+    resolution when regenerating the grid is expensive (neural backends).
+    Deterministic; metadata gets the new `max_studs`."""
+    occ = grid.occupied()
+    coords = np.argwhere(occ)
+    if len(coords) == 0:
+        raise ValueError("Cannot resample an empty grid")
+    lo, hi = coords.min(axis=0), coords.max(axis=0) + 1
+    cropped = grid.palette_idx[tuple(slice(a, b) for a, b in zip(lo, hi))]
+    current = max(cropped.shape[1], cropped.shape[2])
+    scale = max_studs / current
+    new_shape = tuple(max(1, int(round(d * scale))) for d in cropped.shape)
+    index = [np.minimum((np.arange(n) + 0.5) / scale, d - 1).astype(int)
+             for n, d in zip(new_shape, cropped.shape)]
+    out = cropped[np.ix_(*index)]
+    return VoxelGrid(palette_idx=out.astype(grid.palette_idx.dtype),
+                     metadata={**grid.metadata, "max_studs": max_studs,
+                               "resampled_from": current})
+
+
+def smooth_color_regions(palette_idx: np.ndarray, min_region: int = 4,
+                         max_passes: int = 4) -> np.ndarray:
+    """Majority filter over small same-colour regions.
+
+    Every 6-connected region of one colour with fewer than `min_region`
+    cells takes the colour that the most of its occupied neighbours have
+    (the region's own colour excluded).  Regions with no neighbours of
+    another colour, and regions of at least `min_region` cells, are left
+    alone, so speckles vanish while intended accents survive.  Repeats
+    until nothing changes or `max_passes` is reached.  Returns a new
+    array; -1 (empty) is never changed."""
+    from scipy.ndimage import label
+
+    if min_region <= 1:
+        return palette_idx.copy()
+    out = palette_idx.copy()
+    structure = np.zeros((3, 3, 3), dtype=bool)
+    structure[1, 1, :] = structure[1, :, 1] = structure[:, 1, 1] = True
+    for _ in range(max_passes):
+        changed = False
+        for color in np.unique(out[out >= 0]):
+            mask = out == color
+            labels, n = label(mask, structure=structure)
+            if n == 0:
+                continue
+            sizes = np.bincount(labels.ravel())[1:]
+            for region_id in np.flatnonzero(sizes < min_region) + 1:
+                cells = np.argwhere(labels == region_id)
+                votes: dict[int, int] = {}
+                for y, x, z in cells:
+                    for dy, dx, dz in ((1, 0, 0), (-1, 0, 0), (0, 1, 0),
+                                       (0, -1, 0), (0, 0, 1), (0, 0, -1)):
+                        ny, nx, nz = y + dy, x + dx, z + dz
+                        if not (0 <= ny < out.shape[0] and 0 <= nx < out.shape[1]
+                                and 0 <= nz < out.shape[2]):
+                            continue
+                        c = int(out[ny, nx, nz])
+                        if c >= 0 and c != color:
+                            votes[c] = votes.get(c, 0) + 1
+                if not votes:
+                    continue
+                winner = max(sorted(votes), key=lambda c: votes[c])
+                out[cells[:, 0], cells[:, 1], cells[:, 2]] = winner
+                changed = True
+        if not changed:
+            break
+    return out
 
 
 def _material_rgb(material, uv: np.ndarray) -> np.ndarray:
