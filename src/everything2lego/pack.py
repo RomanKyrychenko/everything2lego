@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .bricks import Part, catalog, largest_first, parts_by_shape
+from .bricks import Part, catalog, largest_first, parts_by_shape, full_catalog
 from .voxelize import VoxelGrid
 
 
@@ -589,7 +589,7 @@ def apply_variety(placements: list[Placement], *, seed: int = 0
     context: corners get side-stud/headlight accents; straight walls get
     plain + masonry variety; interior surfaces stay plain. Purely visual —
     footprint, height and volume are unchanged."""
-    parts_by_ldraw = {p.ldraw: p for p in catalog()}
+    parts_by_ldraw = {p.ldraw: p for p in full_catalog()}
 
     # Cell-owner map for the neighbourhood classifier.
     cell_owner: dict[tuple[int, int, int], int] = {}
@@ -640,7 +640,7 @@ def substitute_by_color(placements: list[Placement],
         return list(placements)
     from .colors import palette
     pal = palette()
-    parts_by_ldraw = {p.ldraw: p for p in catalog()}
+    parts_by_ldraw = {p.ldraw: p for p in full_catalog()}
     result: list[Placement] = []
     for p in placements:
         code = pal[p.color_idx].code
@@ -674,7 +674,7 @@ def substitute_texture(placements: list[Placement], preset: str) -> list[Placeme
     subs = TEXTURE_PRESETS.get(preset, {})
     if not subs:
         return list(placements)
-    parts_by_ldraw = {p.ldraw: p for p in catalog()}
+    parts_by_ldraw = {p.ldraw: p for p in full_catalog()}
     result: list[Placement] = []
     for p in placements:
         target_ldraw = subs.get(p.part.ldraw)
@@ -747,7 +747,7 @@ def detect_windows_and_doors(placements: list[Placement], *,
     """Detect window and door-shaped color clusters and swap them for real
     LEGO window/door parts. Returns (new_placements, stats)."""
     from collections import Counter, defaultdict
-    parts_by_ldraw = {p.ldraw: p for p in catalog()}
+    parts_by_ldraw = {p.ldraw: p for p in full_catalog()}
 
     if not placements:
         return [], {"clusters_found": 0, "windows_placed": 0, "doors_placed": 0}

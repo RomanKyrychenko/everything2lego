@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib.resources import files
@@ -26,6 +27,8 @@ class Part:
     height_units: int      # in plate-heights (brick=3, plate=1)
     name: str
     slope_dir: str | None = None  # for slopes: default low direction ("+x", "-x", "+z", "-z")
+    plain: bool = True     # False: a decorative part (round, arch, side studs) that
+                           # a styling pass may swap in by id but no packer may pick
 
     @property
     def w(self) -> int:
@@ -63,15 +66,68 @@ def _make_part(p: dict) -> Part:
         height_units=p["height_units"],
         name=p["name"],
         slope_dir=p.get("slope_dir"),
+        plain=p.get("plain", True),
     )
+
+
+# Rebrickable names of parts whose geometry really is the plain box, wedge,
+# frame or door the packer, the stability check and the viewer assume.
+# Anything else (arches, round and curved bricks, brackets, clips, wedge
+# plates, double slopes, window glass, shutters...) shares a shape label
+# with these but not a shape, so it is kept out of the catalog.
+_DIMS = r"\d+ x \d+"
+_DIMS_H = r"\d+ x \d+(?: x \d+(?:/\d+)?)?"
+_PLAIN_NAMES: dict[str, re.Pattern[str]] = {
+    "brick": re.compile(rf"^Brick {_DIMS_H}(?: without (?:Bottom Tubes?|Inside Ridges|Side Supports))?$"),
+    "plate": re.compile(rf"^Plate {_DIMS}$"),
+    "tile": re.compile(rf"^Tile {_DIMS}(?: with Groove)?$"),
+    "panel": re.compile(rf"^Panel {_DIMS_H}(?: - Solid Studs| \[(?:Hollow|Solid) Studs\])?$"),
+    "slope": re.compile(rf"^Brick Sloped \d+° {_DIMS_H}(?: \(Cheese Slope\))?$"),
+    "slope_inv": re.compile(rf"^Brick Sloped Inverted \d+° {_DIMS_H}$"),
+    "window": re.compile(rf"^Window {_DIMS_H}(?: Frame(?: with Solid Studs)?)?$"),
+    "door": re.compile(rf"^Door(?: Frame)? {_DIMS_H}(?: Left| Right)?$"),
+}
+
+
+_NAME_HEIGHT = re.compile(r"\d+ x \d+ x (\d+)(?:/(\d+))?")
+_BASE_HEIGHT = {"plate": 1, "tile": 1, "brick": 3, "slope": 3, "slope_inv": 3,
+                "panel": 3, "window": 6, "door": 15}
+
+
+def height_from_name(shape: str, name: str) -> int | None:
+    """Height in plates that a Rebrickable name states ("1 x 2 x 5" is five
+    bricks, "1 x 2 x 2/3" two thirds of one), or the shape's default."""
+    m = _NAME_HEIGHT.search(name)
+    if not m:
+        return _BASE_HEIGHT.get(shape)
+    num, den = int(m.group(1)), int(m.group(2) or 1)
+    return max(1, round(3 * num / den))
+
+
+def is_plain_geometry(shape: str, name: str) -> bool:
+    """Whether a Rebrickable part name describes exactly the geometry that
+    `shape` stands for, so the part can be used as a drop-in of that shape."""
+    pattern = _PLAIN_NAMES.get(shape)
+    return bool(pattern and pattern.match(name))
 
 
 @lru_cache(maxsize=1)
 def catalog() -> tuple[Part, ...]:
+    """Every part with plain box, wedge, frame or door geometry: the pool the
+    packers, builders and checks draw from.  `full_catalog` adds the
+    decorative parts that styling passes substitute by id."""
+    return tuple(p for p in full_catalog() if p.plain)
+
+
+@lru_cache(maxsize=1)
+def full_catalog() -> tuple[Part, ...]:
     """The union of the curated catalog and any Rebrickable-imported parts.
 
     Dedupe key is the LDraw filename so a curated entry always wins over
     an imported one (curated entries have hand-tuned `slope_dir` etc.).
+    Imported parts are kept only when their name describes plain geometry
+    (`is_plain_geometry`): the import is by category and category alone
+    lets arches, brackets, wedge plates and window glass through.
     """
     data_pkg = files("everything2lego.data")
     raw = json.loads(data_pkg.joinpath("brick_catalog.json").read_text())
@@ -84,9 +140,14 @@ def catalog() -> tuple[Part, ...]:
         imported = None
     if imported:
         for p in imported["parts"]:
-            if p["ldraw"] in seen:
+            if p["ldraw"] in seen or not is_plain_geometry(p["shape"], p["name"]):
                 continue
-            parts.append(_make_part(p))
+            # Older imports stored every brick as 3 plates whatever its name
+            # said.  The packer places a "brick" as a 3-plate box, so a taller
+            # one belongs with the tall parts, which are placed by true height.
+            height = height_from_name(p["shape"], p["name"])
+            shape = "brick_tall" if p["shape"] == "brick" and height > 3 else p["shape"]
+            parts.append(_make_part({**p, "shape": shape, "height_units": height}))
             seen.add(p["ldraw"])
     return tuple(parts)
 

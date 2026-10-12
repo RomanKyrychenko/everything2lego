@@ -354,3 +354,25 @@ def test_pack_leaves_no_leftover_voxels():
         ] = True
     occupied = grid.palette_idx >= 0
     assert np.array_equal(accounted, occupied), "packer must claim exactly the occupied voxels"
+
+
+def test_catalog_keeps_only_plain_geometry_from_imports():
+    """Imported Rebrickable parts share shape labels with arches, round bricks,
+    brackets, wedge plates and window glass; none of those may reach the packer."""
+    cat = catalog()
+    names = {p.name for p in cat}
+    for bad in ("Arch", "Round", "Curved", "Bracket", "Wedge", "Glass", "Clip",
+                "Cone", "Dish", "Shutter", "Macaroni", "Special", "Double"):
+        assert not any(bad in p.name for p in cat if p.shape not in ("slope", "slope_inv", "slope_corner")), bad
+    assert "Brick 1 x 12" in names and "Brick 1 x 16" in names
+    for p in cat:
+        if p.shape == "brick":
+            assert p.height_units == 3, p
+        if p.shape == "plate":
+            assert p.height_units == 1, p
+    tall = {p.name: p.height_units for p in cat if p.shape == "brick_tall"}
+    assert tall["Brick 1 x 1 x 3"] == 9 and tall["Brick 1 x 2 x 5"] == 15
+    from everything2lego.bricks import full_catalog
+    from everything2lego.templates.base import part_by_ldraw
+    assert part_by_ldraw("4733.dat") is not None and not part_by_ldraw("4733.dat").plain
+    assert len(full_catalog()) > len(cat)
