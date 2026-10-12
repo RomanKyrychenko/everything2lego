@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from . import bricks, colors, pack, stability
+from . import bonding, bricks, colors, pack, stability
 from .voxelize import VoxelGrid
 
 
@@ -30,6 +30,10 @@ def structure_report(placements: list[pack.Placement],
         "unsupported_parts": len(check.floating),
         "overlapping_pairs": len(check.overlaps),
         "single_stud_overhangs": check.weak_connections,
+        # Advisory: a connected model can still fail in the hand.
+        "cantilevers": check.cantilever_count,
+        "running_seams": check.running_seam_count,
+        "single_stud_groups": check.lift_group_count,
     }
 
 
@@ -151,12 +155,20 @@ def assemble(grid: VoxelGrid, *, use_tiles: bool = True, use_slopes: bool = True
     else:
         raise RuntimeError("Support repair did not converge")
 
+    # Support repair holds every part; bonding then breaks the vertical
+    # seams that run through several courses, which the course-by-course
+    # packer cannot see.  Same cells, same colours, fewer independent
+    # columns.
+    placements, bond_stats = bonding.bond(placements)
+    check = stability.check(placements)
+
     report = {
         "reconstruction": grid.metadata,
         "dimensions_yxz": list(voxels.shape),
         "source_voxels": model_voxels,
         "added_support_voxels": int((voxels >= 0).sum()) - model_voxels,
         **structure_report(placements, check),
+        "bonding": bond_stats,
         "limits": [
             "Geometric checks do not simulate clutch strength, bending or tipping.",
             "Part/color availability must be checked before purchasing.",

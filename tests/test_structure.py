@@ -101,3 +101,53 @@ def test_assemble_supports_an_overhang_with_a_grounded_column():
     assert result.report["added_support_voxels"] > 0
     grey = next(i for i, c in enumerate(palette()) if c.code == 71)
     assert any(p.color_idx == grey and p.y_plate >= 2 for p in result.placements)
+
+
+def test_cantilevered_plate_is_reported_but_not_a_failure():
+    base = place("3005.dat", 0, 0, 0)
+    hanging = place("3460.dat", 0, 0, 3)                # 1x8 plate held at its end stud
+    r = stability.check([base, hanging])
+    assert r.cantilever_count == 1 and r.cantilevers == [hanging]
+    assert r.ok and r.warnings["cantilevers"] == 1
+    centred = place("3460.dat", -3, 0, 3)               # the same plate held at its middle
+    assert stability.check([base, centred]).cantilever_count == 0
+    two_out = place("3710.dat", -1, 0, 3)               # 1x4 whose centre is 1.5 out
+    assert stability.check([base, two_out]).cantilever_count == 0
+
+
+def test_running_seam_is_reported_with_its_line_and_range():
+    courses = [place("3004.dat", x, 0, y) for y in (0, 3, 6) for x in (0, 2)]
+    r = stability.check(courses)
+    assert r.running_seam_count == 1
+    seam = r.running_seams[0]
+    assert (seam.axis, seam.x, seam.z, seam.y_lo, seam.y_hi, seam.courses) == ("x", 1, 0, 0, 8, 3)
+    assert len(seam.parts) == 6 and seam.line == "x=1|2 z=0..0 y=0..8"
+    assert not r.floating and r.components == 2    # two columns, nothing ties them
+    bridged = courses[:2] + [place("3010.dat", 0, 0, 3)] + courses[4:]
+    r = stability.check(bridged)
+    assert r.running_seam_count == 0 and r.ok
+    two_courses = stability.check(courses[:4])
+    assert two_courses.running_seam_count == 0
+    # One plane, several studs long: one seam with a span.
+    rows = [place("3006.dat", 0, z, y, 10, 2, 0) for y in (0, 3, 6) for z in (0, 2)]
+    seams = stability.check(rows).running_seams
+    assert len(seams) == 1 and seams[0].axis == "z" and seams[0].span == 10
+
+
+def test_group_hanging_by_one_stud_is_reported():
+    base = place("3001.dat", 0, 0, 0, 4, 2, 90)
+    post = place("3005.dat", 3, 0, 3)                   # 1x1 brick at the base's corner
+    shelf = place("3020.dat", 3, 0, 6, 4, 2, 90)        # 2x4 plate on the post's one stud
+    load = place("3003.dat", 5, 0, 7)                   # 2x2 brick on the shelf
+    r = stability.check([base, post, shelf, load])
+    assert r.ok and r.lift_group_count >= 1
+    assert any(set(g) == {shelf, load} for g in r.lift_groups)
+    assert r.warnings["single_stud_groups"] == r.lift_group_count
+    # Two studs under the shelf and nothing hangs.
+    post2 = place("3004.dat", 2, 0, 3)
+    shelf2 = place("3020.dat", 2, 0, 6, 4, 2, 90)
+    load2 = place("3003.dat", 4, 0, 7)
+    assert stability.check([base, post2, shelf2, load2]).lift_group_count == 0
+    # A 1x1 column is a single stud by nature, not a weak joint.
+    column = [base, post, place("3024.dat", 3, 0, 6), place("3070b.dat", 3, 0, 7)]
+    assert stability.check(column).lift_group_count == 0

@@ -74,6 +74,12 @@ def _print_summary(placements, outputs: dict[str, Path],
         )
     if report.weak_connections:
         console.print(f"[yellow]{report.weak_connections} overhangs attach by a single stud; review their strength.[/yellow]")
+    if report.cantilever_count:
+        console.print(f"[yellow]{report.cantilever_count} parts cantilever more than {stability.CANTILEVER_STUDS:g} studs past the studs holding them.[/yellow]")
+    if report.running_seam_count:
+        console.print(f"[yellow]{report.running_seam_count} seams run through {stability.RUNNING_SEAM_COURSES}+ courses with nothing bridging them.[/yellow]")
+    if report.lift_group_count:
+        console.print(f"[yellow]{report.lift_group_count} groups of parts hang from the model by a single stud.[/yellow]")
 
     console.print()
     for label, path in outputs.items():
