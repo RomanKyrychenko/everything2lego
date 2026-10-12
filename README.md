@@ -157,6 +157,43 @@ PYTORCH_ENABLE_MPS_FALLBACK=1 \
 | `--w-shape-surface`, `--w-shape-volume`, `--w-color`, `--w-diversity`, `--w-coherence`, `--w-count` | Soft-training loss weights (defaults 1, 2, 1, 0, 0.02, 0). |
 | `--n-samples` | Surface samples taken from the mesh for region detection. |
 
+### Part labels (optional)
+
+The region detector finds flat facets and guesses what they are from their
+normals.  A part segmenter knows that a patch is a window and another a
+chimney, and so does a person painting a mesh in Blender.  Either hands the
+pipeline one colour per part:
+
+```bash
+# A colour-coded mesh next to the input (any segmenter, or hand-painted).
+.venv/bin/everything2lego semantic house.glb --parts house.parts.glb --out out/
+
+# No GPU: a built-in CPU segmentation by colour, normal and connectivity.
+.venv/bin/everything2lego semantic house.glb --segmenter builtin --out out/
+```
+
+A JSON sidecar next to the labelled mesh (`house.parts.json`) may name the
+colours: `{"#ff0000": "roof", "#0000ff": "window", "#ffff00": "door"}`.
+Named windows and doors become frames and doors the walls are packed around;
+unnamed parts are classified by normal and height.  Labels made on a
+decimated copy of the mesh are carried back by nearest face.
+
+[SegviGen](https://github.com/Nelipot-Lee/SegviGen) (Li et al., SIGGRAPH
+2026, MIT) is the segmenter this was built for.  It needs Linux, an NVIDIA
+GPU with 24 GB of memory and the TRELLIS.2 environment; `tools/segvigen.py`
+drives it, caches results by mesh hash, decimates the mesh first (the model
+works on a fixed voxel grid, so extra triangles only cost time) and passes a
+painted 2D map through for its guided mode:
+
+```bash
+python tools/segvigen.py house.glb --segvigen ~/SegviGen --faces 50000
+.venv/bin/everything2lego semantic house.glb --parts house.parts.glb
+```
+
+Without that hardware, `--segmenter builtin` and hand-painted labels give the
+same pipeline its parts.  None of this is required: without `--parts` or
+`--segmenter` the facet detector runs as before.
+
 ### `build` styling flags
 
 `build` (and `carve`, `triposr`, `hunyuan`...) packs voxels with the classical

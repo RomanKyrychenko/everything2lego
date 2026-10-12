@@ -1068,6 +1068,13 @@ def semantic(
                                             help="Longer horizontal size in studs (default 32)."),
     max_parts: Optional[int] = typer.Option(None, "--max-parts", min=1,
         help=MAX_PARTS_HELP + " Estimated with the classical packer; colours are not changed."),
+    parts: Optional[Path] = typer.Option(None, "--parts", exists=True, dir_okay=False,
+        help="Optional colour-coded mesh with one colour per part (from a part segmenter "
+             "such as SegviGen, or painted by hand); a JSON sidecar may name the colours. "
+             "Regions come from these parts instead of the facet detector."),
+    segmenter: str = typer.Option("none", "--segmenter",
+        help="none: facet detector (default); builtin: a CPU part segmentation by colour, "
+             "normal and connectivity, used when --parts is not given."),
     n_samples: int = typer.Option(100_000, "--n-samples",
         help="Surface point samples for the RegionDetector."),
     subvoxels: int = typer.Option(1, "--subvoxels", min=1, max=4,
@@ -1140,6 +1147,8 @@ def semantic(
         color_samples=n_samples,
         subvoxels=subvoxels,
         detector=DetectorConfig(),
+        parts_path=str(parts) if parts else None,
+        segmenter=segmenter,
         builder=BuilderConfig(
             milp_time_limit_s=milp_time,
             diversity_weight=diversity_weight,

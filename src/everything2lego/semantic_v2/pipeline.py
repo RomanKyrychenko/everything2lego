@@ -38,6 +38,12 @@ class PipelineConfig:
     # Drop region placements that overlap earlier ones (refilling what they
     # alone covered) and hold up floating parts with 1x1 pegs and columns.
     validate_structure: bool = True
+    # Optional part labels (see parts.py): a colour-coded mesh from a part
+    # segmenter such as SegviGen, or painted by hand, next to the input
+    # mesh; or "builtin" to segment by colour, normal and connectivity on
+    # the CPU.  Without either, regions come from the facet detector.
+    parts_path: Optional[str] = None
+    segmenter: str = "none"          # "none" | "builtin"
 
 
 @dataclass
@@ -83,10 +89,29 @@ class SemanticLegoPipeline:
             color_samples=self.config.color_samples,
             subvoxels=self.config.subvoxels,
         )
-        return self.run_on_target(target)
+        labels = None
+        if self.config.parts_path:
+            from ..voxelize import load_mesh
+            from .parts import load_part_labels
+            # Face order survives the alignment `from_path` applies, so the
+            # labels are matched against the mesh as loaded.
+            labels = load_part_labels(self.config.parts_path, load_mesh(mesh_path))
+        return self.run_on_target(target, labels=labels)
 
-    def run_on_target(self, target: MeshTarget) -> PipelineResult:
-        regions = self.detector.detect(target)
+    def _regions(self, target: MeshTarget, labels) -> list[Region]:
+        """Regions from part labels when given (or from the built-in
+        segmenter when asked for), the facet detector otherwise."""
+        from .parts import regions_from_labels, segment_builtin
+        if labels is None and self.config.segmenter == "builtin":
+            labels = segment_builtin(target.mesh)
+        if labels is not None:
+            regions = regions_from_labels(target, labels)
+            if regions:
+                return regions
+        return self.detector.detect(target)
+
+    def run_on_target(self, target: MeshTarget, labels=None) -> PipelineResult:
+        regions = self._regions(target, labels)
         surface: list[Placement] = []
         counts: dict[str, int] = {}
         # Horizontal slabs first, walls last: where a wall meets a slab the

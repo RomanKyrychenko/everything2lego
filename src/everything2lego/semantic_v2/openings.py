@@ -311,3 +311,53 @@ def reserved_cells(openings: list[Placement], frame: WallFrame) -> np.ndarray:
         y = p.y_plate - frame.y0
         mask[u:u + w, y:y + p.part.height_units] = True
     return mask
+
+
+def forced_openings(region: PlanarRegion, target: MeshTarget, frame: WallFrame,
+                    boxes: list[dict]) -> list[Placement]:
+    """Openings a part segmentation named on this wall, as frame and door
+    placements: each box (mesh millimetres, with the part's normal) that
+    lies in the wall's plane is projected onto the wall's stud-by-plate
+    grid and snapped to the nearest frame or door like a detected one."""
+    n = region.plane_normal / (np.linalg.norm(region.plane_normal) + 1e-9)
+    parts = {p.ldraw: p for p in full_catalog()}
+    pal_lab = _rgb_to_lab(np.array([c.rgb for c in palette()], np.float32) / 255.0)
+    out: list[Placement] = []
+    taken = np.zeros((frame.length, frame.height), dtype=bool)
+    tolerance = 0.75 / max(1e-6, float(target.mesh_to_voxel[0, 0]))   # 3/4 stud, in mm
+    for box in boxes:
+        bn = np.asarray(box["normal"], dtype=np.float32)
+        if abs(float(np.dot(bn, n))) < 0.9:
+            continue
+        mn, mx = np.asarray(box["min"], np.float32), np.asarray(box["max"], np.float32)
+        centre = (mn + mx) / 2
+        if abs(float(np.dot(centre - region.plane_origin, n))) > tolerance:
+            continue
+        lo, hi = target.mm_point_to_voxel(mn), target.mm_point_to_voxel(mx)
+        u0 = int(np.floor((min(lo[0], hi[0]) if frame.axis_x else min(lo[2], hi[2])) + 1e-4)) - frame.origin
+        u1 = int(np.ceil((max(lo[0], hi[0]) if frame.axis_x else max(lo[2], hi[2])) - 1e-4)) - frame.origin
+        y0 = int(np.floor(min(lo[1], hi[1]) + 1e-4)) - frame.y0
+        y1 = int(np.ceil(max(lo[1], hi[1]) - 1e-4)) - frame.y0
+        u0, u1 = max(0, u0), min(frame.length, u1)
+        y0, y1 = max(0, y0), min(frame.height, y1)
+        if u1 - u0 < 1 or y1 - y0 < 1:
+            continue
+        snapped = _snap(u1 - u0, y1 - y0, y0, frame.height)
+        if snapped is None:
+            continue
+        (w, h), ldraw = snapped
+        if box.get("name") == "door":
+            door = _snap(u1 - u0, max(y1 - y0, 15), 0, frame.height)
+            if door is not None:
+                (w, h), ldraw = door
+                y0 = 0
+        u = max(0, min(frame.length - w, int(round((u0 + u1) / 2 - w / 2))))
+        y = int(round(((y0 + y1) / 2 - h / 2) / COURSE)) * COURSE
+        y = max(0, min(frame.height - h, y))
+        if taken[u:u + w, y:y + h].any():
+            continue
+        taken[u:u + w, y:y + h] = True
+        rgb = box.get("colour") or (60, 60, 60)
+        colour = int(np.argmin(np.linalg.norm(pal_lab - _rgb_to_lab(np.array(rgb, np.float32)[None] / 255.0)[0], axis=1)))
+        out.append(frame.placement(parts[ldraw], colour, u, y, w))
+    return out

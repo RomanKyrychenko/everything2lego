@@ -181,13 +181,17 @@ class PlanarWallBuilder(RegionBuilder):
         assert isinstance(region, PlanarRegion)
         openings: list[Placement] = []
         reserved = None
-        if self.config.detect_openings:
-            from .openings import find_openings, reserved_cells, wall_frame
-            frame = wall_frame(region, target)
+        from .openings import find_openings, forced_openings, reserved_cells, wall_frame
+        frame = wall_frame(region, target)
+        boxes = target.metadata.get("forced_openings") or []
+        if boxes:
+            # Openings a part segmentation named win over colour detection.
+            openings = forced_openings(region, target, frame, boxes)
+        elif self.config.detect_openings:
             openings = find_openings(region, target, frame=frame,
                                      min_delta_e=self.config.opening_delta_e)
-            if openings:
-                reserved = reserved_cells(openings, frame)
+        if openings:
+            reserved = reserved_cells(openings, frame)
         if self.claimed is not None:
             from .openings import wall_frame
             frame = wall_frame(region, target)
