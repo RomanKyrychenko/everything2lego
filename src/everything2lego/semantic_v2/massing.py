@@ -707,6 +707,9 @@ def build_pier(spec: PierSpec, claimed: Optional[np.ndarray], grid_shape: tuple[
 # ---------------------------------------------------------------------------
 
 FLOOR_EVERY = 10           # courses per storey at set scale (30 plates)
+# A building's foot: the courses whose plan together is its footprint (the
+# base plate) and within which a ground wall's ragged foot is closed.
+FOOT_COURSES = 4
 SPINE_EVERY = 8            # studs between the hidden walls carrying a floor
 MIN_FLOOR_CELLS = 16
 MIN_SETBACK = 6            # wall cells starting over the void in one course that earn a floor
@@ -856,7 +859,18 @@ def floors_and_spines(solid: np.ndarray, walls: list[WallSpec], gables: list, *,
         y0 = ground_y + c * COURSE
         if y0 + COURSE > H:
             break
-        sl = plan_at(c) & ~roofed(y0, c)
+        if c == 0:
+            # the base plate is the building's footprint: a
+            # reconstruction's foot is ragged (plants, shadow, a matte bite),
+            # so the plan of the foot courses together, its inside filled
+            from scipy.ndimage import binary_fill_holes
+            foot = np.zeros((X, Z), dtype=bool)
+            for k in range(0, FOOT_COURSES + 1):
+                if ground_y + (k + 1) * COURSE <= H:
+                    foot |= plan_at(k)
+            sl = binary_fill_holes(foot) & ~roofed(y0, c)
+        else:
+            sl = plan_at(c) & ~roofed(y0, c)
         # Walls that start right above this course stand on it, roof or
         # no roof: a tower rising out of the attic gets its floor over the
         # footprint those walls enclose (their bounding box in the plan).

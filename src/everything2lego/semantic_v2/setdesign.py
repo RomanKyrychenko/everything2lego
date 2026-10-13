@@ -589,9 +589,13 @@ def absorb_hips(gables: list[GableSpec]) -> list[GableSpec]:
 
 
 def pair_pitches(pitches: list[PitchSpec], *, wall_colour: Optional[int] = None) -> list[GableSpec]:
-    """Greedy pairing: same axis, opposite signs, ridges within 2 studs,
-    spans overlapping by at least half the shorter, ridge heights within a
-    brick.  Leftovers become lean-tos."""
+    """Greedy pairing: same axis, opposite signs facing each other (each
+    rises toward the other's eave), ridges within 2 studs or a quarter of
+    the gable's width — a reconstructed ridge often runs a few degrees
+    off its walls, so each face's ridge estimate lands to one side of the
+    true one — spans overlapping by at least half the shorter, ridge
+    heights within three bricks.  A pair shares one ridge, midway between
+    the two estimates.  Leftovers become lean-tos."""
     used = [False] * len(pitches)
     out: list[GableSpec] = []
     for i, p in enumerate(pitches):
@@ -601,7 +605,11 @@ def pair_pitches(pitches: list[PitchSpec], *, wall_colour: Optional[int] = None)
         for j, q in enumerate(pitches):
             if j == i or used[j] or q.axis != p.axis or q.sign == p.sign:
                 continue
-            if abs(q.ridge - p.ridge) > 2.0 or abs(q.y_top - p.y_top) > 3 * COURSE:
+            lo_face, hi_face = (p, q) if p.sign > 0 else (q, p)
+            if not lo_face.eave < hi_face.eave:          # not facing each other
+                continue
+            tol = max(2.0, 0.25 * abs(hi_face.eave - lo_face.eave))
+            if abs(q.ridge - p.ridge) > tol or abs(q.y_top - p.y_top) > 3 * COURSE:
                 continue
             lo, hi = max(p.span[0], q.span[0]), min(p.span[1], q.span[1])
             overlap = hi - lo
@@ -613,9 +621,19 @@ def pair_pitches(pitches: list[PitchSpec], *, wall_colour: Optional[int] = None)
         if best is not None:
             used[best] = True
             b = pitches[best]
+            if abs(b.ridge - p.ridge) > 1e-6:
+                mid = 0.5 * (p.ridge + b.ridge)
+                p.ridge = b.ridge = mid
         y_bottom = p.y_bottom if b is None else max(p.y_bottom, b.y_bottom)
         y_top = p.y_top if b is None else max(p.y_top, b.y_top)
         n_rows = max(1, int(round((y_top - y_bottom) / COURSE)))
+        # The shallowest stock slope climbs a course per 2 studs.  A roof
+        # shallower than that, built in its measured rows, stops short of
+        # the ridge and leaves a flat top; a set designer builds the stock
+        # slope all the way up instead (the roof stands a little taller).
+        run = max(f.run for f in ([p] if b is None else [p, b]))
+        if run > 2 * n_rows:
+            n_rows = int(np.ceil(run / 2.0))
         out.append(GableSpec(a=p, b=b, y_bottom=y_bottom, n_rows=n_rows, colour=p.colour,
                              gable_colour=wall_colour if wall_colour is not None else p.colour))
     return out
@@ -1212,6 +1230,120 @@ def _facade_trusted(facade, fit, solid: np.ndarray) -> bool:
     return fit.inliers >= FACADE_MIN_INLIERS and silhouette_iou(solid, facade, fit) >= FACADE_MIN_IOU
 
 
+def regularise_roofs(solid: np.ndarray, gables: list[GableSpec], *,
+                     keep_above: int = 3 * COURSE) -> tuple[np.ndarray, int]:
+    """Rebuild each paired gable's roof volume as the stepped prism its
+    recipe lays: row i (one course) stands `step` studs in from each eave
+    — and from each hipped end — up to the gable's rows.  A reconstructed
+    roof is rarely that (a ridge a few degrees off its walls, terraced
+    faces, an eave hanging far past the walls) and every terrace step
+    would read as a wall.  The eaves are seated on the walls first (a
+    stud of overhang at most: the walls' typical extent across the ridge,
+    read under the roof slab).  Only the gable's own cells are rebuilt (a
+    crossing gable is not this prism's), and a column that rises more
+    than `keep_above` plates over the prism — a tower, a chimney, a
+    dormer — keeps its height.  A roof that already matches its prism
+    within a course over three quarters of its cells is left alone.
+    Returns the new solid and the cells changed."""
+    from scipy.ndimage import binary_dilation
+    from .massing import height_map
+    out = solid.copy()
+    H, X, Z = solid.shape
+    top = height_map(solid)
+    for g in gables:
+        a, b = g.a, g.b
+        lo_face, hi_face = (a, b) if a.sign > 0 else (b, a)
+        e0_raw, e1_raw = lo_face.eave, hi_face.eave
+        if not e0_raw < e1_raw:
+            continue
+        y0, n_rows = g.y_bottom, g.n_rows
+        slab = max(0, y0 - 2 * COURSE)
+        r0 = max(0, min(a.span[0], b.span[0]))
+        r1 = min(max(a.span[1], b.span[1]), X if a.axis == "z" else Z)
+        band = solid[max(0, y0 - 4 * COURSE):slab]
+        per = (band[:, r0:r1, :].any(axis=0) if a.axis == "z" else band[:, :, r0:r1].any(axis=0).T)
+        rows_with = [np.flatnonzero(row) for row in per if row.any()]
+        if not rows_with:
+            continue
+        lo_wall = float(np.median([r.min() for r in rows_with]))
+        hi_wall = float(np.median([r.max() for r in rows_with]))
+        e0 = max(e0_raw, lo_wall - 1.0)
+        e1 = min(e1_raw, hi_wall + 2.0)
+        if not e0 < e1:
+            continue
+        s_lo, s_hi = g.step(lo_face), g.step(hi_face)
+        hstep = g.step(a)                                # as the recipe steps a hipped end
+
+        def rows_at(d_lo: float, d_hi: float, step_lo: int, step_hi: int) -> int:
+            if d_lo < 0 or d_hi < 0:
+                return 0
+            return int(min(n_rows, d_lo // step_lo + 1, d_hi // step_hi + 1))
+
+        own = np.zeros((X, Z), dtype=bool)
+        for f in (a, b):
+            if f.cells is not None and len(f.cells):
+                own[f.cells[:, 0], f.cells[:, 1]] = True
+        if not own.any():
+            continue
+        own = binary_dilation(own, iterations=2)
+        prism = np.full((X, Z), -1, dtype=int)           # top plate of the prism per column
+        for x, z in np.argwhere(own):
+            across = z if a.axis == "z" else x
+            r = x if a.axis == "z" else z
+            if not (r0 <= r < r1) or across + 0.5 < e0 or across + 0.5 > e1:
+                continue
+            n = rows_at(across - np.floor(e0), np.ceil(e1) - 1 - across, s_lo, s_hi)
+            if g.hip_lo or g.hip_hi:
+                n = min(n, rows_at(r - r0 if g.hip_lo else 1e9, (r1 - 1 - r) if g.hip_hi else 1e9,
+                                   hstep, hstep))
+            if n > 0:
+                prism[x, z] = y0 + n * COURSE - 1
+        on = own & (prism >= y0) & (top >= slab)
+        if not on.any() or np.percentile(np.abs(top[on] - prism[on]), 75) <= COURSE:
+            continue                                     # already its prism
+        roof_top = y0 + n_rows * COURSE
+        for x, z in np.argwhere(own):
+            if top[x, z] > roof_top + keep_above:
+                continue                                 # a tower, a chimney: its own mass
+            across = z if a.axis == "z" else x
+            if across + 0.5 < lo_wall or across + 0.5 > hi_wall + 1:
+                out[slab:y0, x, z] = False               # nothing stands out past the walls
+            if prism[x, z] < y0:
+                if top[x, z] >= slab:
+                    out[max(slab, y0):, x, z] = False    # the generator's overhang, gone
+                continue
+            if top[x, z] < y0 and not solid[slab:y0, x, z].any():
+                continue                                 # no building under it here
+            out[y0:prism[x, z] + 1, x, z] = True
+            out[prism[x, z] + 1:, x, z] = False
+    return out, int((out != solid).sum())
+
+
+def ground_walls(walls: list[WallSpec], *, ground_y: int, max_gap: Optional[int] = None) -> int:
+    """Walls stand on the base plate.  A reconstruction's foot is ragged —
+    plants, a shadow, a matte that bit into a dark wall — and the plan
+    reads gaps there; a column of a wall that starts on the ground but
+    whose bricks begin up to `max_gap` courses above it is continued down
+    to the base (`max_gap` defaults to the building's foot, FOOT_COURSES;
+    a taller gap is an opening).  Returns the courses added."""
+    from .massing import FOOT_COURSES
+    max_gap = FOOT_COURSES if max_gap is None else max_gap
+    added = 0
+    for w in walls:
+        f = w.frame
+        if w.mask is None or (f.y0 - ground_y) // COURSE > 0:
+            continue                                     # not a ground-floor wall
+        for u in range(w.mask.shape[0]):
+            built = np.flatnonzero(w.mask[u])
+            if len(built) == 0:
+                continue
+            b = int(built.min())
+            if 0 < b <= max_gap:
+                w.mask[u, :b] = True
+                added += b
+    return added
+
+
 def _plan_from_massing(regions: list[Region], target: MeshTarget, occ: np.ndarray, ground_y: int,
                        *, detect_openings: bool, opening_delta_e: float, facade=None,
                        stand: bool = True, stand_colour: Optional[int] = None) -> SetPlan:
@@ -1259,16 +1391,6 @@ def _plan_from_massing(regions: list[Region], target: MeshTarget, occ: np.ndarra
         # few plates deep, below what the smoothing keeps
         raw_front, _ = measured_front(facade, facade_fit, solid.shape)
         relief = (facade_fit, raw_front)
-    pitches, decks, skin = pitches_and_decks(solid, palette_idx, ground_y=ground_y)
-    walls = walls_from_solid(solid, palette_idx, target, ground_y=ground_y, exclude=skin,
-                             detect_openings=detect_openings, opening_delta_e=opening_delta_e,
-                             relief=relief)
-    if facade is not None:
-        _colour_walls_from_photo(walls, solid, facade, facade_fit)
-    wall_colour = None
-    if walls:
-        vals, counts = np.unique([w.colour for w in walls], return_counts=True)
-        wall_colour = int(vals[int(np.argmax(counts))])
     # Not a building?  (Its outlines are staircases, not straight runs.)
     # Then no walls, roofs or floors: the whole shape is sculpted in brick
     # courses, standing on a base plate over its footprint.
@@ -1293,7 +1415,29 @@ def _plan_from_massing(regions: list[Region], target: MeshTarget, occ: np.ndarra
         plan.facade_fit, plan.facade_changed = facade_fit, facade_changed
         plan.coverage = coverage
         return plan
+    # The roof first: its pitches, paired into gables, define an ideal
+    # prism over the footprint.  A reconstructed roof is rarely that prism
+    # — its ridge runs a few degrees off its walls, its faces terrace —
+    # and every terrace step would read as a wall.  So the roof volume is
+    # rebuilt as the prism before the walls are read off the solid.
+    pitches, decks, skin = pitches_and_decks(solid, palette_idx, ground_y=ground_y)
     pitches = merge_pitches(pitches)
+    prism_gables = [g for g in absorb_hips(pair_pitches(pitches)) if g.b is not None]
+    if prism_gables:
+        solid, changed = regularise_roofs(solid, prism_gables)
+        if changed:
+            pitches, decks, skin = pitches_and_decks(solid, palette_idx, ground_y=ground_y)
+            pitches = merge_pitches(pitches)
+    walls = walls_from_solid(solid, palette_idx, target, ground_y=ground_y, exclude=skin,
+                             detect_openings=detect_openings, opening_delta_e=opening_delta_e,
+                             relief=relief)
+    ground_walls(walls, ground_y=ground_y)
+    if facade is not None:
+        _colour_walls_from_photo(walls, solid, facade, facade_fit)
+    wall_colour = None
+    if walls:
+        vals, counts = np.unique([w.colour for w in walls], return_counts=True)
+        wall_colour = int(vals[int(np.argmax(counts))])
     # One roof colour for the building: the reconstruction's sampling
     # splits one slate roof between two palette entries patch by patch,
     # and no set mixes them face by face.

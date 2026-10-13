@@ -174,3 +174,71 @@ def test_plan_owned_covers_roof_prism_to_grid_top():
     plan = SetPlan(walls=[], gables=pair_pitches([a, b]), consumed=set())
     m = plan.owned((20, 16, 12))
     assert m[0:, 0:13, 0:8].all() and not m[:, 13:, :].any() and not m[:, :, 8:].any()
+
+
+# --- a reconstructed roof that is not its own prism -------------------------
+
+def _face(axis, sign, eave, ridge, span, y0, y1, cells=None):
+    return PitchSpec(region=None, axis=axis, sign=sign, eave=eave, ridge=ridge, span=span,
+                     y_bottom=y0, y_top=y1, colour=0, cells=cells)
+
+
+def test_facing_pitches_with_skewed_ridges_pair_into_one_gable():
+    """A ridge running a few degrees off its walls: each face's ridge
+    estimate lands 3 studs to its own side.  Still one gable, one ridge."""
+    from everything2lego.semantic_v2.setdesign import pair_pitches
+    a = _face("z", +1, 5.0, 31.0, (0, 56), 45, 72)
+    b = _face("z", -1, 53.0, 25.0, (0, 56), 45, 72)
+    gables = pair_pitches([a, b])
+    assert len(gables) == 1 and gables[0].b is not None
+    assert gables[0].a.ridge == gables[0].b.ridge == 28.0
+    # a shallow roof gets the rows a 2-studs-per-course slope needs to meet
+    assert gables[0].n_rows * 2 >= 23
+
+
+def test_back_to_back_pitches_do_not_pair():
+    """Two faces rising AWAY from each other (a valley, two wings) are not
+    a gable, however close their ridge estimates."""
+    from everything2lego.semantic_v2.setdesign import pair_pitches
+    a = _face("z", +1, 20.0, 30.0, (0, 20), 30, 45)
+    b = _face("z", -1, 10.0, 29.0, (0, 20), 30, 45)
+    assert all(g.b is None for g in pair_pitches([a, b]))
+
+
+def test_regularise_roofs_rebuilds_a_terraced_roof_as_the_recipe_prism():
+    from everything2lego.semantic_v2.setdesign import pair_pitches, regularise_roofs
+    from everything2lego.semantic_v2.massing import height_map
+    H, X, Z = 60, 20, 24
+    solid = np.zeros((H, X, Z), bool)
+    solid[0:30, 2:18, 4:20] = True                         # walls' volume, z 4..19
+    # a skewed, terraced roof: its ridge drifts 10 studs along x
+    for x in range(1, 19):
+        ridge = 7 + 10 * x / 18
+        for z in range(3, 21):
+            h = 30 + int(2 * (ridge - abs(z + 0.5 - ridge)) // 1) - 2 * 3
+            solid[30:max(30, min(H, h)), x, z] = True
+    cells = np.argwhere(solid.any(axis=0))
+    a = _face("z", +1, 3.0, 12.0, (1, 19), 30, 48, cells)
+    b = _face("z", -1, 21.0, 12.0, (1, 19), 30, 48, cells)
+    g = pair_pitches([a, b])
+    out, changed = regularise_roofs(solid, g)
+    assert changed > 0
+    top = height_map(out)
+    # every column across the ridge has the same profile: the ridge is straight
+    profiles = {tuple(top[x, 4:20]) for x in range(3, 17)}
+    assert len(profiles) == 1, profiles
+    # the eaves sit on the walls: nothing above the wall-top band past the walls
+    assert not out[30:, 3:17, 0:3].any() and not out[30:, 3:17, 22:].any()
+
+
+def test_ground_walls_close_a_ragged_foot_but_not_an_opening():
+    from everything2lego.semantic_v2.setdesign import ground_walls
+    frame = WallFrame(True, 0, 5, 0, 4, 10 * COURSE)
+    mask = np.ones((4, 10), bool)
+    mask[0, :2] = False                                   # a ragged foot: 2 courses missing
+    mask[1, :7] = False                                   # a 7-course opening (a passage)
+    w = WallSpec(frame=frame, colour=0, mask=mask)
+    added = ground_walls([w], ground_y=0)
+    assert added == 2
+    assert w.mask[0].all()
+    assert not w.mask[1, :7].any()

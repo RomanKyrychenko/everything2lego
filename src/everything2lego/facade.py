@@ -863,11 +863,15 @@ def carve_facade(solid: np.ndarray, facade: Facade, fit: FacadeFit, *,
         cols = np.flatnonzero(facade.mask.any(axis=0))
         tops[cols] = np.argmax(facade.mask[:, cols], axis=0)
         bgpix = ~on_object
-        sky = bgpix & ((zmeas <= 0.1) | (vi < tops[ui]))
+        # sky: above the object's outline in its column.  A background
+        # pixel BELOW the outline without a depth is unknown, not sky — a
+        # dark wall the matte missed has no depth either, and carving
+        # along its whole ray would cut a wedge out of the wall.
+        sky = bgpix & (vi < tops[ui])
         if facade.conf is not None:
             lo = float(np.nanpercentile(facade.conf[facade.mask], 5))
             sky |= bgpix & (facade.conf[vi, ui] < lo)
-        clear |= sky | (bgpix & (zs < zmeas))
+        clear |= sky | (bgpix & (zmeas > 0.1) & (zs < zmeas))
     out[idx[clear]] = False
     out[fill_idx] = True
     out = out.reshape(solid.shape)
