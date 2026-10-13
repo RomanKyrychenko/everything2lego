@@ -61,6 +61,19 @@ class PipelineConfig:
     # into the neighbour sharing the longest boundary (parts.merge_small_
     # regions).  0 = off; the CLI uses 0.003 for photo meshes.
     merge_small_region_area: float = 0.0
+    # Build walls and pitched roofs with set-design recipes (setdesign.py):
+    # snapped bonded walls with part openings, slope roofs with tiles and
+    # ridge, gable ends in brick.  Other regions still use the builders.
+    set_mode: bool = False
+    # Where set mode reads its specs: "massing" (walls, roofs and decks off
+    # the solid voxel volume — robust to segmentation noise) or "regions"
+    # (the detector's planar regions snapped to the grid).
+    set_source: str = "massing"
+    # A measured front (tools/facade_depth.py → npz of metric points and a
+    # mask from MapAnything).  In massing it is registered to the model
+    # and overrides the front surface and the skyline — the photographed
+    # side as measured, the rest as generated.
+    facade_path: Optional[str] = None
     # Optional: name the parts with a vision model (see labeller.py).  Needs
     # the anthropic package and an API key; without them the parts stay
     # unnamed and the pipeline carries on.  Turns the built-in segmenter on
@@ -167,23 +180,66 @@ class SemanticLegoPipeline:
         # slab owns the cells, and each wall is told what is already built so
         # it packs around it instead of overlapping.
         claimed = np.zeros(target.voxel_grid.occupied().shape, dtype=bool)
-        for region in sorted(regions, key=_build_priority):
-            builder = self.registry.dispatch(region)
-            if builder is None:
-                counts[f"{region.label.value}:unbuilt"] = 1
-                continue
-            builder.claimed = claimed
-            new = builder.build(region, target)
-            for p in new:
-                claimed[p.y_plate:p.y_plate + p.part.height_units,
-                        p.x_stud:p.x_stud + p.w_world, p.z_stud:p.z_stud + p.d_world] = True
-            surface.extend(new)
-            key = f"{region.label.value}:{type(builder).__name__}"
-            counts[key] = counts.get(key, 0) + len(new)
+        remaining = sorted(regions, key=_build_priority)
+        owned = None
+
+        def run_builders(regs: list[Region]) -> None:
+            for region in regs:
+                builder = self.registry.dispatch(region)
+                if builder is None:
+                    counts[f"{region.label.value}:unbuilt"] = 1
+                    continue
+                builder.claimed = claimed
+                new = builder.build(region, target)
+                for p in new:
+                    claimed[p.y_plate:p.y_plate + p.part.height_units,
+                            p.x_stud:p.x_stud + p.w_world, p.z_stud:p.z_stud + p.d_world] = True
+                surface.extend(new)
+                key = f"{region.label.value}:{type(builder).__name__}"
+                counts[key] = counts.get(key, 0) + len(new)
+
+        if self.config.set_mode:
+            from .setdesign import build_set, plan_set
+            facade = None
+            if self.config.facade_path:
+                from ..facade import Facade
+                facade = Facade.load(self.config.facade_path)
+            plan = plan_set(regions, target,
+                            detect_openings=self.config.builder.detect_openings,
+                            opening_delta_e=self.config.builder.opening_delta_e,
+                            source=self.config.set_source, facade=facade)
+            if plan.facade_fit is not None:
+                counts["facade:cells_changed"] = plan.facade_changed
+                counts["facade:inliers_pct"] = int(round(100 * plan.facade_fit.inliers))
+                target.metadata["facade_fit"] = {
+                    "axis": plan.facade_fit.axis, "sign": plan.facade_fit.sign,
+                    "mirror": plan.facade_fit.mirror, "rms_mm": plan.facade_fit.rms_mm,
+                    "inliers": plan.facade_fit.inliers}
+            remaining = [r for r in remaining if id(r) not in plan.consumed]
+            # Slabs first: the walls stand on them and build around them.
+            slabs = [r for r in remaining if _build_priority(r) == 0]
+            run_builders(slabs)
+            built, recipe_counts = build_set(plan, claimed, target)
+            surface.extend(built)
+            counts.update(recipe_counts)
+            counts["set:bases"] = len(plan.bases)
+            counts["set:decks"] = len(plan.decks)
+            counts["set:piers"] = len(plan.piers)
+            counts["set:floors"] = len(plan.floors)
+            counts["set:pruned_cells"] = plan.pruned
+            counts["set:walls"] = len(plan.walls)
+            counts["set:gables"] = sum(1 for g in plan.gables if g.b is not None)
+            counts["set:lean_tos"] = sum(1 for g in plan.gables if g.b is None)
+            remaining = [r for r in remaining if _build_priority(r) != 0]
+            # The recipes own their volumes outright; the builders and the
+            # interior filler stay out even where the voxels say "mesh".
+            owned = plan.owned(claimed.shape)
+            claimed |= owned
+        run_builders(remaining)
 
         interior: list[Placement] = []
         if self.config.fill_interior:
-            interior = self.interior_filler.fill(target, surface)
+            interior = self.interior_filler.fill(target, surface, exclude=owned)
             counts["interior:InteriorVolumeFiller"] = len(interior)
 
         placements = surface + interior
@@ -192,13 +248,24 @@ class SemanticLegoPipeline:
             # Regions are built independently, so two of them can claim the
             # same cell; the surface placements come first and win.
             placements, dropped = resolve_overlaps(placements)
-            placements, added = brace(placements)
-            placements, _ = bond(placements)
             # Bracing holds parts up; it can't join two assemblies that sit
             # side by side with no stud between them.  Reconnect bridges
-            # small gaps to the main body and sheds what can't be reached.
-            from ..stability import reconnect
-            placements, bridged, shed = reconnect(placements)
+            # small gaps to the main body and sheds what can't be reached —
+            # and shedding an island can take away what a brace column
+            # landed on, so the passes run to a fixed point: a store set
+            # is one assembly with nothing floating, not a report.
+            from ..stability import check as _check, reconnect
+            added = bridged = shed = 0
+            for _round in range(4):
+                placements, a = brace(placements)
+                placements, _ = bond(placements)
+                placements, b, s = reconnect(placements)
+                added += a
+                bridged += b
+                shed += s
+                rep = _check(placements)
+                if (not rep.floating and rep.components <= 1) or (a == 0 and b == 0 and s == 0):
+                    break
             counts["structure:dropped_overlaps"] = dropped
             counts["structure:added_supports"] = added
             counts["structure:bridges"] = bridged

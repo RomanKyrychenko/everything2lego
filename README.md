@@ -143,11 +143,86 @@ PYTORCH_ENABLE_MPS_FALLBACK=1 \
    as 2×1 slopes (part 3040) with 1×1 brick fillers for orphans; cheese
    slopes (54200) at pitched-roof tips.
 
+### Set-design mode (`--set-mode`)
+
+The stages above produce a quantised *surface*: whatever cells the voxel
+grid holds, packed with the fewest parts.  A real LEGO set is a quantised
+*design*: "this wall is 12 studs long, 5 bricks high, window at stud 4",
+built in bonded courses; "this roof is six rows of 33° slopes with a ridge
+of tiles".  `--set-mode` adds that layer (`semantic_v2/setdesign.py` and
+`semantic_v2/massing.py`) between the voxel target and the builders.
+
+The architecture is read off the **solid voxel volume**, not off segmented
+regions: a segmenter slices a photo-reconstructed facade into a dozen
+regions and a roof face into strips, while the filled voxel shell has none
+of that noise — its plan at every brick course *is* the floor plan and its
+top surface *is* the roof.
+
+- **Walls** — every axis-aligned run of boundary cells of the plan, course
+  by course, accumulated into one wall per plane line (the ±1-stud wobble
+  of a reconstructed facade is folded onto the dominant line).  Each wall
+  is built in a running bond from 1×1…1×16 bricks around its openings (the
+  labeller's boxes, or windows found by colour); odd courses lead with a
+  2-stud brick so the seams never stack, and two walls meeting at a corner
+  alternate the corner column course by course.
+- **Roofs** — patches of the height map with a steady gradient along one
+  axis become pitches (eave, ridge, span, rise); slices of one face are
+  merged, opposite faces across a ridge paired into a gable, the rest are
+  lean-tos.  A gable is rows of slope parts stepping in per brick course
+  (45° family for 1-stud steps, 33° family for 2-stud steps — 2×8 down to
+  2×1, 3×6 down to 3×1), bricks in the wall colour filling the triangle at
+  each end and every 8 studs between, plate strips along the inner edges so
+  the next row rests on two studs, tiles across the ridge.  The roof seats
+  on the eave walls; gable-end walls stop at the roof base so the triangle
+  is the roof's; a part of one roof that another roof or a tower hides is
+  not built.  A **hip** reads off the height map as faces pitched along
+  both axes over one footprint: they collapse into one roof whose ends step
+  in each row and carry slopes facing out along the ridge (half-hips when
+  only one end does).
+- **Floors and spines** — a plate sheet at every storey, under every roof
+  (its ceiling) and under every wall that starts above the ground (the base
+  plate, the sheet a set-back storey or a tower stands on), covering wall
+  tops and room alike so it ties the walls; the walls build that course as
+  two plates under it.  Hidden 1-stud spine walls every 8 studs carry each
+  sheet, so no plate hangs.  Flat tops (a flat roof, a terrace, each tread
+  of the steps) are the top floor of their block.
+- **Piers** — small solid bits nobody else accounts for (a chimney, a
+  pillar) are built solid, standing on the ground or a floor.
+- A recipe owns its volume outright, so nothing else is built through it.
+  The solid volume itself is read robustly from a leaky reconstruction
+  (closed shell, per-plan and x-ray fills, covered-and-bracketed interiors).
+  `PipelineConfig.set_source="regions"` keeps the older path that snaps the
+  detector's planar regions instead.
+
+The structure pass then runs brace → bond → reconnect to a fixed point, and
+brace columns land only on studs (never on a tile or a slope's slant).
+
+#### A measured front (`--facade`)
+
+A single-image generator gives the whole object, but only plausibly; a
+metric depth model gives the photographed side exactly.  `tools/
+facade_depth.py` runs [MapAnything](https://github.com/facebookresearch/map-anything)
+(its own environment; Apache checkpoint; ~60 s on CPU) on the matted
+photo and writes the metric point map of the object.  `semantic --set-mode
+--facade facade.npz` then registers it to the model by ICP in isotropic
+millimetres — trying every side of the model, so it also learns which way
+the photo was taken — and overrides the model's front surface and skyline
+column by column.  On the house photo the registration lands at 10 mm RMS
+with 97 % inliers; the measured front agrees with the generator's within a
+stud, but the skyline doesn't: Hunyuan had stretched the tower ~20 % above
+the gable peaks, and the fused model has it at the photographed height.
+
+Set mode runs *without* `--soft-train` (the trainer's discretiser re-packs
+courses and undoes the bonding and slopes).  On a clean gable-house mesh it
+gives one supported assembly of ~500 parts with base, bonded walls, slope
+roof and ridge.
+
 ### CLI flags that matter
 
 | Flag | What it does |
 |---|---|
 | `--max-studs 40..80` | LEGO grid resolution. Halving pitch drops parts ~5× and detail ~2×. |
+| `--set-mode` | Build walls, roofs and the base with set-design recipes (bonded courses, slope rows, ridge tiles); see above. |
 | `--subvoxels 2` | Super-sample occupancy for sharper thin features. |
 | `--soft-train` | Enable the differentiable trainer; refines colour + fills gaps. |
 | `--hollow` | Carve out the interior, leaving shell + floors + columns + foundation. |

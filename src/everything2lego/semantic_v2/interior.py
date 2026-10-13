@@ -57,12 +57,18 @@ class InteriorVolumeFiller:
         self.config = config or InteriorConfig()
 
     def fill(self, target: MeshTarget,
-              surface_placements: Iterable[Placement]) -> list[Placement]:
+              surface_placements: Iterable[Placement],
+              exclude: np.ndarray | None = None) -> list[Placement]:
+        """`exclude` marks cells some other stage owns outright (a recipe's
+        roof prism, say): they are never filled, even where the voxel
+        envelope says the mesh was there and nothing was built."""
         occ = target.voxel_grid.occupied()
         Y, X, Z = occ.shape
         # Mark cells already covered by surface parts.
         covered = _mark_covered(occ.shape, surface_placements)
         remaining = occ & ~covered
+        if exclude is not None:
+            remaining &= ~exclude
         if self.config.hollow:
             remaining = _hollow_with_supports(
                 remaining, occ,

@@ -179,8 +179,8 @@ def assemble(grid: VoxelGrid, *, use_tiles: bool = True, use_slopes: bool = True
     return BuildResult(prepared, placements, report)
 
 
-def best_gap(occupied: np.ndarray, p: pack.Placement, model: np.ndarray | None = None
-             ) -> tuple[int, int, int, int, bool] | None:
+def best_gap(occupied: np.ndarray, p: pack.Placement, model: np.ndarray | None = None,
+             studs: np.ndarray | None = None) -> tuple[int, int, int, int, bool] | None:
     """Where to put support under a part that nothing holds up.
 
     For every cell of its footprint, the run of empty cells below it ends
@@ -194,6 +194,9 @@ def best_gap(occupied: np.ndarray, p: pack.Placement, model: np.ndarray | None =
     to fill, or None when nothing can be filled (the part sits directly on
     something it cannot grip, like a tile).  `model` marks the voxels that
     count as landing on the model; by default every occupied voxel does.
+    `studs` marks the voxels that offer a stud on top; when given, a run
+    may not end on an occupied voxel without one (a tile, the slant of a
+    slope) — there is nothing there to grip.
     """
     Y, X, Z = occupied.shape
     cx, cz = p.x_stud + (p.w_world - 1) / 2, p.z_stud + (p.d_world - 1) / 2
@@ -210,6 +213,8 @@ def best_gap(occupied: np.ndarray, p: pack.Placement, model: np.ndarray | None =
             if gap == 0:
                 continue
             lands = y >= 0 and (model is None or bool(model[y, x, z]))
+            if y >= 0 and studs is not None and not studs[y, x, z]:
+                continue        # a tile, a slope's slant: nothing to grip there
             centre = abs(x - cx) + abs(z - cz)
             key = (0, gap, centre) if lands else (1, centre, gap)
             if best is None or key < best[0]:
@@ -272,9 +277,19 @@ def brace(placements: list[pack.Placement], *, max_rounds: int = 50
         if not check.floating:
             break
         occ = occupancy(placements)
+        # A column may land only where the part under it offers studs: the
+        # top plate of a brick or plate, the high strip of a slope — never
+        # a tile or a slope's slant (landing there held nothing, and the
+        # next check found the column itself floating).
+        studs = np.zeros_like(occ)
+        for q in placements:
+            top = q.y_plate + q.part.height_units - 1
+            for sx, sz in stability.top_studs(q):
+                if 0 <= sx < occ.shape[1] and 0 <= sz < occ.shape[2] and 0 <= top < occ.shape[0]:
+                    studs[top, sx, sz] = True
         new: list[pack.Placement] = []
         for p in check.floating:
-            gap = best_gap(occ, p)
+            gap = best_gap(occ, p, studs=studs)
             if gap is None:
                 continue
             x, z, y_lo, y_hi, lands = gap
@@ -285,6 +300,7 @@ def brace(placements: list[pack.Placement], *, max_rounds: int = 50
                 new.append(pack.Placement(part, color, x, z, y, 1, 1, 0))
                 y += part.height_units
             occ[y_lo:y_hi, x, z] = True
+            studs[y_hi - 1, x, z] = True
         if not new:
             break
         placements.extend(new)

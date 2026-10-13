@@ -1134,6 +1134,15 @@ def semantic(
     min_island: int = typer.Option(8, "--min-island", min=1,
         help="Drop voxel islands with fewer cells than this before building anything "
              "(marching-cubes specks, a floating 2-cell 'chimney')."),
+    set_mode: bool = typer.Option(False, "--set-mode/--no-set-mode",
+        help="Build walls and pitched roofs the way a set designer would: snapped, bonded "
+             "brick courses with real window/door parts, slope roofs with tiles and a ridge, "
+             "brick gable ends. Detail and round regions still use the voxel builders."),
+    facade: Optional[str] = typer.Option(None, "--facade",
+        help="A measured front from tools/facade_depth.py (MapAnything): metric points of the "
+             "photographed side. Registered to the model in set mode; overrides its front "
+             "surface and skyline, so a generator's stretched tower or flattened bay follows "
+             "the photo."),
     merge_small_regions: float = typer.Option(0.003, "--merge-small-regions", min=0.0, max=0.1,
         help="After segmentation, fold parts below this fraction of the mesh AREA into the "
              "neighbour they share the longest boundary with. Named parts (windows, doors) "
@@ -1224,6 +1233,8 @@ def semantic(
         seg_min_fraction=seg_min_fraction,
         min_island_cells=min_island,
         merge_small_region_area=merge_small_regions,
+        set_mode=set_mode,
+        facade_path=facade,
         label_parts=label_parts,
         labeller_model=labeller_model,
         labeller_hint=hint,
