@@ -1000,6 +1000,11 @@ class SetPlan:
     roof_avoid: Optional[np.ndarray] = None         # cells a roof part stood in with nothing under
     facade_fit: object = None                       # facade.FacadeFit when a measured front was used
     facade_changed: int = 0
+    # A shape that is not a building (walls cover little of its outline)
+    # is sculpted course by course instead; the solid to sculpt.
+    sculpt: Optional[np.ndarray] = None
+    palette_idx: Optional[np.ndarray] = None
+    ground_y: int = 0
 
     def owned(self, shape: tuple[int, int, int]) -> np.ndarray:
         """Cells the recipes own outright, built or not: a roof's whole
@@ -1032,6 +1037,8 @@ class SetPlan:
                     m[y, d.cells[:, 0], d.cells[:, 1]] = True
         if self.owned_extra is not None:
             m |= self.owned_extra
+        if self.sculpt is not None:
+            m |= self.sculpt                # a sculpted shape is the recipe's, core and all
         return m
 
 
@@ -1131,6 +1138,21 @@ def _plan_from_massing(regions: list[Region], target: MeshTarget, occ: np.ndarra
     if walls:
         vals, counts = np.unique([w.colour for w in walls], return_counts=True)
         wall_colour = int(vals[int(np.argmax(counts))])
+    # Not a building?  (Its outlines are staircases, not straight runs.)
+    # Then no walls, roofs or floors: the whole shape is sculpted in brick
+    # courses, standing on a base plate over its footprint.
+    from .massing import SCULPT_CORNER_SHARE, FloorSpec, outline_corner_share
+    coverage = outline_corner_share(solid, ground_y=ground_y)
+    if coverage > SCULPT_CORNER_SHARE:
+        footprint = np.argwhere(solid.any(axis=0))
+        base = FloorSpec(cells=footprint, y=ground_y + COURSE - 1, colour=wall_colour or 0, base=True)
+        plan = SetPlan(walls=[], gables=[], consumed={id(r) for r in regions}, floors=[base],
+                       sculpt=solid, palette_idx=palette_idx, ground_y=ground_y)
+        plan.surface = height_map(solid)
+        plan.solid = solid
+        plan.facade_fit, plan.facade_changed = facade_fit, facade_changed
+        plan.coverage = coverage
+        return plan
     pitches = merge_pitches(pitches)
     # One roof colour for the building: the reconstruction's sampling
     # splits one slate roof between two palette entries patch by patch,
@@ -1381,6 +1403,11 @@ def build_set(plan: SetPlan, claimed: np.ndarray, target: Optional[MeshTarget] =
             m[max(0, r0):r1, max(0, lo):hi] = True
         return m
 
+    if plan.sculpt is not None:
+        from .massing import sculpt_solid
+        ps = sculpt_solid(plan.sculpt, claimed, plan.palette_idx, ground_y=plan.ground_y)
+        out.extend(ps)
+        counts["sculpt:SculptRecipe"] = len(ps)
     for g in plan.gables:
         others = None
         if plan.surface is not None and len(plan.gables) > 1:

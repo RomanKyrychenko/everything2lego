@@ -988,6 +988,208 @@ def build_floor(spec: FloorSpec, claimed: Optional[np.ndarray], grid_shape: tupl
 
 
 # ---------------------------------------------------------------------------
+# Sculpture: course-by-course brick building for shapes that are not
+# buildings (a figure, a vehicle, a sphere) — how a set builds organic form
+# ---------------------------------------------------------------------------
+
+SCULPT_SHELL = 2           # studs of brick behind the surface; the core stays hollow
+BUILDING_WALL_COVERAGE = 0.5   # share of boundary cells the wall recipe must claim
+SCULPT_CORNER_SHARE = 0.3  # outline corner density above which a shape is sculpted, not built
+
+
+def outline_corner_share(solid: np.ndarray, *, ground_y: int) -> float:
+    """How jagged the plan outlines are: the share of boundary cells with
+    two or more open sides, over all courses.  A building's outline is
+    long straight runs with a corner every so often (a house: ~0.18, a
+    plain gable box: ~0.06); a sphere's is a staircase (~0.46)."""
+    H = solid.shape[0]
+    n_courses = max(0, (H - ground_y + 1) // COURSE)
+    corners = boundary = 0
+    for c in range(n_courses):
+        y0 = ground_y + c * COURSE
+        block = solid[y0:y0 + COURSE]
+        if block.shape[0] == 0:
+            break
+        sl = block.sum(axis=0) >= min(2, block.shape[0])
+        if not sl.any():
+            continue
+        pad = np.pad(sl, 1)
+        open_n = ((~pad[1:-1, :-2]).astype(int) + (~pad[1:-1, 2:]) + (~pad[:-2, 1:-1]) + (~pad[2:, 1:-1]))
+        boundary += int((sl & (open_n > 0)).sum())
+        corners += int((sl & (open_n >= 2)).sum())
+    return corners / max(1, boundary)
+
+
+def wall_coverage(solid: np.ndarray, walls: list[WallSpec], *, ground_y: int) -> float:
+    """What share of the solid's boundary cells (per course) the walls
+    account for.  A house's facades are long straight runs: high.  A
+    sphere's outline is short stepped runs: low."""
+    H, X, Z = solid.shape
+    n_courses = max(0, (H - ground_y + 1) // COURSE)
+    boundary = 0
+    for c in range(n_courses):
+        y0 = ground_y + c * COURSE
+        block = solid[y0:y0 + COURSE]
+        if block.shape[0] == 0:
+            break
+        sl = block.sum(axis=0) >= min(2, block.shape[0])
+        pad = np.pad(sl, 1)
+        edge = sl & ~(pad[1:-1, :-2] & pad[1:-1, 2:] & pad[:-2, 1:-1] & pad[2:, 1:-1])
+        boundary += int(edge.sum())
+    covered = sum(int(w.mask.sum()) for w in walls if w.region is not None)
+    return covered / max(1, boundary)
+
+
+def _slope_rot_for_outward(direction: tuple[int, int]) -> int:
+    """Rotation putting a slope's low side toward `direction` (dx, dz);
+    the catalogue's slopes have their low side at +x at rotation 0."""
+    dx, dz = direction
+    if dx > 0:
+        return 0
+    if dx < 0:
+        return 180
+    return 270 if dz > 0 else 90      # +z low side = 270, -z = 90 (see _slope_rotation)
+
+
+def sculpt_solid(solid: np.ndarray, claimed: np.ndarray, palette_idx: np.ndarray, *,
+                 ground_y: int, shell: int = SCULPT_SHELL) -> list[Placement]:
+    """Build the solid course by course: a brick shell `shell` studs thick
+    plus whatever the course above stands on, packed largest-first with
+    alternating scan direction so courses bond; where the course above
+    steps in by one stud the edge cells are 45° slopes facing out (two
+    studs if it steps in two: 33°), where it steps OUT by one the course
+    above gets inverted slopes hanging over.  Colours per part from the
+    voxel palette.  Everything respects `claimed` and marks it."""
+    from scipy.ndimage import binary_erosion
+    from ..templates.base import part_by_ldraw
+    H, X, Z = solid.shape
+    n_courses = max(0, (H - ground_y + 1) // COURSE)
+    bricks = _brick_catalogue()
+    slopes45 = {w: part_by_ldraw(l) for w, l in ((8, "4445.dat"), (4, "3037.dat"), (3, "3038.dat"),
+                                                 (2, "3039.dat"), (1, "3040.dat"))}
+    slopes33 = {w: part_by_ldraw(l) for w, l in ((6, "3939.dat"), (4, "3297.dat"), (3, "4161.dat"),
+                                                 (2, "3298.dat"), (1, "4286.dat"))}
+    inv = part_by_ldraw("3665.dat")
+    out: list[Placement] = []
+
+    def plan_at(c: int) -> np.ndarray:
+        y0 = ground_y + c * COURSE
+        if c < 0 or y0 >= H:
+            return np.zeros((X, Z), dtype=bool)
+        block = solid[y0:y0 + COURSE]
+        return block.sum(axis=0) >= min(2, block.shape[0])
+
+    def colour_at(y: int, x: int, z: int) -> int:
+        v = int(palette_idx[min(H - 1, y), x, z])
+        return v if v >= 0 else 0
+
+    def free(y: int, x: int, z: int, h: int = COURSE, w: int = 1, d: int = 1) -> bool:
+        if x < 0 or z < 0 or x + w > X or z + d > Z or y + h > H:
+            return False
+        return not claimed[y:y + h, x:x + w, z:z + d].any()
+
+    def put(part, colour, x, z, y, w, d, rot) -> None:
+        out.append(Placement(part=part, color_idx=colour, x_stud=x, z_stud=z, y_plate=y,
+                             w_world=w, d_world=d, rotation_deg=rot))
+        claimed[y:y + part.height_units, x:x + w, z:z + d] = True
+
+    for c in range(n_courses):
+        y = ground_y + c * COURSE
+        if y + COURSE > H:
+            break
+        here, above, below = plan_at(c), plan_at(c + 1), plan_at(c - 1)
+        if not here.any():
+            continue
+        pad = np.pad(here, 1)
+        edge = here & ~(pad[1:-1, :-2] & pad[1:-1, 2:] & pad[:-2, 1:-1] & pad[2:, 1:-1])
+        # Which edge cells become slopes: the course above is absent here
+        # but present one (or two) studs inward in a consistent direction.
+        done = np.zeros((X, Z), dtype=bool)
+        for (dx, dz) in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            # the outward direction is (dx, dz); inward is the opposite
+            ix, iz = -dx, -dz
+            cand = np.zeros((X, Z), dtype=bool)
+            for x, z in np.argwhere(edge & ~above & ~done):
+                xo, zo = x + dx, z + dz
+                xi, zi = x + ix, z + iz
+                if 0 <= xi < X and 0 <= zi < Z and not (0 <= xo < X and 0 <= zo < Z and here[xo, zo]) \
+                        and here[xi, zi]:
+                    cand[x, z] = True
+            if not cand.any():
+                continue
+            # runs along the edge (perpendicular to the direction)
+            along_x = dz != 0            # edge runs along x when facing ±z
+            for line in range(Z if along_x else X):
+                cells = np.flatnonzero(cand[:, line] if along_x else cand[line, :])
+                if len(cells) == 0:
+                    continue
+                runs, start = [], cells[0]
+                for a, b in zip(cells, cells[1:]):
+                    if b != a + 1:
+                        runs.append((start, a)); start = b
+                runs.append((start, cells[-1]))
+                for r0, r1 in runs:
+                    pos = r0
+                    while pos <= r1:
+                        n = r1 - pos + 1
+                        # step size: does the course above sit 1 or 2 studs in?
+                        x, z = (pos, line) if along_x else (line, pos)
+                        two = (0 <= x + 2 * ix < X and 0 <= z + 2 * iz < Z and above[x + 2 * ix, z + 2 * iz]
+                               and not above[x + ix, z + iz])
+                        table, depth = (slopes33, 3) if two else (slopes45, 2)
+                        w = next((k for k in sorted(table, reverse=True) if k <= n and table[k] is not None), 1)
+                        part = table.get(w) or slopes45[1]
+                        # footprint: w along the edge, depth inward from the edge cell
+                        if along_x:
+                            xs, zs = x, min(z, z + iz * (depth - 1))
+                            W, D = w, depth
+                        else:
+                            xs, zs = min(x, x + ix * (depth - 1)), z
+                            W, D = depth, w
+                        if free(y, xs, zs, COURSE, W, D) and all(
+                                here[xs + a, zs + b] for a in range(W) for b in range(D)):
+                            put(part, colour_at(y + 1, x, z), xs, zs, y, W, D, _slope_rot_for_outward((dx, dz)))
+                            for a in range(W):
+                                for b in range(D):
+                                    done[xs + a, zs + b] = True
+                        pos += w
+        # Inverted slopes under an overhang: the course above extends one
+        # stud past this course's edge.
+        if inv is not None and c + 1 < n_courses:
+            y_up = y + COURSE
+            for (dx, dz) in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                for x, z in np.argwhere(above & ~here):
+                    xi, zi = x - dx, z - dz           # the cell inward of the overhang
+                    if not (0 <= xi < X and 0 <= zi < Z) or not here[xi, zi] or not above[xi, zi]:
+                        continue
+                    xs, zs = min(x, xi), min(z, zi)
+                    W, D = (2, 1) if dx else (1, 2)
+                    if free(y_up, xs, zs, COURSE, W, D):
+                        put(inv, colour_at(y_up + 1, x, z), xs, zs, y_up, W, D,
+                            _slope_rot_for_outward((dx, dz)))
+        # Fill: the shell, plus what the course above needs under it.
+        core = binary_erosion(here, iterations=shell) if shell > 0 else np.zeros_like(here)
+        fill = (here & ~core) | (here & above)
+        fill &= ~done
+        fill &= ~claimed[y:y + COURSE].any(axis=0)
+        if not fill.any():
+            continue
+        # colour groups: pack each colour's cells on their own
+        cols = np.full((X, Z), -1)
+        for x, z in np.argwhere(fill):
+            cols[x, z] = colour_at(y + 1, x, z)
+        for colour in np.unique(cols[fill]):
+            m = fill & (cols == colour)
+            out_c = _tile_mask(m, y, int(colour), bricks, x0=0, z0=0, mirror=(c % 2 == 1),
+                               long_axis="x" if c % 2 == 0 else "z")
+            for p in out_c:
+                claimed[p.y_plate:p.y_plate + p.part.height_units, p.x_stud:p.x_stud + p.w_world,
+                        p.z_stud:p.z_stud + p.d_world] = True
+            out.extend(out_c)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Deck recipe
 # ---------------------------------------------------------------------------
 

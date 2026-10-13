@@ -188,6 +188,16 @@ top surface *is* the roof.
   of the steps) are the top floor of their block.
 - **Piers** — small solid bits nobody else accounts for (a chimney, a
   pillar) are built solid, standing on the ground or a floor.
+- **Sculpture** — a shape that is not a building (its plan outlines are
+  staircases rather than straight runs: corner density above 0.3) gets
+  none of the above.  It is built the way a set builds organic form:
+  course by course, a two-stud brick shell plus whatever the course above
+  stands on, bonded by alternating the packing direction; where the course
+  above steps in by one stud the edge cells become 45° slopes facing out
+  (two studs: 33°), where it steps out the course above gets inverted
+  slopes; a base plate under the whole footprint.  `examples/sample.glb`
+  (a sphere) comes out as a dome of slopes over bonded courses, one
+  assembly, in the voxel colours.
 - A recipe owns its volume outright, so nothing else is built through it.
   The solid volume itself is read robustly from a leaky reconstruction
   (closed shell, per-plan and x-ray fills, covered-and-bracketed interiors).
