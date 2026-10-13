@@ -1232,10 +1232,18 @@ def _plan_from_massing(regions: list[Region], target: MeshTarget, occ: np.ndarra
     # walls; hidden spine walls under it.  Then raised walls drop columns
     # down to the floor that carries them, and the interlock sees the
     # final masks.
+    # A flat top at ground level — a tread of the steps, a plinth, a low
+    # terrace — is not a floor over a room; the solid under it is built
+    # solid by the pier recipe (PLINTH_COURSES), so only higher tops
+    # become floors.
+    from .massing import PLINTH_COURSES
+    high_decks = [d for d in plan.decks
+                  if d.y <= ground_y + COURSE                      # the base plate itself stays a sheet
+                  or d.y > ground_y + PLINTH_COURSES * COURSE]
     plan.floors, spines, floor_cells = floors_and_spines(
         solid, walls, gables, ground_y=ground_y, structural_colour=wall_colour or 0,
-        decks=plan.decks)
-    plan.decks = []                    # flat tops are floors now
+        decks=high_decks)
+    plan.decks = []                    # flat tops are floors (or plinths) now
     drop_wall_supports(walls, solid, ground_y, floor_cells)
     walls.extend(spines)
     plan.walls = walls
