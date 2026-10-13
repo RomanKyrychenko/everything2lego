@@ -74,6 +74,11 @@ class PipelineConfig:
     # and overrides the front surface and the skyline — the photographed
     # side as measured, the rest as generated.
     facade_path: Optional[str] = None
+    # A figure (a shape sculpted course by course) gets a pedestal under
+    # the parts of its underside too steep for inverted slopes.  Colour is
+    # a palette index; None = dark bluish grey.
+    stand: bool = True
+    stand_colour: Optional[int] = None
     # Optional: name the parts with a vision model (see labeller.py).  Needs
     # the anthropic package and an API key; without them the parts stay
     # unnamed and the pipeline carries on.  Turns the built-in segmenter on
@@ -207,7 +212,8 @@ class SemanticLegoPipeline:
             plan = plan_set(regions, target,
                             detect_openings=self.config.builder.detect_openings,
                             opening_delta_e=self.config.builder.opening_delta_e,
-                            source=self.config.set_source, facade=facade)
+                            source=self.config.set_source, facade=facade,
+                            stand=self.config.stand, stand_colour=self.config.stand_colour)
             if plan.facade_fit is not None:
                 counts["facade:cells_changed"] = plan.facade_changed
                 counts["facade:inliers_pct"] = int(round(100 * plan.facade_fit.inliers))

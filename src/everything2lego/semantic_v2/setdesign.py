@@ -1005,6 +1005,8 @@ class SetPlan:
     sculpt: Optional[np.ndarray] = None
     palette_idx: Optional[np.ndarray] = None
     ground_y: int = 0
+    stand: Optional[np.ndarray] = None              # pedestal cells under a figure
+    stand_colour: int = 0
 
     def owned(self, shape: tuple[int, int, int]) -> np.ndarray:
         """Cells the recipes own outright, built or not: a roof's whole
@@ -1039,12 +1041,15 @@ class SetPlan:
             m |= self.owned_extra
         if self.sculpt is not None:
             m |= self.sculpt                # a sculpted shape is the recipe's, core and all
+        if self.stand is not None:
+            m |= self.stand
         return m
 
 
 def plan_set(regions: list[Region], target: MeshTarget, *,
              detect_openings: bool = True, opening_delta_e: float = 22.0,
-             source: str = "massing", facade=None) -> SetPlan:
+             source: str = "massing", facade=None, stand: bool = True,
+             stand_colour: Optional[int] = None) -> SetPlan:
     """`source` is where the specs come from: "massing" reads walls, roofs
     and decks off the solid voxel volume (robust to segmentation noise;
     every region is consumed), "regions" snaps the detector's planar
@@ -1056,7 +1061,7 @@ def plan_set(regions: list[Region], target: MeshTarget, *,
     if source == "massing":
         return _plan_from_massing(regions, target, occ, ground_y,
                                   detect_openings=detect_openings, opening_delta_e=opening_delta_e,
-                                  facade=facade)
+                                  facade=facade, stand=stand, stand_colour=stand_colour)
     walls: list[WallSpec] = []
     pitches: list[PitchSpec] = []
     bases: list[BaseSpec] = []
@@ -1115,7 +1120,8 @@ def plan_set(regions: list[Region], target: MeshTarget, *,
 
 
 def _plan_from_massing(regions: list[Region], target: MeshTarget, occ: np.ndarray, ground_y: int,
-                       *, detect_openings: bool, opening_delta_e: float, facade=None) -> SetPlan:
+                       *, detect_openings: bool, opening_delta_e: float, facade=None,
+                       stand: bool = True, stand_colour: Optional[int] = None) -> SetPlan:
     from .massing import height_map, pitches_and_decks, solid_volume, walls_from_solid
     palette_idx = target.voxel_grid.palette_idx
     solid = solid_volume(occ)
@@ -1144,10 +1150,20 @@ def _plan_from_massing(regions: list[Region], target: MeshTarget, occ: np.ndarra
     from .massing import SCULPT_CORNER_SHARE, FloorSpec, outline_corner_share
     coverage = outline_corner_share(solid, ground_y=ground_y)
     if coverage > SCULPT_CORNER_SHARE:
-        footprint = np.argwhere(solid.any(axis=0))
-        base = FloorSpec(cells=footprint, y=ground_y + COURSE - 1, colour=wall_colour or 0, base=True)
+        from .massing import stand_mask
+        from ..colors import palette as _palette
+        if stand_colour is None:
+            pal = _palette()
+            stand_colour = next((i for i, c in enumerate(pal) if c.code == 72), 0)   # dark bluish grey
+        pedestal = stand_mask(solid, ground_y=ground_y) if stand else None
+        if pedestal is not None and not pedestal.any():
+            pedestal = None
+        foot = solid.any(axis=0) | (pedestal.any(axis=0) if pedestal is not None else False)
+        footprint = np.argwhere(foot)
+        base = FloorSpec(cells=footprint, y=ground_y + COURSE - 1, colour=stand_colour, base=True)
         plan = SetPlan(walls=[], gables=[], consumed={id(r) for r in regions}, floors=[base],
-                       sculpt=solid, palette_idx=palette_idx, ground_y=ground_y)
+                       sculpt=solid, palette_idx=palette_idx, ground_y=ground_y,
+                       stand=pedestal, stand_colour=stand_colour)
         plan.surface = height_map(solid)
         plan.solid = solid
         plan.facade_fit, plan.facade_changed = facade_fit, facade_changed
@@ -1404,7 +1420,11 @@ def build_set(plan: SetPlan, claimed: np.ndarray, target: Optional[MeshTarget] =
         return m
 
     if plan.sculpt is not None:
-        from .massing import sculpt_solid
+        from .massing import build_stand, sculpt_solid
+        if plan.stand is not None:
+            ps = build_stand(plan.stand, claimed, plan.stand_colour, ground_y=plan.ground_y)
+            out.extend(ps)
+            counts["stand:StandRecipe"] = len(ps)
         ps = sculpt_solid(plan.sculpt, claimed, plan.palette_idx, ground_y=plan.ground_y)
         out.extend(ps)
         counts["sculpt:SculptRecipe"] = len(ps)

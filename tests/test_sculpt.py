@@ -22,3 +22,13 @@ def test_sphere_is_sculpted_not_built_as_a_house():
     shapes = Counter(p.part.shape for p in res.placements)
     assert shapes["slope"] > 50 and shapes["slope_inv"] > 50     # dome above, overhang below
     assert not any(p.part.shape in ("window", "door") for p in res.placements)
+    assert c.get("stand:StandRecipe", 0) > 50                    # a pedestal under the lower cap
+    assert c["structure:added_supports"] < 150                   # ...so the brace barely acts
+
+
+def test_no_stand_leaves_the_figure_to_support_columns():
+    res = SemanticLegoPipeline(PipelineConfig(max_studs=24, set_mode=True, stand=False)).run("examples/sample.glb")
+    c = res.per_region_counts
+    assert c.get("stand:StandRecipe", 0) == 0
+    assert c["structure:added_supports"] > 300
+    assert check(res.placements).components == 1

@@ -1171,21 +1171,125 @@ def sculpt_solid(solid: np.ndarray, claimed: np.ndarray, palette_idx: np.ndarray
         core = binary_erosion(here, iterations=shell) if shell > 0 else np.zeros_like(here)
         fill = (here & ~core) | (here & above)
         fill &= ~done
-        fill &= ~claimed[y:y + COURSE].any(axis=0)
         if not fill.any():
             continue
-        # colour groups: pack each colour's cells on their own
         cols = np.full((X, Z), -1)
         for x, z in np.argwhere(fill):
             cols[x, z] = colour_at(y + 1, x, z)
-        for colour in np.unique(cols[fill]):
-            m = fill & (cols == colour)
+        # bricks where the whole course is free; colour groups packed apart
+        whole = fill & ~claimed[y:y + COURSE].any(axis=0)
+        for colour in np.unique(cols[whole]) if whole.any() else []:
+            m = whole & (cols == colour)
             out_c = _tile_mask(m, y, int(colour), bricks, x0=0, z0=0, mirror=(c % 2 == 1),
                                long_axis="x" if c % 2 == 0 else "z")
             for p in out_c:
                 claimed[p.y_plate:p.y_plate + p.part.height_units, p.x_stud:p.x_stud + p.w_world,
                         p.z_stud:p.z_stud + p.d_world] = True
             out.extend(out_c)
+        # plates where only part of the course is free (the seam over a
+        # stand that ends between course lines, under a slope's tip)
+        plates = _plate_catalogue()
+        for dy in range(COURSE):
+            layer = fill & ~claimed[y + dy]
+            if not layer.any():
+                continue
+            for colour in np.unique(cols[layer]):
+                m = layer & (cols == colour)
+                out_p = _tile_mask(m, y + dy, int(colour), plates, x0=0, z0=0, mirror=(dy % 2 == 1))
+                for p in out_p:
+                    claimed[p.y_plate, p.x_stud:p.x_stud + p.w_world, p.z_stud:p.z_stud + p.d_world] = True
+                out.extend(out_p)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Stand: the pedestal under a figure
+# ---------------------------------------------------------------------------
+
+STAND_STEEP_STUDS = 2      # a course that widens by this much per course needs a stand under it
+
+
+def stand_mask(solid: np.ndarray, *, ground_y: int, margin: int = 1) -> np.ndarray:
+    """Where a figure needs a pedestal: the columns under the parts of its
+    underside that widen by STAND_STEEP_STUDS or more from one course to
+    the next (inverted slopes carry a one-stud overhang; anything steeper
+    hangs).  Those columns, grown by `margin` and with holes filled, make
+    the stand's footprint; the stand fills each column from the base
+    plate up to the figure's lowest solid cell.  Returns a (H, X, Z) mask
+    of stand cells — empty when the figure stands on its own."""
+    from scipy.ndimage import binary_dilation, binary_fill_holes, distance_transform_cdt
+    H, X, Z = solid.shape
+    n_courses = max(0, (H - ground_y + 1) // COURSE)
+
+    def plan_at(c: int) -> np.ndarray:
+        y0 = ground_y + c * COURSE
+        if c < 0 or y0 >= H:
+            return np.zeros((X, Z), dtype=bool)
+        block = solid[y0:y0 + COURSE]
+        return block.sum(axis=0) >= min(2, block.shape[0])
+
+    steep = np.zeros((X, Z), dtype=bool)
+    for c in range(n_courses - 1):
+        here, above = plan_at(c), plan_at(c + 1)
+        if not above.any():
+            continue
+        if not here.any():
+            steep |= above                   # nothing at all below: everything hangs
+            continue
+        dist = distance_transform_cdt(~here, metric="taxicab")
+        steep |= above & (dist >= STAND_STEEP_STUDS)
+    if not steep.any():
+        return np.zeros_like(solid)
+    foot = binary_fill_holes(binary_dilation(steep, iterations=margin))
+    # the figure's lowest solid plate per column
+    any_col = solid.any(axis=0)
+    lowest = np.where(any_col, np.argmax(solid, axis=0), H)
+    out = np.zeros_like(solid)
+    for x, z in np.argwhere(foot):
+        top = int(lowest[x, z]) if any_col[x, z] else H
+        if top > ground_y + COURSE:          # above the base plate
+            out[ground_y + COURSE:top, x, z] = True
+    return out
+
+
+def build_stand(mask: np.ndarray, claimed: np.ndarray, colour: int, *, ground_y: int
+                ) -> list[Placement]:
+    """Solid brick courses over the stand mask, bonded by alternating the
+    packing direction; the top of each column is finished in plates where
+    the figure's underside is not on a course line."""
+    H, X, Z = mask.shape
+    bricks = _brick_catalogue()
+    plates = _plate_catalogue()
+    out: list[Placement] = []
+    c = 0
+    while True:
+        y = ground_y + COURSE + c * COURSE
+        if y >= H:
+            break
+        block = mask[y:min(H, y + COURSE)]
+        if not block.any():
+            if not mask[y:].any():
+                break
+            c += 1
+            continue
+        full = block.all(axis=0) if block.shape[0] == COURSE else np.zeros((X, Z), dtype=bool)
+        full &= ~claimed[y:y + COURSE].any(axis=0)
+        ps = _tile_mask(full, y, colour, bricks, x0=0, z0=0, mirror=(c % 2 == 1),
+                        long_axis="x" if c % 2 == 0 else "z")
+        for p in ps:
+            claimed[p.y_plate:p.y_plate + COURSE, p.x_stud:p.x_stud + p.w_world,
+                    p.z_stud:p.z_stud + p.d_world] = True
+        out.extend(ps)
+        # partial columns (the underside between course lines): plates
+        for dy in range(block.shape[0]):
+            layer = block[dy] & ~full & ~claimed[y + dy]
+            if not layer.any():
+                continue
+            pl = _tile_mask(layer, y + dy, colour, plates, x0=0, z0=0, mirror=(dy % 2 == 1))
+            for p in pl:
+                claimed[p.y_plate, p.x_stud:p.x_stud + p.w_world, p.z_stud:p.z_stud + p.d_world] = True
+            out.extend(pl)
+        c += 1
     return out
 
 

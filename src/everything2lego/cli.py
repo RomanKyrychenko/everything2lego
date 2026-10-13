@@ -1138,6 +1138,12 @@ def semantic(
         help="Build walls and pitched roofs the way a set designer would: snapped, bonded "
              "brick courses with real window/door parts, slope roofs with tiles and a ridge, "
              "brick gable ends. Detail and round regions still use the voxel builders."),
+    stand: bool = typer.Option(True, "--stand/--no-stand",
+        help="Give a figure (any shape built course by course rather than as a building) a "
+             "pedestal under the parts of its underside too steep for inverted slopes, so it "
+             "stands like a display piece instead of on support columns."),
+    stand_color: Optional[int] = typer.Option(None, "--stand-color",
+        help="LDraw colour code for the stand and base plate (default 72, dark bluish grey)."),
     facade: Optional[str] = typer.Option(None, "--facade",
         help="A measured front from tools/facade_depth.py (MapAnything): metric points of the "
              "photographed side. Registered to the model in set mode; overrides its front "
@@ -1235,6 +1241,9 @@ def semantic(
         merge_small_region_area=merge_small_regions,
         set_mode=set_mode,
         facade_path=facade,
+        stand=stand,
+        stand_colour=(next((i for i, c in enumerate(__import__("everything2lego.colors", fromlist=["palette"]).palette())
+                            if c.code == stand_color), None) if stand_color is not None else None),
         label_parts=label_parts,
         labeller_model=labeller_model,
         labeller_hint=hint,

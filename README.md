@@ -198,6 +198,12 @@ top surface *is* the roof.
   slopes; a base plate under the whole footprint.  `examples/sample.glb`
   (a sphere) comes out as a dome of slopes over bonded courses, one
   assembly, in the voxel colours.
+- **Stand** (`--stand/--no-stand`, `--stand-color`, default on for
+  figures) — a pedestal under exactly the parts of a figure's underside
+  too steep for inverted slopes (where the shape widens by two or more
+  studs per course), built as solid brick courses from the base plate up
+  to the figure, plates at the seam.  The sphere's support columns go from
+  871 to 60 with it.
 - A recipe owns its volume outright, so nothing else is built through it.
   The solid volume itself is read robustly from a leaky reconstruction
   (closed shell, per-plan and x-ray fills, covered-and-bracketed interiors).
