@@ -41,8 +41,10 @@ mask = (mask - mask.min()) / (mask.max() - mask.min() + 1e-9)
 mask_img = Image.fromarray((mask * 255).astype(np.uint8)).resize(
     (w, h), Image.BILINEAR)
 
-# Composite onto white.
-mask_np = np.asarray(mask_img, dtype=np.float32) / 255.0
+# Composite onto white with a HARD matte.  A soft (feathered) edge leaves
+# a ring of object/white blends that a downstream colour projector reads
+# as real object colour; a crisp edge keeps background exactly white.
+mask_np = (np.asarray(mask_img, dtype=np.float32) / 255.0 > 0.5).astype(np.float32)
 img_np = np.asarray(img, dtype=np.float32)
 white = np.full_like(img_np, 255.0)
 composite = img_np * mask_np[..., None] + white * (1 - mask_np[..., None])

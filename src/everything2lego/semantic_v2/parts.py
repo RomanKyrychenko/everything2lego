@@ -400,6 +400,70 @@ def _merge_blend_rings(labels: np.ndarray, rgb: np.ndarray, adjacency: np.ndarra
 
 # -- labels to regions -------------------------------------------------------
 
+def merge_small_regions(mesh: trimesh.Trimesh, labels: PartLabels, *,
+                        min_area_frac: float = 0.003,
+                        max_rounds: int = 10) -> PartLabels:
+    """Fold area-tiny parts into the neighbour they share the longest
+    boundary with.
+
+    `segment_builtin` already merges parts below a fraction of the FACE
+    COUNT, which is the wrong measure on a marching-cubes mesh: a sliver of
+    trim can be hundreds of densely-tessellated faces while a whole wall is
+    a few hundred large ones.  Measured by area the long tail is obvious —
+    on a photo-reconstructed house ~15 parts carried 75% of the surface and
+    ~1,000 parts split the rest.  Each of those became its own builder call,
+    packed separately, and overlapped its neighbours.
+
+    Smallest parts go first so chains merge upward.  Named parts (windows,
+    doors from the labeller) are never merged away.  Unlabelled faces (-1)
+    neither merge nor receive merges.
+    """
+    lab = np.asarray(labels.labels).copy()
+    areas = np.asarray(mesh.area_faces, dtype=np.float64)
+    total = float(areas.sum())
+    if total <= 0 or len(mesh.face_adjacency) == 0:
+        return labels
+    adj = np.asarray(mesh.face_adjacency)                   # (E, 2) faces
+    ev = np.asarray(mesh.face_adjacency_edges)              # (E, 2) vertices
+    elen = np.linalg.norm(mesh.vertices[ev[:, 0]] - mesh.vertices[ev[:, 1]], axis=1)
+    protected = set(int(k) for k in labels.names)
+
+    for _ in range(max_rounds):
+        ids = np.unique(lab[lab >= 0])
+        if len(ids) <= 1:
+            break
+        area_by = {int(i): float(areas[lab == i].sum()) for i in ids}
+        small = sorted((i for i in area_by
+                        if area_by[i] < min_area_frac * total and i not in protected),
+                       key=area_by.get)
+        if not small:
+            break
+        changed = False
+        for s in small:
+            la, lb = lab[adj[:, 0]], lab[adj[:, 1]]
+            on_s = (la == s) | (lb == s)
+            cross = on_s & (la != lb)
+            if not cross.any():
+                continue
+            nbr = np.where(la[cross] == s, lb[cross], la[cross])
+            w = elen[cross]
+            ok = nbr >= 0
+            if not ok.any():
+                continue
+            cand, inv = np.unique(nbr[ok], return_inverse=True)
+            shared = np.bincount(inv, weights=w[ok])
+            best = int(cand[int(np.argmax(shared))])
+            lab[lab == s] = best
+            changed = True
+        if not changed:
+            break
+
+    present = set(int(k) for k in np.unique(lab) if k >= 0)
+    keep = lambda d: {k: v for k, v in d.items() if int(k) in present}
+    return PartLabels(lab, names=keep(labels.names), colours=keep(labels.colours),
+                      descriptions=keep(labels.descriptions))
+
+
 def regions_from_labels(target: MeshTarget, labels: PartLabels, *,
                         planar_tolerance: float = 0.92,
                         horizontal_ny: float = 0.85, vertical_ny: float = 0.15,

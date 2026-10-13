@@ -473,7 +473,9 @@ def project_photo_colors(mesh: trimesh.Trimesh, image_path: str | Path, *,
                           forward_axis: str = "-z", flip_v: bool = False,
                           crop_to_subject: bool = True,
                           background_tolerance: int = 30,
-                          fallback_rgb: tuple[int, int, int] = (200, 200, 200)
+                          fallback_rgb: tuple[int, int, int] = (200, 200, 200),
+                          facing_threshold: float = -0.25,
+                          inpaint_unknown: bool = True,
                           ) -> trimesh.Trimesh:
     """Paint mesh vertex colors by projecting a source photo onto its
     canonical front view.
@@ -484,11 +486,30 @@ def project_photo_colors(mesh: trimesh.Trimesh, image_path: str | Path, *,
     image plane perpendicular to `forward_axis`, sample the photo there, and
     write the RGB back as vertex colors.
 
-    Not a full texture bake — vertices that face away from the camera end up
-    sampling the wrong pixel. Good enough to give the LEGO output correct
-    dominant colors (roof vs walls vs door) without a texture painter.
+    A single photo can't colour what it can't see, so two kinds of vertex
+    are treated as UNKNOWN rather than painted wrong:
+      - back-facing (vertex normal · view direction < `facing_threshold`),
+        which would otherwise copy whatever front pixel lies in front of them.
+        The threshold is negative on purpose: photos are rarely frontal, so a
+        surface at a grazing angle to the nominal axis (a roof seen from a
+        drone, a side wall in a 3/4 view) is usually still visible and its
+        sample is right; only clearly averted faces are discarded;
+      - background hits (the sampled pixel is within `background_tolerance`
+        of the image's corner-median colour) — the mesh poking outside the
+        photo's silhouette, which on a background-removed photo is pure white.
+    With `inpaint_unknown`, unknown vertices take the colour of the nearest
+    known vertex (Euclidean, over the mesh).  For buildings this is the right
+    prior: the back wall is the same brick as the front, the back pitch the
+    same slate.  Without it they fall back to `fallback_rgb`.
     """
     img = np.asarray(Image.open(image_path).convert("RGB"))
+    # Background estimate from the UNCROPPED corners, same as the cropper.
+    s = min(24, img.shape[0] // 4, img.shape[1] // 4)
+    corners = np.concatenate([
+        img[:s, :s].reshape(-1, 3), img[:s, -s:].reshape(-1, 3),
+        img[-s:, :s].reshape(-1, 3), img[-s:, -s:].reshape(-1, 3),
+    ], axis=0)
+    bg_rgb = np.median(corners, axis=0).astype(np.int16)
     if crop_to_subject:
         img = _crop_to_subject(img, tolerance=background_tolerance)
     h, w = img.shape[:2]
@@ -532,11 +553,47 @@ def project_photo_colors(mesh: trimesh.Trimesh, image_path: str | Path, *,
     py = py_top if flip_v else (h - 1 - py_top)  # image y grows downward
     py = np.clip(py, 0, h - 1)
 
-    colors = img[py, px]  # (N, 3)
+    colors = np.array(img[py, px], dtype=np.uint8)  # (N, 3), writable copy
+
+    # Unknown = background hit OR facing away from the camera.
+    # A background hit is a sample on a background pixel, or within
+    # `edge_px` of one: matting tools feather the silhouette over a few
+    # pixels, and those blended pixels are neither background nor object.
+    # Without the margin they'd pass as "known" and seed the inpainting of
+    # every vertex just outside the silhouette with off-white.
+    bg_mask = (np.abs(img.astype(np.int16) - bg_rgb).sum(axis=-1)
+               <= background_tolerance)
+    edge_px = 3
+    if bg_mask.any() and not bg_mask.all():
+        from scipy.ndimage import distance_transform_edt
+        dist_to_bg = distance_transform_edt(~bg_mask)
+        hit_bg = dist_to_bg[py, px] < edge_px
+    else:
+        hit_bg = bg_mask[py, px]
+    unit = {"x": np.array([1.0, 0, 0]), "y": np.array([0, 1.0, 0]),
+            "z": np.array([0, 0, 1.0])}[axis]
+    view_dir = -sign * unit                      # from surface toward camera
+    facing = np.asarray(mesh.vertex_normals, dtype=np.float32) @ view_dir
+    back = facing < facing_threshold
+    unknown = hit_bg | back
+
+    if unknown.any():
+        known = ~unknown
+        if inpaint_unknown and known.any():
+            from scipy.spatial import cKDTree
+            tree = cKDTree(verts[known])
+            _, nn = tree.query(verts[unknown], k=1)
+            colors[unknown] = colors[known][nn]
+        else:
+            colors[unknown] = np.array(fallback_rgb, dtype=np.uint8)
+
     rgba = np.concatenate([colors, np.full((len(colors), 1), 255, dtype=np.uint8)],
                            axis=1)
     out = mesh.copy()
     out.visual = trimesh.visual.ColorVisuals(mesh=out, vertex_colors=rgba)
+    out.metadata["projection_unknown_frac"] = float(unknown.mean())
+    out.metadata["projection_back_frac"] = float(back.mean())
+    out.metadata["projection_bg_frac"] = float(hit_bg.mean())
     return out
 
 

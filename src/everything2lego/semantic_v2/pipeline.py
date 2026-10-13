@@ -46,6 +46,21 @@ class PipelineConfig:
     # the CPU.  Without either, regions come from the facet detector.
     parts_path: Optional[str] = None
     segmenter: str = "none"          # "none" | "builtin"
+    # Built-in segmenter knobs.  Library defaults match segment_builtin's
+    # own (they're right for authored meshes with small genuine parts).
+    # Photo-like marching-cubes meshes want a looser normal cone (~25°, so
+    # surface ripple doesn't split a wall) and a larger minimum region
+    # (~0.01, so confetti merges into its neighbour); the `semantic` CLI
+    # defaults to those.
+    seg_normal_degrees: float = 12.0
+    seg_min_fraction: float = 0.002
+    # Voxel islands below this many cells are dropped before anything is
+    # built (see MeshTarget.from_mesh).  0 = off; the CLI uses 8.
+    min_island_cells: int = 0
+    # After segmentation, fold parts below this fraction of total mesh AREA
+    # into the neighbour sharing the longest boundary (parts.merge_small_
+    # regions).  0 = off; the CLI uses 0.003 for photo meshes.
+    merge_small_region_area: float = 0.0
     # Optional: name the parts with a vision model (see labeller.py).  Needs
     # the anthropic package and an API key; without them the parts stay
     # unnamed and the pipeline carries on.  Turns the built-in segmenter on
@@ -100,6 +115,7 @@ class SemanticLegoPipeline:
             n_samples=self.config.n_samples,
             color_samples=self.config.color_samples,
             subvoxels=self.config.subvoxels,
+            min_island_cells=self.config.min_island_cells,
         )
         labels = None
         if self.config.parts_path:
@@ -116,7 +132,9 @@ class SemanticLegoPipeline:
         from .parts import regions_from_labels, segment_builtin
         cfg = self.config
         if labels is None and (cfg.segmenter == "builtin" or cfg.label_parts):
-            labels = segment_builtin(target.mesh)
+            labels = segment_builtin(target.mesh,
+                                     normal_degrees=cfg.seg_normal_degrees,
+                                     min_fraction=cfg.seg_min_fraction)
         if labels is not None and cfg.label_parts:
             from . import labeller
             try:
@@ -129,6 +147,12 @@ class SemanticLegoPipeline:
                 labeller.apply(labels, naming)
                 target.metadata["naming"] = naming
                 self.last_naming = naming
+        if labels is not None and cfg.merge_small_region_area > 0:
+            from .parts import merge_small_regions
+            before = len(labels.ids)
+            labels = merge_small_regions(target.mesh, labels,
+                                         min_area_frac=cfg.merge_small_region_area)
+            target.metadata["merged_small_regions"] = before - len(labels.ids)
         if labels is not None:
             regions = regions_from_labels(target, labels)
             if regions:
@@ -170,8 +194,15 @@ class SemanticLegoPipeline:
             placements, dropped = resolve_overlaps(placements)
             placements, added = brace(placements)
             placements, _ = bond(placements)
+            # Bracing holds parts up; it can't join two assemblies that sit
+            # side by side with no stud between them.  Reconnect bridges
+            # small gaps to the main body and sheds what can't be reached.
+            from ..stability import reconnect
+            placements, bridged, shed = reconnect(placements)
             counts["structure:dropped_overlaps"] = dropped
             counts["structure:added_supports"] = added
+            counts["structure:bridges"] = bridged
+            counts["structure:dropped_islands"] = shed
         return PipelineResult(
             placements=placements,
             surface_placements=surface,

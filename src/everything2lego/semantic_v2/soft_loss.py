@@ -55,8 +55,10 @@ class SoftLossWeights:
     photo_pixel:  float = 0.0    # weight of L2 pixel loss per rendered view
     photo_percep: float = 0.0    # weight of VGG perceptual loss per view
     # ---- tie-breakers (must stay << similarity terms) ----------------
-    coherence:    float = 0.02   # gentle: smooth same-type neighbours only
-                                   # when shape/color are indifferent.
+    coherence:    float = 0.05   # smooth same-type neighbours when shape/
+                                   # color are indifferent.  Larger same-type
+                                   # runs → bigger MILP footprints → parts
+                                   # that span course seams and stay attached.
     type_prior:   float = 0.05   # tiny nudge toward the geometric prior
                                    # (SLOPE at pitched-roof tips, TILE at
                                    # flat top, PLATE elsewhere).  Init
@@ -65,11 +67,13 @@ class SoftLossWeights:
                                    # place against small perturbations.
     diversity:    float = 0.0    # OFF — non-zero lets the trainer
                                    # reward-hack by randomising types.
-    support:      float = 0.05   # penalise cells whose 'below' neighbour is
-                                   # EMPTY.  Encourages buildable stacks:
-                                   # every non-ground occupied cell should
-                                   # have SOMETHING (occupied or tile top)
-                                   # below to attach to.
+    support:      float = 0.25   # penalise cells whose 'below' neighbour is
+                                   # EMPTY.  Every non-ground occupied cell
+                                   # should have something below to stud
+                                   # onto.  The term is a mean over cells of
+                                   # "floating" (typically 0.01-0.05), so
+                                   # 0.25 puts it on par with the shape
+                                   # term's residual rather than dominating.
 
 
 @dataclass

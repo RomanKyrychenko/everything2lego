@@ -292,6 +292,217 @@ def _single_stud_groups(graph: nx.Graph, placements: list[Placement],
     return groups
 
 
+def _stud_graph(placements: list[Placement]
+                ) -> tuple[nx.Graph, dict[tuple[int, int, int], int]]:
+    """Stud-connectivity graph (edge = one part sits on another with
+    overlapping studs) plus the cell → part-index occupancy map."""
+    tops: dict[int, dict[tuple[int, int], int]] = {}
+    occupied: dict[tuple[int, int, int], int] = {}
+    graph = nx.Graph()
+    graph.add_nodes_from(range(len(placements)))
+    for i, p in enumerate(placements):
+        tops.setdefault(p.y_plate + p.part.height_units, {}).update(
+            {s: i for s in top_studs(p)})
+        for y in range(p.y_plate, p.y_plate + p.part.height_units):
+            for x, z in _footprint_studs(p):
+                occupied[(y, x, z)] = i
+    for i, p in enumerate(placements):
+        below = tops.get(p.y_plate, {})
+        for s in bottom_cells(p):
+            j = below.get(s)
+            if j is not None and j != i:
+                graph.add_edge(i, j)
+    return graph, occupied
+
+
+def reconnect(placements: list[Placement], *,
+              drop_below: int = 3,
+              drop_unbridged_below: int = 10,
+              max_bridge: int = 6,
+              color_idx: int | None = None,
+              max_passes: int = 4,
+              ) -> tuple[list[Placement], int, int]:
+    """Make the model one stud-connected assembly where short bridges can
+    do it, and shed the slivers that can't be reached.
+
+    Runs `_reconnect_pass` to a fixed point: bridging-only passes while
+    they still connect something (a component whose nearest body cell sat
+    in a neighbour that hadn't been merged yet gets another chance once
+    it has), then one final pass that also drops what stays unreachable.
+    Returns (placements, bridges_added, parts_dropped).
+    """
+    total_b = total_d = 0
+    cur = placements
+    for k in range(max_passes):
+        final = k == max_passes - 1
+        cur, nb, nd = _reconnect_pass(cur, final=final, drop_below=drop_below,
+                                      drop_unbridged_below=drop_unbridged_below,
+                                      max_bridge=max_bridge, color_idx=color_idx)
+        total_b += nb
+        total_d += nd
+        if final:
+            break
+        if nb == 0:
+            cur, nb, nd = _reconnect_pass(cur, final=True, drop_below=drop_below,
+                                          drop_unbridged_below=drop_unbridged_below,
+                                          max_bridge=max_bridge, color_idx=color_idx)
+            total_b += nb
+            total_d += nd
+            break
+    return cur, total_b, total_d
+
+
+def _reconnect_pass(placements: list[Placement], *, final: bool,
+                    drop_below: int, drop_unbridged_below: int,
+                    max_bridge: int, color_idx: int | None,
+                    ) -> tuple[list[Placement], int, int]:
+    """One pass of `reconnect`.  Drops happen only when `final`.
+
+    Components are found on the stud graph; the largest is the body.  For
+    every other component, in order:
+      - fewer than `drop_below` parts → dropped (voxel confetti);
+      - otherwise, scan straight down and straight up from each of its
+        studs, at most `max_bridge` plates, for a cell of the body with
+        nothing in between; fill the gap with 1x1 plates in the structural
+        colour (shortest bridge wins);
+      - no bridge found and fewer than `drop_unbridged_below` parts →
+        dropped; larger ones are kept and left for the report.
+
+    Returns (placements, bridges_added, parts_dropped).
+    """
+    if not placements:
+        return placements, 0, 0
+    from .bricks import catalog
+    from .colors import palette
+    plate = next((p for p in catalog() if p.ldraw == "3024.dat"), None)
+    if plate is None:
+        return placements, 0, 0
+    if color_idx is None:
+        color_idx = next((i for i, c in enumerate(palette()) if c.code == 71), 0)
+    # 1xN plates for lateral bridges, by length.
+    plates_by_len: dict[int, object] = {}
+    for p in catalog():
+        if p.shape == "plate" and 1 in p.footprint:
+            plates_by_len.setdefault(max(p.footprint), p)
+    bridge_lengths = sorted(plates_by_len)
+
+    def lateral_bridge(comp: set[int]):
+        """A 1xN plate laid across a component's top stud and a body top
+        stud at the same height, with nothing on that course between.
+        Returns (y, cells_along_axis, axis, start, length) or None."""
+        best_l = None
+        for i in comp:
+            p = placements[i]
+            yt = p.y_plate + p.part.height_units
+            for x, z in _footprint_studs(p):
+                if (yt, x, z) in occupied:
+                    continue                      # something already on it
+                for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    for g in range(1, max_bridge + 1):
+                        bx, bz = x + g * dx, z + g * dz
+                        if (yt, bx, bz) in occupied:
+                            break                 # blocked on the bridge course
+                        if (yt - 1, bx, bz) in body_cells:
+                            need = g + 1          # studs s0..s0+g
+                            L = next((l for l in bridge_lengths if l >= need), None)
+                            if L is None:
+                                break
+                            cells = [(yt, x + k * dx, z + k * dz) for k in range(L)]
+                            if any(c in occupied for c in cells):
+                                break
+                            if best_l is None or L < best_l[0]:
+                                best_l = (L, yt, cells, "x" if dx else "z")
+                            break
+                        if (yt - 1, bx, bz) in occupied:
+                            # Over a non-body part: a plate here would stud
+                            # onto it and bridge to the wrong thing; stop.
+                            break
+        return best_l
+
+    graph, occupied = _stud_graph(placements)
+    comps = sorted(nx.connected_components(graph), key=len, reverse=True)
+    if len(comps) <= 1:
+        return placements, 0, 0
+    body = set(comps[0])
+    body_cells = {c for c, i in occupied.items() if i in body}
+    keep = set(body)
+    bridges: list[Placement] = []
+    dropped = 0
+
+    for comp in comps[1:]:
+        if len(comp) < drop_below:
+            if final:
+                dropped += len(comp)
+            else:
+                keep |= comp
+            continue
+        best: tuple[int, int, int, int] | None = None   # (len, x, z, y_lo)
+        for i in comp:
+            p = placements[i]
+            y_bot, y_top = p.y_plate, p.y_plate + p.part.height_units
+            for x, z in _footprint_studs(p):
+                # Downward: body cell at y_bot-1-d, empty cells between.
+                for d in range(1, max_bridge + 1):
+                    y = y_bot - d
+                    if y < 0 or (y, x, z) in occupied and (y, x, z) not in body_cells:
+                        break
+                    if (y, x, z) in body_cells:
+                        if d > 1 and (best is None or d - 1 < best[0]):
+                            best = (d - 1, x, z, y + 1)
+                        if d == 1:
+                            best = (0, x, z, y + 1)
+                        break
+                # Upward: body cell at y_top+d-1, empty cells between.
+                for d in range(1, max_bridge + 1):
+                    y = y_top + d - 1
+                    if (y, x, z) in occupied and (y, x, z) not in body_cells:
+                        break
+                    if (y, x, z) in body_cells:
+                        if d > 1 and (best is None or d - 1 < best[0]):
+                            best = (d - 1, x, z, y_top)
+                        if d == 1:
+                            best = (0, x, z, y_top)
+                        break
+                if best is not None and best[0] == 0:
+                    break
+            if best is not None and best[0] == 0:
+                break
+        if best is None:
+            lat = lateral_bridge(comp)
+            if lat is not None:
+                L, yt, cells, axis = lat
+                part = plates_by_len[L]
+                xs = [c[1] for c in cells]; zs = [c[2] for c in cells]
+                w, d = (L, 1) if axis == "x" else (1, L)
+                rot = 0 if (w, d) == tuple(part.footprint) else 90
+                bridges.append(Placement(part=part, color_idx=color_idx,
+                                         x_stud=min(xs), z_stud=min(zs), y_plate=yt,
+                                         w_world=w, d_world=d, rotation_deg=rot))
+                for c in cells:
+                    occupied[c] = -1
+                    body_cells.add(c)
+                keep |= comp
+                body_cells |= {c for c, i in occupied.items() if i in comp}
+                continue
+            if final and len(comp) < drop_unbridged_below:
+                dropped += len(comp)
+            else:
+                keep |= comp          # keep: unresolved, or not final yet
+            continue
+        n, x, z, y_lo = best
+        for k in range(n):
+            bridges.append(Placement(part=plate, color_idx=color_idx,
+                                     x_stud=x, z_stud=z, y_plate=y_lo + k,
+                                     w_world=1, d_world=1, rotation_deg=0))
+            occupied[(y_lo + k, x, z)] = -1
+            body_cells.add((y_lo + k, x, z))
+        keep |= comp
+        body_cells |= {c for c, i in occupied.items() if i in comp}
+
+    out = [p for i, p in enumerate(placements) if i in keep] + bridges
+    return out, len(bridges), dropped
+
+
 def check(placements: list[Placement]) -> StabilityReport:
     tops: dict[int, dict[tuple[int, int], int]] = {}
     occupied: dict[tuple[int, int, int], int] = {}

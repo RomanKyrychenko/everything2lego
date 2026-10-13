@@ -58,7 +58,8 @@ class MeshTarget:
                    max_studs: int = 32,
                    n_samples: int = 100_000,
                    color_samples: int = 120_000,
-                   subvoxels: int = 1) -> "MeshTarget":
+                   subvoxels: int = 1,
+                   min_island_cells: int = 0) -> "MeshTarget":
         """Load a mesh from disk and build a MeshTarget."""
         mesh = load_mesh(path)
         # `voxelize.load_mesh` intentionally skips trimesh processing (for
@@ -73,7 +74,8 @@ class MeshTarget:
         return cls.from_mesh(mesh, max_studs=max_studs,
                               n_samples=n_samples,
                               color_samples=color_samples,
-                              subvoxels=subvoxels)
+                              subvoxels=subvoxels,
+                              min_island_cells=min_island_cells)
 
     @classmethod
     def from_mesh(cls, mesh: trimesh.Trimesh, *,
@@ -81,7 +83,8 @@ class MeshTarget:
                    n_samples: int = 100_000,
                    color_samples: int = 120_000,
                    subvoxels: int = 1, align: bool = True,
-                   seed: int | None = None) -> "MeshTarget":
+                   seed: int | None = None,
+                   min_island_cells: int = 0) -> "MeshTarget":
         if align:
             from ..voxelize import align_to_axes
             mesh = align_to_axes(mesh)
@@ -95,6 +98,23 @@ class MeshTarget:
         grid = voxelize(mesh, max_studs=max_studs,
                           color_samples=color_samples,
                           subvoxels=subvoxels, align=False)
+        # Drop voxel islands smaller than `min_island_cells`.  A marching-
+        # cubes mesh sheds specks (a 2-cell "chimney" floating above the
+        # roof) that no builder can attach to; removing them here keeps
+        # them out of every downstream stage and out of the bounds the
+        # mesh→voxel transform is fitted to.  Off by default (0): a clean
+        # authored mesh can legitimately have small detached parts — a
+        # window pane modelled as its own box — that a builder will place.
+        # The photo CLI path turns it on.
+        if min_island_cells > 1:
+            from scipy.ndimage import label as _label
+            lab, n_comp = _label(grid.occupied())
+            if n_comp > 1:
+                sizes = np.bincount(lab.ravel())
+                sizes[0] = 0
+                small_ids = np.flatnonzero(sizes < min_island_cells)
+                if small_ids.size:
+                    grid.palette_idx[np.isin(lab, small_ids)] = -1
         # _fit_transform's T maps mesh_mm to voxel space with mesh CENTRED,
         # but voxelize() shifts the grid so cell (0,0,0) is at the mesh's
         # min-corner (all indices ≥ 0). Rebuild the transform so surface

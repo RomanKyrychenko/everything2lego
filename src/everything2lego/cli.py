@@ -1125,6 +1125,19 @@ def semantic(
     segmenter: str = typer.Option("none", "--segmenter",
         help="none: facet detector (default); builtin: a CPU part segmentation by colour, "
              "normal and connectivity, used when --parts is not given."),
+    seg_normal_degrees: float = typer.Option(25.0, "--seg-normal-degrees", min=1.0, max=90.0,
+        help="builtin segmenter: faces within this many degrees of a seed normal join its "
+             "region. Raise on noisy marching-cubes meshes so surface ripple doesn't split a wall."),
+    seg_min_fraction: float = typer.Option(0.01, "--seg-min-fraction", min=0.0, max=0.5,
+        help="builtin segmenter: regions below this fraction of all faces merge into the "
+             "neighbour they touch most. Raise to turn confetti into parts a builder can pack."),
+    min_island: int = typer.Option(8, "--min-island", min=1,
+        help="Drop voxel islands with fewer cells than this before building anything "
+             "(marching-cubes specks, a floating 2-cell 'chimney')."),
+    merge_small_regions: float = typer.Option(0.003, "--merge-small-regions", min=0.0, max=0.1,
+        help="After segmentation, fold parts below this fraction of the mesh AREA into the "
+             "neighbour they share the longest boundary with. Named parts (windows, doors) "
+             "are kept. 0 disables."),
     label_parts: bool = typer.Option(False, "--label-parts/--no-label-parts",
         help="Name the parts with a vision model (Claude; needs the anthropic package and "
              "ANTHROPIC_API_KEY) so windows, doors, roofs and walls are built as such on any "
@@ -1172,7 +1185,7 @@ def semantic(
     w_shape_volume: float = typer.Option(2.0, "--w-shape-volume"),
     w_color: float = typer.Option(1.0, "--w-color"),
     w_diversity: float = typer.Option(0.0, "--w-diversity"),
-    w_coherence: float = typer.Option(0.02, "--w-coherence"),
+    w_coherence: float = typer.Option(0.05, "--w-coherence"),
     w_count: float = typer.Option(0.001, "--w-count"),
 ) -> None:
     """Semantic-MILP pipeline (v2). Segments the mesh into typed regions
@@ -1207,6 +1220,10 @@ def semantic(
         detector=DetectorConfig(),
         parts_path=str(parts) if parts else None,
         segmenter=segmenter,
+        seg_normal_degrees=seg_normal_degrees,
+        seg_min_fraction=seg_min_fraction,
+        min_island_cells=min_island,
+        merge_small_region_area=merge_small_regions,
         label_parts=label_parts,
         labeller_model=labeller_model,
         labeller_hint=hint,
@@ -1248,7 +1265,7 @@ def semantic(
                                     build_move_pool)
         from . import colors as _colors
         console.rule("[bold]refine[/bold]  v3 loss-guided refinement")
-        target = opt_build_target_for_refine(mesh, max_studs, n_samples, subvoxels)
+        target = opt_build_target_for_refine(mesh, max_studs, n_samples, subvoxels, min_island)
         loss = LossFunction(target, LossWeights(
             shape_surface=w_shape_surface, shape_volume=w_shape_volume,
             color=w_color, diversity=w_diversity,
@@ -1308,7 +1325,7 @@ def semantic(
         from .semantic_v2 import (LossFunction, LossWeights, GradientRefiner,
                                     MeshTarget)
         console.rule("[bold]grad-refine[/bold]  hybrid gradient / steepest-descent")
-        target = opt_build_target_for_refine(mesh, max_studs, n_samples, subvoxels)
+        target = opt_build_target_for_refine(mesh, max_studs, n_samples, subvoxels, min_island)
         loss = LossFunction(target, LossWeights(
             shape_surface=w_shape_surface, shape_volume=w_shape_volume,
             color=w_color, diversity=w_diversity,
@@ -1344,7 +1361,7 @@ def semantic(
             from .semantic_v2 import (SoftAssembly, SoftLoss, SoftLossWeights,
                                         SoftTrainer, SoftRenderer, MeshTarget)
             console.rule("[bold]soft-train[/bold]  v4 Gumbel-Softmax + Adam")
-            target = opt_build_target_for_refine(mesh, max_studs, n_samples, subvoxels)
+            target = opt_build_target_for_refine(mesh, max_studs, n_samples, subvoxels, min_island)
             from . import colors as _colors
             n_col = len(_colors.palette())
             occ = target.voxel_grid.occupied()
@@ -1406,6 +1423,13 @@ def semantic(
                 from .semantic_v2 import _build_region_cell_masks
                 per_region_palette = _build_region_cell_masks(
                     target, result.regions, pi, occ)
+            # Make the colour target attainable under the per-region lock
+            # (see _snap_target_to_region_palette): otherwise locked-out
+            # cells carry a permanent colour error that erodes the walls.
+            pi_target = pi
+            if per_region_palette:
+                from .semantic_v2 import _snap_target_to_region_palette
+                pi_target = _snap_target_to_region_palette(pi, per_region_palette)
             sa = SoftAssembly.from_placements(
                 occ.shape, final_placements, n_col,
                 geometric_prior=geo_prior,
@@ -1426,7 +1450,7 @@ def semantic(
                 if w_photo_percep > 0:
                     from .semantic_v2.perceptual import PerceptualLoss
                     perceptual = PerceptualLoss()
-            sl = SoftLoss(occ, pi, n_col,
+            sl = SoftLoss(occ, pi_target, n_col,
                             SoftLossWeights(
                                 shape_volume=w_shape_volume,
                                 color=w_color,
@@ -1447,11 +1471,18 @@ def semantic(
             console.print(f"  init soft loss: {sres.initial_loss:.4f}")
             console.print(f"  best soft loss: {sres.best_loss:.4f}")
             console.print(f"  elapsed: {sres.elapsed_s:.1f}s  parts: {len(sres.placements)}")
-            final_placements = sres.placements
+            # The trainer decides cell by cell and the MILP packs per
+            # (layer, colour), so a connected target can come out as many
+            # stud-disconnected pieces.  Bridge short gaps, shed slivers.
+            final_placements, n_bridges, n_shed = stability.reconnect(sres.placements)
+            console.print(f"  reconnect: +{n_bridges} bridge plates, "
+                          f"-{n_shed} unreachable parts")
             refine_report["soft_initial_loss"] = sres.initial_loss
             refine_report["soft_best_loss"] = sres.best_loss
             refine_report["soft_elapsed_s"] = sres.elapsed_s
             refine_report["soft_n_parts"] = len(sres.placements)
+            refine_report["reconnect_bridges"] = n_bridges
+            refine_report["reconnect_dropped"] = n_shed
 
     if final_placements:
         check = stability.check(final_placements)
@@ -1469,13 +1500,15 @@ def semantic(
         console.print("[yellow]no placements produced — check detector output[/yellow]")
 
 
-def opt_build_target_for_refine(mesh_path, max_studs, n_samples, subvoxels=1):
+def opt_build_target_for_refine(mesh_path, max_studs, n_samples, subvoxels=1,
+                                min_island_cells=0):
     """Rebuild the MeshTarget with the same settings the pipeline used, so
     the Refiner's loss agrees on coordinate frame."""
     from .semantic_v2 import MeshTarget
     return MeshTarget.from_path(mesh_path, max_studs=max_studs,
                                   n_samples=n_samples, color_samples=n_samples,
-                                  subvoxels=subvoxels)
+                                  subvoxels=subvoxels,
+                                  min_island_cells=min_island_cells)
 
 
 if __name__ == "__main__":

@@ -129,7 +129,11 @@ PYTORCH_ENABLE_MPS_FALLBACK=1 \
    plate/tile that fits.
 4. **Optional soft training (`--soft-train`)** — 300 steps of Adam (set
    `--soft-iters`) over a Gumbel-Softmax-relaxed cell grid.  Needs PyTorch.  The trainer *initialises* from the
-   MILP placements (idea #1), keeps per-region palette locks (idea #2),
+   MILP placements (idea #1), keeps per-region palette locks (idea #2) —
+   a planar region (wall, roof, foundation) is locked to the fewest colours
+   covering 70% of its cells, usually one; where region boxes overlap a
+   cell keeps every candidate; and the colour *target* is snapped to match
+   so the lock can't become pressure to empty cells —
    and includes a support term that penalises floating cells (idea #6).
    Loss = `2·shape + 1·color + 0.05·type_prior + 0.02·coherence
    + 0.05·support`.
@@ -151,10 +155,14 @@ PYTORCH_ENABLE_MPS_FALLBACK=1 \
 | `--floor-spacing 12` | One structural floor slab every N plates. |
 | `--column-spacing 8` | Column node every N × N (x, z) grid positions. |
 | `--w-color 3.0` | Colour-fidelity weight. Raise when colours drift. |
+| `--segmenter builtin` | CPU part segmentation (colour + normal + connectivity) instead of the facet detector. Use it on photo-reconstructed meshes. |
+| `--seg-normal-degrees 25`, `--seg-min-fraction 0.01` | Builtin-segmenter cone and face-count floor. Photo-tuned CLI defaults; the library keeps 12° / 0.002 for authored meshes. |
+| `--merge-small-regions 0.003` | After segmentation, fold parts under this fraction of mesh *area* into the neighbour they share the longest boundary with. Named parts (windows, doors) are kept. The face-count floor above misses area-tiny slivers on marching-cubes meshes; this catches them. |
+| `--min-island 8` | Drop voxel islands smaller than this before building (floating specks). |
 | `--photos path.jpg` | Compare renders of the soft model with the source photo(s): first photo is the front view, second the side, third the top. Weighted by `--w-photo-pixel` (default 1) and `--w-photo-percep` (default 0, VGG). |
 | `--refine` / `--grad-refine` | Simulated-annealing and gradient refinement of the MILP placements (`--refine-iters`, `--grad-iters`). Soft training starts from their result. |
 | `--milp-time 1.0` | Seconds HiGHS may spend per region. |
-| `--w-shape-surface`, `--w-shape-volume`, `--w-color`, `--w-diversity`, `--w-coherence`, `--w-count` | Soft-training loss weights (defaults 1, 2, 1, 0, 0.02, 0). |
+| `--w-shape-surface`, `--w-shape-volume`, `--w-color`, `--w-diversity`, `--w-coherence`, `--w-count` | Soft-training loss weights (defaults 1, 2, 1, 0, 0.05, 0). A support term (0.25) that penalises cells with nothing below them is always on. |
 | `--n-samples` | Surface samples taken from the mesh for region detection. |
 
 ### Part labels (optional)
@@ -254,6 +262,21 @@ The photo commands (`photos`, `hunyuan`, `hunyuan21`, `hunyuan-mv`,
 when `torch` and `diffusers` are importable, so baked-in shadows and
 highlights do not become colour changes in the model; without those
 packages they print one line and continue.  `--no-delight` turns it off.
+
+> **Apple Silicon / MPS:** the delight model runs in fp16 and currently
+> returns an all-black image on MPS, which then paints the whole mesh black.
+> Pass `--no-delight` on a Mac until that's fixed upstream.
+
+Colours are projected from the photo onto the mesh along the camera axis.
+Two kinds of vertex can't be coloured that way and are *inpainted from the
+nearest vertex that could be*: faces turned clearly away from the camera
+(normal · view < −0.25 — grazing surfaces like a roof seen from a drone are
+still visible and keep their own sample), and faces that land on background
+pixels or within 3 px of them (the mesh poking past the silhouette, and the
+feathered edge a matting tool leaves).  Without this, a single-photo house
+comes out with a white back wall and turret.  `tools/reproject_colors.py`
+re-runs just this step on a saved mesh so colour fixes don't need another
+reconstruction.
 
 `--palette house` is the right choice for buildings: every colour snaps
 (nearest CIE Lab) to white, tan, light / dark bluish grey, reddish brown,
@@ -356,9 +379,14 @@ src/everything2lego/
 tools/
     bake_texture_to_vertex.py   Bake a textured GLB into per-vertex RGB.
     decimate_keep_color.py      Quadric-decimate with KDTree colour transfer.
-    quantise_colors.py          K-means colour clustering of vertex_colors.
-    remove_bg.py                U^2-Net (ONNX) foreground extraction.
+    quantise_colors.py          K-means in CIE LAB (near-white left out of the
+                                fit); prints chroma/hue per cluster.
+    reproject_colors.py         Re-run photo→vertex colour projection on a
+                                saved mesh (back-face + background aware).
+    remove_bg.py                U^2-Net (ONNX) foreground extraction, hard matte.
     delight.py                  Hunyuan3D-delight-v2-0 lighting removal.
+    sweep_segmenter.py          One segment_builtin parameter set per run;
+                                appends region count / area concentration.
 
 examples/
     sample.glb                 A trivial mesh for `build` smoke tests.

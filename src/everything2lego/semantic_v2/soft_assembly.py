@@ -259,10 +259,18 @@ class SoftAssembly:
                 mask[allowed] = False
             color_logits[..., mask] = -1e10
 
-        # Per-region palette lock.  For each (region_mask, allowed_ids):
-        # inside the mask, DISABLE any palette index NOT in allowed_ids.
-        # Applied AFTER the global lock so it further constrains.
+        # Per-region palette lock.  Region masks are bounding boxes and
+        # overlap (a roof pitch's box spans most of a house), so the locks
+        # are resolved as a UNION per cell: a cell inside one region is
+        # locked to that region's colours; a cell inside several keeps
+        # every candidate.  Applying them cumulatively would intersect the
+        # sets and leave overlap cells with no allowed colour at all —
+        # a saturated colour loss the optimiser can only relieve by
+        # emptying the cell.  Cells in no region are unrestricted here
+        # (the global lock above still applies).
         if per_region_palette:
+            cell_allowed = np.zeros((Y, X, Z, n_colors), dtype=bool)
+            covered = np.zeros((Y, X, Z), dtype=bool)
             for region_mask, allowed_ids in per_region_palette:
                 rmask = np.asarray(region_mask, dtype=bool)
                 if rmask.shape != (Y, X, Z):
@@ -271,18 +279,17 @@ class SoftAssembly:
                 aids = aids[(aids >= 0) & (aids < n_colors)]
                 if not aids.size:
                     continue
-                disallow = np.ones(n_colors, dtype=bool)
-                disallow[aids] = False
-                disallow_idx = np.flatnonzero(disallow)
-                if not disallow_idx.size:
-                    continue
-                # For each disallowed palette index c, set color_logits[m, c]
-                # to -1e10 where m == rmask.
-                rmask_t = torch.from_numpy(rmask)
-                for c in disallow_idx:
-                    color_logits[..., int(c)] = torch.where(
-                        rmask_t, torch.tensor(-1e10),
-                        color_logits[..., int(c)])
+                for c in aids:
+                    cell_allowed[..., int(c)] |= rmask
+                covered |= rmask
+            cell_allowed[~covered] = True
+            # torch.where, not boolean-mask assignment: `t[mask] = v` runs
+            # nonzero() and materialises int64 index tuples for every True
+            # entry — with a tight per-cell lock that's ~Y·X·Z·n_colors
+            # entries, hundreds of MB in one spike on a house-sized grid.
+            color_logits = torch.where(torch.from_numpy(cell_allowed),
+                                       color_logits,
+                                       torch.tensor(-1e10, dtype=color_logits.dtype))
 
         return SoftAssembly(
             type_logits=torch.nn.Parameter(type_logits.to(device)),
