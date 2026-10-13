@@ -614,6 +614,7 @@ def walls_from_solid(solid: np.ndarray, palette_idx: np.ndarray, target: MeshTar
 # ---------------------------------------------------------------------------
 
 PIER_MAX_CELLS = 36        # a plan this small is a pier, not a room to leave hollow
+PLINTH_COURSES = 4         # at ground level anything unowned is a plinth or steps: built solid
 
 
 @dataclass
@@ -648,7 +649,10 @@ def piers_from_solid(solid: np.ndarray, palette_idx: np.ndarray, *, ground_y: in
         sl = (block.sum(axis=0) >= min(2, block.shape[0])) & ~exclude[y0:y0 + COURSE].any(axis=0)
         nxt: dict[tuple, PierSpec] = {}
         for cells in _components(sl):
-            if len(cells) > PIER_MAX_CELLS:
+            # Higher up, a big unowned patch is a room (left hollow, the
+            # walls and floors carry it); at ground level it is a plinth,
+            # a flight of steps, a terrace base — built solid like a set does.
+            if len(cells) > PIER_MAX_CELLS and c >= PLINTH_COURSES:
                 continue
             key = tuple(map(tuple, cells))
             if key in open_specs:

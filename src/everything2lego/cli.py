@@ -1520,6 +1520,122 @@ def semantic(
         console.print("[yellow]no placements produced — check detector output[/yellow]")
 
 
+_TOOLS = Path(__file__).resolve().parent.parent.parent / "tools"
+
+
+def _stage(name: str, cmd: list, *, env: Optional[dict] = None, log: Optional[Path] = None,
+           tolerate: tuple = ()) -> int:
+    """Run one stage of the photo pipeline as a subprocess; stop on failure.
+    Exit codes in `tolerate` are warnings (the build stage exits 1 when the
+    model wants structural review — its outputs are still there)."""
+    console.rule(f"[bold]{name}[/bold]")
+    console.print("  " + " ".join(str(c) for c in cmd), style="dim")
+    full_env = dict(__import__("os").environ)
+    if env:
+        full_env.update(env)
+    with (open(log, "ab") if log else open(__import__("os").devnull, "wb")) as fh:
+        proc = subprocess.run([str(c) for c in cmd], env=full_env,
+                              stdout=fh if log else None, stderr=subprocess.STDOUT if log else None)
+    if proc.returncode != 0 and proc.returncode not in tolerate:
+        raise typer.BadParameter(f"stage '{name}' failed (exit {proc.returncode})"
+                                 + (f"; see {log}" if log else ""))
+    return proc.returncode
+
+
+@app.command()
+def photo(
+    image: Path = typer.Argument(..., exists=True, help="The photo (one object, any background)."),
+    out: Path = typer.Option(Path("out_photo"), "--out", "-o", help="Output directory."),
+    max_studs: int = typer.Option(56, "--max-studs", min=12, max=128,
+        help="LEGO grid resolution (longer horizontal size in studs)."),
+    mesh: Optional[Path] = typer.Option(None, "--mesh", exists=True,
+        help="Reuse an existing Hunyuan mesh (model.glb) instead of reconstructing — "
+             "re-run just the LEGO stage with new settings."),
+    resolution: int = typer.Option(192, "--resolution", min=64, max=512,
+        help="Hunyuan3D marching-cubes resolution (192 is the ceiling on a 16 GB Mac)."),
+    steps: int = typer.Option(50, "--steps", min=5, max=200),
+    guidance: float = typer.Option(7.5, "--guidance", min=0.0, max=20.0),
+    faces: int = typer.Option(30000, "--faces", min=2000, help="Decimate the mesh to this many faces."),
+    colors: int = typer.Option(10, "--colors", min=2, max=32, help="Quantise vertex colours to this many."),
+    facade: bool = typer.Option(True, "--facade/--no-facade",
+        help="Measure the photographed side with MapAnything (needs MAPANYTHING_PY pointing at "
+             "its venv's python) and let it override the model's front and skyline."),
+    facade_file: Optional[Path] = typer.Option(None, "--facade-file", exists=True,
+        help="Reuse an existing facade .npz instead of running MapAnything."),
+    stand: bool = typer.Option(True, "--stand/--no-stand", help="Pedestal under a figure."),
+    hollow: bool = typer.Option(True, "--hollow/--no-hollow"),
+) -> None:
+    """Photo → LEGO set, one command.
+
+    Matting (U²-Net) → Hunyuan3D-2mini reconstruction → photo colours
+    re-projected onto the mesh → decimation → colour quantisation →
+    (optional) MapAnything facade measurement → set-design build.  Every
+    stage is a subprocess with its own log in the output directory, so a
+    failed stage can be re-run by hand and the rest resumed with --mesh /
+    --facade-file.
+    """
+    import os
+    out.mkdir(parents=True, exist_ok=True)
+    log = out / "photo.log"
+    py = sys.executable
+    clean = out / "photo_clean.png"
+    matte = out / "photo_clean.rgba.png"
+    _stage("1/6 matting", [py, _TOOLS / "remove_bg.py", image, clean], log=log)
+
+    mesh_dir = out / "mesh"
+    if mesh is None:
+        env = {"HUNYUAN3D_REPO": os.environ.get("HUNYUAN3D_REPO", "tencent/Hunyuan3D-2mini"),
+               "HUNYUAN3D_SUBFOLDER": os.environ.get("HUNYUAN3D_SUBFOLDER", "hunyuan3d-dit-v2-mini"),
+               "PYTORCH_ENABLE_MPS_FALLBACK": "1"}
+        _stage("2/6 Hunyuan3D reconstruction", [
+            py, "-m", "everything2lego.cli", "hunyuan", clean, "--out", mesh_dir,
+            "--resolution", resolution, "--steps", steps, "--guidance", guidance,
+            "--no-delight", "--max-studs", 24], env=env, log=log)
+        mesh = mesh_dir / "model.glb"
+        if not mesh.exists():
+            raise typer.BadParameter(f"Hunyuan did not write {mesh}")
+    else:
+        console.rule("[bold]2/6 Hunyuan3D reconstruction[/bold] (reusing %s)" % mesh)
+    mesh_dir.mkdir(exist_ok=True)
+    rp, dec, q = mesh_dir / "model_rp.glb", mesh_dir / "dec.glb", mesh_dir / "q.glb"
+    _stage("3/6 photo colours onto the mesh", [py, _TOOLS / "reproject_colors.py", mesh, clean, rp], log=log)
+    _stage("4/6 decimate + quantise colours",
+           [py, _TOOLS / "decimate_keep_color.py", rp, dec, faces], log=log)
+    _stage("4/6 decimate + quantise colours",
+           [py, _TOOLS / "quantise_colors.py", dec, q, colors], log=log)
+
+    facade_npz: Optional[Path] = facade_file
+    if facade and facade_npz is None:
+        ma_py = os.environ.get("MAPANYTHING_PY")
+        if ma_py and Path(ma_py).exists():
+            facade_npz = out / "facade.npz"
+            src = matte if matte.exists() else clean
+            _stage("5/6 facade measurement (MapAnything)",
+                   [ma_py, _TOOLS / "facade_depth.py", src, facade_npz],
+                   env={"OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS", "4")}, log=log)
+        else:
+            console.print("[yellow]5/6 facade skipped: set MAPANYTHING_PY to MapAnything's venv python "
+                          "to measure the photographed side[/yellow]")
+    else:
+        console.rule("[bold]5/6 facade[/bold] " + ("(reusing %s)" % facade_npz if facade_npz else "(off)"))
+
+    cmd = [py, "-m", "everything2lego.cli", "semantic", q, "--out", out / "lego",
+           "--max-studs", max_studs, "--subvoxels", 2, "--n-samples", 50000,
+           "--segmenter", "builtin", "--seg-normal-degrees", 25, "--seg-min-fraction", 0.01,
+           "--merge-small-regions", 0.003, "--min-island", 8, "--set-mode",
+           "--stand" if stand else "--no-stand"]
+    if hollow:
+        cmd.append("--hollow")
+    if facade_npz is not None:
+        cmd += ["--facade", facade_npz]
+    rc = _stage("6/6 set-design build", cmd, env={"PYTORCH_ENABLE_MPS_FALLBACK": "1"}, log=None,
+                tolerate=(1,))
+    if rc == 1:
+        console.print("[yellow]the model wants structural review (see lego/report.json): "
+                      "not one assembly, or parts with nothing under them[/yellow]")
+    console.print(f"\n[green]done[/green]  model: {out / 'lego'}   log: {log}")
+
+
 def opt_build_target_for_refine(mesh_path, max_studs, n_samples, subvoxels=1,
                                 min_island_cells=0):
     """Rebuild the MeshTarget with the same settings the pipeline used, so

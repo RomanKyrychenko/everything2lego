@@ -50,3 +50,9 @@ white = np.full_like(img_np, 255.0)
 composite = img_np * mask_np[..., None] + white * (1 - mask_np[..., None])
 Image.fromarray(composite.astype(np.uint8)).save(dst)
 print("wrote", dst)
+# The matte itself, for stages that need the object mask rather than a
+# white background (the facade measurement): same name with .rgba.png.
+rgba = np.dstack([img_np, mask_np * 255.0]).astype(np.uint8)
+matte = dst[:-4] + ".rgba.png" if dst.lower().endswith(".png") else dst + ".rgba.png"
+Image.fromarray(rgba, "RGBA").save(matte)
+print("wrote", matte)

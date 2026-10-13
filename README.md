@@ -83,7 +83,26 @@ export HY3DGEN_MODELS=/Volumes/PRO-G40/hy3dgen
     --out out/ --max-studs 56 --soft-train
 ```
 
-### Photo → 3D → LEGO
+### Photo → LEGO set, one command
+
+```bash
+# Matting → Hunyuan3D-2mini → colours onto the mesh → decimate/quantise →
+# (MapAnything facade, if MAPANYTHING_PY is set) → set-design build.
+MAPANYTHING_PY=/Volumes/PRO-G40/map-anything/.venv/bin/python \
+HF_HOME=/Volumes/PRO-G40/huggingface TORCH_HOME=/Volumes/PRO-G40/torch \
+.venv/bin/everything2lego photo examples/house/house.jpg --out out_photo --max-studs 56
+
+# Re-run only the LEGO stage (new settings, same mesh and facade):
+.venv/bin/everything2lego photo photo.jpg --out out_photo \
+    --mesh out_photo/mesh/model.glb --facade-file out_photo/facade.npz --max-studs 48
+```
+
+Each stage is a subprocess logged to `out_photo/photo.log`; the result is
+`out_photo/lego/` (LDraw, BrickLink XML, viewer, instructions PDF, preview).
+A figure (anything that isn't building-shaped) gets a stand; `--no-stand`
+to leave it off.
+
+### Photo → 3D → LEGO, step by step
 
 ```bash
 # 1) Photo to mesh (Hunyuan3D-2mini, best on 16 GB Apple Silicon).
