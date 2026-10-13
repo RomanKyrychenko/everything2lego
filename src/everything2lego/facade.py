@@ -56,9 +56,17 @@ class Facade:
                    conf=None if conf is None else np.asarray(conf).squeeze().astype(np.float32),
                    rgb=None if rgb is None else np.asarray(rgb).astype(np.uint8))
 
+    @property
+    def valid(self) -> np.ndarray:
+        """Object pixels with a measured depth.  The matte is the object's
+        silhouette; a depth model returns nothing (z = 0) on some of it —
+        dark timber, glass — and those pixels must not become points at
+        the camera."""
+        z = self.pts[..., 2]
+        return self.mask & np.isfinite(self.pts).all(axis=-1) & (z > 0.1)
+
     def points(self, max_points: int = 20000, seed: int = 0) -> np.ndarray:
-        P = self.pts[self.mask]
-        P = P[np.isfinite(P).all(axis=1)]
+        P = self.pts[self.valid]
         if len(P) > max_points:
             rng = np.random.default_rng(seed)
             P = P[rng.choice(len(P), max_points, replace=False)]
@@ -179,8 +187,8 @@ def model_surface_points(solid: np.ndarray) -> np.ndarray:
     return _grid_to_mm(np.vstack(out))
 
 
-def _dominant_wall(P: np.ndarray, *, tol_mm: float = 6.0, trials: int = 400, seed: int = 0
-                   ) -> Optional[tuple[np.ndarray, np.ndarray, float]]:
+def _dominant_wall(P: np.ndarray, *, tol_mm: float = 6.0, trials: int = 400, seed: int = 0,
+                   min_share: float = 0.4) -> Optional[tuple[np.ndarray, np.ndarray, float]]:
     """RANSAC for the VERTICAL plane most of `P` (N, 3, model mm, y up)
     lies on — (horizontal unit normal, centroid, inlier share), or None
     when no wall holds 40% of the points.  Vertical by construction:
@@ -202,7 +210,7 @@ def _dominant_wall(P: np.ndarray, *, tol_mm: float = 6.0, trials: int = 400, see
         cnt = int((d < tol_mm).sum())
         if cnt > best_n:
             best, best_n = (n2, a), cnt
-    if best is None or best_n < 0.4 * len(P):
+    if best is None or best_n < min_share * len(P):
         return None
     n2, a = best
     inl = (np.abs((xz - a) @ n2) < tol_mm)
@@ -296,15 +304,49 @@ def _refine_frame_by_silhouette(solid: np.ndarray, facade: Facade, fit: FacadeFi
     return best
 
 
+def _heading(T: np.ndarray) -> tuple[str, int]:
+    """(axis, sign) of the grid side a camera transform looks at: the
+    facade's horizontal runs along `axis`; sign +1 = the camera is on the
+    high side of the other axis."""
+    f = T[:3, :3] @ np.array([0.0, 0.0, 1.0])            # camera forward, model frame
+    if abs(f[2]) >= abs(f[0]):
+        return "x", (1 if f[2] < 0 else -1)
+    return "z", (1 if f[0] < 0 else -1)
+
+
+def _initial_transform_yaw(P: np.ndarray, Q: np.ndarray, yaw: float, width_m: float
+                           ) -> tuple[np.ndarray, float]:
+    """Camera (x right, y down, z forward) → model mm with the camera
+    looking along -z turned by `yaw` about the vertical; the scale from
+    the model's extent across that view over the facade's width; the
+    facade's near side seated on the model's near side, centred across
+    the view, standing on the model's ground."""
+    c, s_ = np.cos(yaw), np.sin(yaw)
+    Ry = np.array([[c, 0, s_], [0, 1, 0], [-s_, 0, c]])
+    base = np.array([[1.0, 0, 0], [0, -1.0, 0], [0, 0, -1.0]])   # right→x, down→-y, forward→-z
+    R = Ry @ base
+    right, fwd = R[:, 0], R[:, 2]
+    proj = Q @ right
+    scale = float(np.percentile(proj, 99) - np.percentile(proj, 1)) / max(width_m, 1e-6)
+    Pm = P @ (scale * R).T
+    t = np.zeros(3)
+    t += right * (np.median(Q @ right) - np.median(Pm @ right))
+    t += fwd * (np.percentile(Q @ fwd, 5) - np.percentile(Pm @ fwd, 5))
+    t[1] = Q[:, 1].min() - np.percentile(Pm[:, 1], 1)
+    T = np.eye(4)
+    T[:3, :3] = scale * R
+    T[:3, 3] = t
+    return T, scale
+
+
 def register(facade: Facade, solid: np.ndarray, *, iters: int = 20, inlier_mm: float = 24.0,
              allow_scale: bool = True) -> FacadeFit:
     """Register the facade's point cloud to the model's whole skin by ICP
-    in isotropic millimetres, starting from each of the four headings
-    the photo could have been taken from (a camera is never a mirror, so
-    reflections are not tried).  A ¾ view then lands on two sides at
-    once.  Keeps the heading with the most inliers (then the lowest RMS).
-    Scale is initialised from the object's width in both and refined by
-    ICP only within ±15%."""
+    in isotropic millimetres, starting from each of eight headings (four
+    sides, four corners — a camera is never a mirror, so reflections are
+    not tried).  Scale is pinned by the object's width across the view.
+    The heading kept is the one whose model silhouette and relief agree
+    with the photo."""
     from scipy.spatial import cKDTree
     P = facade.points()
     width_m = float(np.percentile(P[:, 0], 99) - np.percentile(P[:, 0], 1))
@@ -313,88 +355,84 @@ def register(facade: Facade, solid: np.ndarray, *, iters: int = 20, inlier_mm: f
     K = camera_intrinsics(facade)
     best: Optional[FacadeFit] = None
     best_score = -1.0
-    for axis in ("x", "z"):
-        occ_xz = solid.any(axis=0)
-        us = np.flatnonzero(occ_xz.any(axis=1 if axis == "x" else 0))
-        width_mm = float(us.max() + 1 - us.min()) * STUD_MM
-        scale0 = width_mm / max(1e-6, width_m)
-        for sign in (+1, -1):
-            for mirror in (False,):
-                Qf = model_front_points(solid, axis, sign)
-                T = _initial_transform(P, Qf, axis, sign, mirror, scale0)
-                for it in range(iters):
-                    Pm = _apply(T, P)
-                    dist, idx = tree.query(Pm)
-                    # anneal: wide to catch, then tight so a majority face
-                    # wins over a part the generator misplaced
-                    band = 3.0 if it < 3 else (1.5 if it < iters - 5 else 0.4)
-                    keep = dist < inlier_mm * band
-                    if keep.sum() < 50:
-                        break
-                    T_step = _umeyama(Pm[keep], Q[idx[keep]], with_scale=allow_scale)
-                    # scale is pinned by the object's width, not by ICP (a
-                    # frontal view barely constrains it): the model's extent
-                    # across the camera's current heading over the facade's
-                    # measured width, ±8%
-                    Tn = T_step @ T
-                    s_total = np.cbrt(abs(np.linalg.det(Tn[:3, :3])))
-                    right = Tn[:3, 0] / s_total
-                    proj = Q @ right
-                    prior = float(np.percentile(proj, 99) - np.percentile(proj, 1)) / max(width_m, 1e-6)
-                    if not (0.92 * prior <= s_total <= 1.08 * prior):
-                        T_step = _umeyama(Pm[keep], Q[idx[keep]], with_scale=False)
-                        Tn = T_step @ T
-                        s_rigid = np.cbrt(abs(np.linalg.det(Tn[:3, :3])))
-                        s_want = float(np.clip(s_rigid, 0.92 * prior, 1.08 * prior))
-                        if abs(s_want - s_rigid) > 1e-9:
-                            c = Pm[keep].mean(axis=0)
-                            Sc = np.eye(4)
-                            Sc[:3, :3] *= s_want / s_rigid
-                            Sc[:3, 3] = c - (s_want / s_rigid) * c
-                            Tn = Sc @ Tn
-                    T = Tn
-                # square the measured wall to the grid, then re-seat it in
-                # depth robustly: the median residual, so the part of the
-                # front most of the measurements agree with wins over a
-                # part the generator misplaced
-                T, on_wall = _snap_facade_plane(T, P)
-                if on_wall is not None and on_wall.sum() >= 50:
-                    for _ in range(5):
-                        Pm = _apply(T, P)
-                        dist, idx = tree.query(Pm)
-                        keep = on_wall & (dist < inlier_mm * 0.75)
-                        if keep.sum() < 50:
-                            break
-                        step = np.median(Q[idx[keep]] - Pm[keep], axis=0)
-                        if np.linalg.norm(step) < 0.1:
-                            break
-                        T = T.copy()
-                        T[:3, 3] += step
+    for yaw_deg in range(0, 360, 45):
+        # every heading the photo could be from: face-on to a side, or a
+        # ¾ view onto a corner (ICP does not turn 45° on its own)
+        T, scale0 = _initial_transform_yaw(P, Q, np.radians(yaw_deg), width_m)
+        for it in range(iters):
+            Pm = _apply(T, P)
+            dist, idx = tree.query(Pm)
+            # anneal: wide to catch, then tight so a majority face
+            # wins over a part the generator misplaced
+            band = 3.0 if it < 3 else (1.5 if it < iters - 5 else 0.4)
+            keep = dist < inlier_mm * band
+            if keep.sum() < 50:
+                break
+            T_step = _umeyama(Pm[keep], Q[idx[keep]], with_scale=allow_scale)
+            # scale is pinned by the object's width, not by ICP (a
+            # frontal view barely constrains it): the model's extent
+            # across the camera's current heading over the facade's
+            # measured width, ±8%
+            Tn = T_step @ T
+            s_total = np.cbrt(abs(np.linalg.det(Tn[:3, :3])))
+            right = Tn[:3, 0] / s_total
+            proj = Q @ right
+            prior = float(np.percentile(proj, 99) - np.percentile(proj, 1)) / max(width_m, 1e-6)
+            if not (0.92 * prior <= s_total <= 1.08 * prior):
+                T_step = _umeyama(Pm[keep], Q[idx[keep]], with_scale=False)
+                Tn = T_step @ T
+                s_rigid = np.cbrt(abs(np.linalg.det(Tn[:3, :3])))
+                s_want = float(np.clip(s_rigid, 0.92 * prior, 1.08 * prior))
+                if abs(s_want - s_rigid) > 1e-9:
+                    c = Pm[keep].mean(axis=0)
+                    Sc = np.eye(4)
+                    Sc[:3, :3] *= s_want / s_rigid
+                    Sc[:3, 3] = c - (s_want / s_rigid) * c
+                    Tn = Sc @ Tn
+            T = Tn
+        # square the measured wall to the grid, then re-seat it in
+        # depth robustly: the median residual, so the part of the
+        # front most of the measurements agree with wins over a
+        # part the generator misplaced
+        T, on_wall = _snap_facade_plane(T, P)
+        if on_wall is not None and on_wall.sum() >= 50:
+            for _ in range(5):
                 Pm = _apply(T, P)
-                dist, _ = tree.query(Pm)
-                inl = float((dist < inlier_mm).mean())
-                rms = float(np.sqrt(np.mean(np.minimum(dist, inlier_mm * 2) ** 2)))
-                fit = FacadeFit(axis=axis, sign=sign, mirror=mirror, T=T, rms_mm=rms, inliers=inl)
-                if K:
-                    # the outline fixes the frame (height, width, where it
-                    # stands) that surface matching leaves loose
-                    fit = _refine_frame_by_silhouette(solid, facade, fit, K)
-                    Pm = _apply(fit.T, P)
-                    dist, _ = tree.query(Pm)
-                    fit.inliers = float((dist < inlier_mm).mean())
-                    fit.rms_mm = float(np.sqrt(np.mean(np.minimum(dist, inlier_mm * 2) ** 2)))
-                    rms, inl = fit.rms_mm, fit.inliers
-                # the heading whose model outline AND relief match the
-                # photo: the facade's own ICP inliers are fooled by a fit
-                # shrunk onto a patch of the model, and a symmetric outline
-                # by the wrong side
-                if K:
-                    score = (silhouette_iou(solid, facade, fit, K) * depth_agreement(solid, facade, fit, K)
-                             * max(0.0, 1.0 - rms / (2.0 * inlier_mm)))
-                else:
-                    score = inl * max(0.0, 1.0 - rms / (2.0 * inlier_mm))
-                if best is None or score > best_score:
-                    best, best_score = fit, score
+                dist, idx = tree.query(Pm)
+                keep = on_wall & (dist < inlier_mm * 0.75)
+                if keep.sum() < 50:
+                    break
+                step = np.median(Q[idx[keep]] - Pm[keep], axis=0)
+                if np.linalg.norm(step) < 0.1:
+                    break
+                T = T.copy()
+                T[:3, 3] += step
+        Pm = _apply(T, P)
+        dist, _ = tree.query(Pm)
+        inl = float((dist < inlier_mm).mean())
+        rms = float(np.sqrt(np.mean(np.minimum(dist, inlier_mm * 2) ** 2)))
+        axis, sign = _heading(T)
+        fit = FacadeFit(axis=axis, sign=sign, mirror=False, T=T, rms_mm=rms, inliers=inl)
+        if K:
+            # the outline fixes the frame (height, width, where it
+            # stands) that surface matching leaves loose
+            fit = _refine_frame_by_silhouette(solid, facade, fit, K)
+            Pm = _apply(fit.T, P)
+            dist, _ = tree.query(Pm)
+            fit.inliers = float((dist < inlier_mm).mean())
+            fit.rms_mm = float(np.sqrt(np.mean(np.minimum(dist, inlier_mm * 2) ** 2)))
+            rms, inl = fit.rms_mm, fit.inliers
+        # the heading whose model outline AND relief match the
+        # photo: the facade's own ICP inliers are fooled by a fit
+        # shrunk onto a patch of the model, and a symmetric outline
+        # by the wrong side
+        if K:
+            score = (silhouette_iou(solid, facade, fit, K) * depth_agreement(solid, facade, fit, K)
+                     * max(0.0, 1.0 - rms / (2.0 * inlier_mm)))
+        else:
+            score = inl * max(0.0, 1.0 - rms / (2.0 * inlier_mm))
+        if best is None or score > best_score:
+            best, best_score = fit, score
     assert best is not None
     return best
 
@@ -410,8 +448,7 @@ def measured_front(facade: Facade, fit: FacadeFit, grid_shape: tuple[int, int, i
     nearest the camera in each cell; `top[u]` — the object's top plate per
     column.  NaN where nothing was measured."""
     H, X, Z = grid_shape
-    P = facade.pts[facade.mask]
-    P = P[np.isfinite(P).all(axis=1)].astype(np.float64)
+    P = facade.pts[facade.valid].astype(np.float64)
     M = _apply(fit.T, P) / np.array([STUD_MM, PLATE_MM, STUD_MM])
     h = 0 if fit.axis == "x" else 2
     dcol = 2 if fit.axis == "x" else 0
@@ -552,7 +589,7 @@ def _blurred_photo(facade: Facade, fit: FacadeFit, K) -> Optional[np.ndarray]:
         return None
     from scipy.ndimage import uniform_filter
     s_mm_per_m = float(np.cbrt(abs(np.linalg.det(fit.T[:3, :3]))))
-    zs_ok = facade.pts[..., 2][facade.mask]
+    zs_ok = facade.pts[..., 2][facade.valid]
     cell_px = K[0] * STUD_MM / s_mm_per_m / max(float(np.nanmedian(zs_ok)), 1e-6)
     size = max(1, int(round(cell_px)))
     return uniform_filter(facade.rgb.astype(np.float32), size=(size, size, 1), mode="nearest")
@@ -615,6 +652,124 @@ def photo_colours(solid: np.ndarray, palette_idx: np.ndarray, facade: Facade, fi
     return out, changed
 
 
+def _column_tops(facade: Facade, fit: FacadeFit, K) -> np.ndarray:
+    """Per image column, the height (model plates) of the object's top
+    edge: the topmost pixel with a depth, rebuilt on its own pixel ray
+    (the pixel's position is exact; only its depth is noisy, and that is
+    a local median).  +inf where the column has no object."""
+    fx, fy, cx, cy = K
+    valid = facade.valid
+    Hh, Ww = valid.shape
+    tops = np.full(Ww, np.inf)
+    cols = np.flatnonzero(valid.any(axis=0))
+    if len(cols) == 0:
+        return tops
+    rows = np.argmax(valid[:, cols], axis=0)
+    z = np.where(valid, facade.pts[..., 2], np.nan)
+    zs = np.empty(len(cols))
+    for k, (r, c) in enumerate(zip(rows, cols)):
+        win = z[r:min(Hh, r + 3), max(0, c - 1):c + 2]
+        zs[k] = np.nanmedian(win)
+    P = np.c_[(cols - cx) / fx * zs, (rows - cy) / fy * zs, zs]
+    tops[cols] = _apply(fit.T, P)[:, 1] / PLATE_MM
+    return tops
+
+
+def square_walls(facade: Facade, fit: FacadeFit, *, max_deg: float = 20.0,
+                 min_share: float = 0.1, band_studs: float = 3.0) -> tuple[Facade, list[float]]:
+    """Manhattan regularisation of a measured facade.  A single photo's
+    depth bends angles — a ¾ view of a box comes back with its two walls
+    meeting at 78°, not 90° — while the set it becomes has square walls.
+    Up to two dominant vertical walls are found in the registered points;
+    each is turned to its nearest grid axis (when within `max_deg`) about
+    their common corner (or its own centre when alone).  Every pixel of a
+    wall — the face and what lies within `band_studs` of it, window
+    reveals included — keeps its offset from the wall and its own pixel
+    ray: only its depth along that ray changes.  Returns the corrected
+    facade and the corrections applied (degrees)."""
+    K = camera_intrinsics(facade)
+    if K is None:
+        return facade, []
+    fx, fy, cx, cy = K
+    valid = facade.valid
+    vv, uu = np.nonzero(valid)
+    if len(vv) < 200:
+        return facade, []
+    P = _apply(fit.T, facade.pts[vv, uu].astype(np.float64))
+    walls = []
+    remaining = np.ones(len(P), bool)
+    for _ in range(2):
+        idx = np.flatnonzero(remaining)
+        if len(idx) < 100:
+            break
+        w = _dominant_wall(P[idx], min_share=min_share * len(P) / len(idx))
+        if w is None:
+            break
+        n, c, _ = w
+        on = np.abs((P - c) @ n) < 6.0
+        walls.append((n, c, on))
+        remaining &= ~on
+    if not walls:
+        return facade, []
+    axes = [np.array(v, float) for v in ((1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1))]
+    pivot = None
+    if len(walls) == 2:
+        (n1, c1, _), (n2, c2, _) = walls
+        A = np.array([[n1[0], n1[2]], [n2[0], n2[2]]])
+        if abs(np.linalg.det(A)) > 0.2:                      # not parallel: they meet
+            xz = np.linalg.solve(A, [n1 @ c1, n2 @ c2])
+            pivot = np.array([xz[0], 0.0, xz[1]])
+    scale = float(np.cbrt(abs(np.linalg.det(fit.T[:3, :3]))))
+    R = fit.T[:3, :3]
+    t0 = fit.T[:3, 3]
+    band = band_studs * STUD_MM
+    pts = facade.pts.copy()
+    ray = np.c_[(uu - cx) / fx, (vv - cy) / fy, np.ones(len(uu))]
+    dm = ray @ R.T                                           # model-frame ray per unit camera depth
+    best_dist = np.full(len(P), np.inf)
+    assign = np.full(len(P), -1)
+    corrections: list[float] = []
+    targets = []
+    for k, (n, c, on) in enumerate(walls):
+        target = max(axes, key=lambda a: abs(float(a @ n)))
+        if float(target @ n) < 0:
+            target = -target
+        ang = float(np.degrees(np.arccos(np.clip(target @ n, -1, 1))))
+        targets.append((target, ang))
+        # this wall's pixels: within the band of its plane, inside its extent
+        along = np.cross([0.0, 1.0, 0.0], n)
+        s_on = (P[on] - c) @ along
+        lo, hi = np.percentile(s_on, 1) - STUD_MM, np.percentile(s_on, 99) + STUD_MM
+        top = np.percentile(P[on, 1], 99) + STUD_MM
+        d = (P - c) @ n
+        sa = (P - c) @ along
+        mine = (np.abs(d) < band) & (sa >= lo) & (sa <= hi) & (P[:, 1] <= top)
+        closer = mine & (np.abs(d) < best_dist)
+        assign[closer] = k
+        best_dist[closer] = np.abs(d[closer])
+    for k, (n, c, on) in enumerate(walls):
+        target, ang = targets[k]
+        if ang > max_deg or ang < 0.2:
+            continue
+        sel = assign == k
+        if not sel.any():
+            continue
+        piv = pivot if pivot is not None else c
+        offset = (P[sel] - c) @ n                            # relief relative to the wall
+        # the corrected wall: normal `target`, through the pivot's trace of the old wall
+        anchor = piv + n * ((c - piv) @ n)
+        rhs = offset + target @ anchor - target @ t0
+        den = dm[sel] @ target
+        ok = np.abs(den) > 1e-6
+        z = np.where(ok, rhs / np.where(ok, den, 1.0), np.nan)
+        good = ok & (z > 0.1)
+        sv, su = vv[sel][good], uu[sel][good]
+        pts[sv, su] = ray[sel][good] * z[good, None]
+        corrections.append(ang)
+    out = Facade(pts=pts, mask=facade.mask, conf=facade.conf, rgb=facade.rgb)
+    return out, corrections
+
+
 def carve_facade(solid: np.ndarray, facade: Facade, fit: FacadeFit, *,
                  background: Optional[bool] = None, margin: float = 0.75, fill_depth: float = 2.0,
                  reach: float = 6.0) -> tuple[np.ndarray, int]:
@@ -666,10 +821,19 @@ def carve_facade(solid: np.ndarray, facade: Facade, fit: FacadeFit, *,
     idx = np.flatnonzero(seen)
     zs = zc[seen]
 
+    measured = on_object & (zmeas > 0.1)
+    # the measured top of the object in each image column, in model
+    # plates (the topmost matte pixel with a depth), and how far above it
+    # a cell may sit: half a cell plus one pixel's height at that depth
+    col_top = _column_tops(facade, fit, K)
+    px_plates = np.where(measured, zmeas, 0.0) / K[1] * s_mm_per_m / PLATE_MM
+    cell_y = centres[idx, 1]
+    above_top = cell_y > col_top[ui] + 0.5 + px_plates
     # 1. in front of the measured surface: empty
-    clear = on_object & (zmeas > 0.1) & (zs < zmeas - margin_m)
-    # 2. just behind it, with matter in reach: solid
-    behind = on_object & (zmeas > 0.1) & (zs >= zmeas) & (zs <= zmeas + fill_m)
+    clear = measured & (zs < zmeas - margin_m)
+    # 2. just behind it, with matter in reach and not above the column's
+    #    measured top: solid
+    behind = measured & (zs >= zmeas) & (zs <= zmeas + fill_m) & ~above_top
     if behind.any():
         bidx = idx[behind]
         c = centres[bidx]
@@ -683,26 +847,13 @@ def carve_facade(solid: np.ndarray, facade: Facade, fit: FacadeFit, *,
         fill_idx = bidx[has_matter]
     else:
         fill_idx = np.zeros(0, int)
-    # 2b. hidden behind the measured surface — but higher than what hides
-    #     it: from below, a camera cannot see the top of a tower, so a
-    #     model that rises behind the front's top edge is consistent with
-    #     the photo; a set designer reads the visible height as THE
-    #     height.  (What hides behind something at least as high — the
-    #     back of a flat roof, a wall behind a porch — stays.)
-    hidden = on_object & (zmeas > 0.1) & (zs > zmeas + fill_m)
-    if hidden.any():
-        # the measured top of the object in each image column, in model
-        # plates: the topmost matte pixel with a depth
-        zz = facade.pts[..., 2]
-        valid = facade.mask & np.isfinite(zz) & (zz > 0.1)
-        col_top = np.full(Ww, np.inf)
-        cols = np.flatnonzero(valid.any(axis=0))
-        rows = np.argmax(valid[:, cols], axis=0)
-        col_top[cols] = _apply(fit.T, facade.pts[rows, cols].astype(np.float64))[:, 1] / PLATE_MM
-        cell_y = centres[idx[hidden], 1]
-        rise = np.zeros(len(idx), bool)
-        rise[np.flatnonzero(hidden)[cell_y > col_top[ui[hidden]] + 1.5]] = True
-        clear |= rise
+    # 2b. behind the measured surface but higher than the column's top:
+    #     from below a camera cannot see the top of a tower, so a model
+    #     rising behind the front's top edge agrees with the photo; a set
+    #     designer reads the visible height as THE height.  (What hides
+    #     behind something at least as high — the back of a flat roof, a
+    #     wall behind a porch — stays.)
+    clear |= measured & (zs >= zmeas) & above_top
     # 3. the background: nothing up to what the pixel measured; the sky
     #    (no depth, or above the object's outline in that column — a depth
     #    model gives the sky a confident-looking but meaningless depth,

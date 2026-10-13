@@ -215,7 +215,7 @@ class SemanticLegoPipeline:
                             source=self.config.set_source, facade=facade,
                             stand=self.config.stand, stand_colour=self.config.stand_colour)
             if plan.facade_fit is not None:
-                counts["facade:cells_changed"] = plan.facade_changed
+                counts["facade:cells_changed"] = int(plan.facade_changed)
                 counts["facade:inliers_pct"] = int(round(100 * plan.facade_fit.inliers))
                 target.metadata["facade_fit"] = {
                     "axis": plan.facade_fit.axis, "sign": plan.facade_fit.sign,
@@ -232,7 +232,7 @@ class SemanticLegoPipeline:
             counts["set:decks"] = len(plan.decks)
             counts["set:piers"] = len(plan.piers)
             counts["set:floors"] = len(plan.floors)
-            counts["set:pruned_cells"] = plan.pruned
+            counts["set:pruned_cells"] = int(plan.pruned)
             counts["set:walls"] = len(plan.walls)
             counts["set:gables"] = sum(1 for g in plan.gables if g.b is not None)
             counts["set:lean_tos"] = sum(1 for g in plan.gables if g.b is None)

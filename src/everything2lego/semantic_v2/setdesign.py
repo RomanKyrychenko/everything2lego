@@ -1200,6 +1200,18 @@ def _seen_roof_colour(pitches: list[PitchSpec], solid: np.ndarray, facade, fit) 
     return dominant_colour(rgb) if len(rgb) >= 6 else None
 
 
+# A facade registration is used only when the model, seen through the
+# registered camera, overlaps the photo's matte this well and this many
+# measured points lie on the model's skin.
+FACADE_MIN_IOU = 0.6
+FACADE_MIN_INLIERS = 0.7
+
+
+def _facade_trusted(facade, fit, solid: np.ndarray) -> bool:
+    from ..facade import silhouette_iou
+    return fit.inliers >= FACADE_MIN_INLIERS and silhouette_iou(solid, facade, fit) >= FACADE_MIN_IOU
+
+
 def _plan_from_massing(regions: list[Region], target: MeshTarget, occ: np.ndarray, ground_y: int,
                        *, detect_openings: bool, opening_delta_e: float, facade=None,
                        stand: bool = True, stand_colour: Optional[int] = None) -> SetPlan:
@@ -1207,10 +1219,23 @@ def _plan_from_massing(regions: list[Region], target: MeshTarget, occ: np.ndarra
     palette_idx = target.voxel_grid.palette_idx
     solid = solid_volume(occ)
     facade_fit, facade_changed, relief = None, 0, None
+    # Building or sculpture is a property of the whole shape, read before
+    # the photo corrects it: a carve seen from one side cuts view-shaped
+    # (diagonal) wedges that would make a building's outline look carved.
+    from .massing import SCULPT_CORNER_SHARE as SCULPT_CORNER_SHARE_, outline_corner_share
+    coverage = outline_corner_share(solid, ground_y=ground_y)
     if facade is not None:
         from scipy.ndimage import binary_fill_holes
-        from ..facade import carve_facade, measured_front, register
+        from ..facade import carve_facade, measured_front, register, square_walls
         facade_fit = register(facade, solid)
+    if facade is not None and not _facade_trusted(facade, facade_fit, solid):
+        # a registration this poor would carve the wrong cells and paint
+        # the wrong colours: the model stays as generated
+        facade = None
+    if facade is not None:
+        if coverage <= SCULPT_CORNER_SHARE_:
+            # a building's walls meet square; a photo's depth bends them
+            facade, _ = square_walls(facade, facade_fit)
         solid, facade_changed = carve_facade(solid, facade, facade_fit)
         # cavities the carving opened are closed again; the leaky-shell
         # heuristics are NOT re-run, they would undo what the rays cut
@@ -1238,7 +1263,7 @@ def _plan_from_massing(regions: list[Region], target: MeshTarget, occ: np.ndarra
     walls = walls_from_solid(solid, palette_idx, target, ground_y=ground_y, exclude=skin,
                              detect_openings=detect_openings, opening_delta_e=opening_delta_e,
                              relief=relief)
-    if facade_fit is not None:
+    if facade is not None:
         _colour_walls_from_photo(walls, solid, facade, facade_fit)
     wall_colour = None
     if walls:
@@ -1247,9 +1272,8 @@ def _plan_from_massing(regions: list[Region], target: MeshTarget, occ: np.ndarra
     # Not a building?  (Its outlines are staircases, not straight runs.)
     # Then no walls, roofs or floors: the whole shape is sculpted in brick
     # courses, standing on a base plate over its footprint.
-    from .massing import SCULPT_CORNER_SHARE, FloorSpec, outline_corner_share
-    coverage = outline_corner_share(solid, ground_y=ground_y)
-    if coverage > SCULPT_CORNER_SHARE:
+    from .massing import FloorSpec
+    if coverage > SCULPT_CORNER_SHARE_:
         from .massing import stand_mask
         from ..colors import palette as _palette
         if stand_colour is None:
@@ -1278,7 +1302,7 @@ def _plan_from_massing(regions: list[Region], target: MeshTarget, occ: np.ndarra
         for p in pitches:
             weights[p.colour] = weights.get(p.colour, 0.0) + p.run * (p.span[1] - p.span[0])
         roof_colour = max(weights, key=weights.get)
-        if facade_fit is not None:
+        if facade is not None:
             # what the photo shows of the roof decides its colour; the
             # rest of the reconstruction's roof was inpainted
             seen_roof = _seen_roof_colour(pitches, solid, facade, facade_fit)

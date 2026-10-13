@@ -49,15 +49,30 @@ def dominant_yaw(mesh: trimesh.Trimesh, *, min_vertical: float = 0.9) -> float:
     a = np.asarray(mesh.area_faces, dtype=np.float64)
     horizontal = np.linalg.norm(n[:, [0, 2]], axis=1)
     walls = horizontal >= min_vertical
+    yaw, _ = _wall_heading(n, a, min_vertical)
+    return yaw
+
+
+def _wall_heading(n: np.ndarray, a: np.ndarray, min_vertical: float) -> tuple[float, float]:
+    """(yaw, strength) of the near-vertical face normals: the folded
+    circular mean and its resultant length (1 = every wall face agrees,
+    0 = no preferred direction)."""
+    horizontal = np.linalg.norm(n[:, [0, 2]], axis=1)
+    walls = horizontal >= min_vertical
     if not walls.any():
-        return 0.0
+        return 0.0, 0.0
     heading = np.arctan2(n[walls, 2], n[walls, 0])
     # Four headings 90° apart are one wall direction: fold with 4x.
     folded = np.exp(4j * heading)
     mean = (a[walls] * folded).sum()
     if abs(mean) < 1e-9:
-        return 0.0
-    return float(np.angle(mean) / 4.0)
+        return 0.0, 0.0
+    return float(np.angle(mean) / 4.0), float(abs(mean) / a[walls].sum())
+
+
+# The walls' own normals set the grid when they agree at least this well;
+# below it (a dark, textured or blobby reconstruction) the plan outline does.
+WALL_HEADING_MIN_STRENGTH = 0.3
 
 
 def outline_yaw(mesh: trimesh.Trimesh, *, samples: int = 40000, max_degrees: float = 44.0) -> float:
@@ -101,19 +116,25 @@ def align_to_axes(mesh: trimesh.Trimesh, *, max_degrees: float = 44.0) -> trimes
     wall.  The heading comes from the plan outline (robust to textured
     facades), with the face-normal estimate as the fallback when the
     outline has none.  Returns a rotated copy; the original is left alone."""
-    # coarse heading from the plan (good to a couple of degrees, never
-    # fooled by scattered normals) ...
-    coarse = outline_yaw(mesh)
-    if abs(np.degrees(coarse)) < 1.5:
-        coarse = 0.0
-    turned = mesh
-    if coarse:
-        turned = mesh.copy()
-        turned.apply_transform(trimesh.transformations.rotation_matrix(coarse, [0, 1, 0]))
-    # ... refined by the walls' normals, which are exact on clean walls,
-    # trusted only near the coarse heading
-    fine = dominant_yaw(turned)
-    yaw = coarse + (fine if abs(np.degrees(fine)) <= 5.0 or not coarse else 0.0)
+    # The walls frame the building: a reconstruction's roof is often a
+    # few degrees off its own walls, and the roof recipe draws straight
+    # rows over whatever footprint the walls give it.  So the walls'
+    # normals set the grid when they agree on a direction ...
+    n = np.asarray(mesh.face_normals, dtype=np.float64)
+    a = np.asarray(mesh.area_faces, dtype=np.float64)
+    yaw, strength = _wall_heading(n, a, 0.9)
+    if strength < WALL_HEADING_MIN_STRENGTH:
+        # ... else the plan outline does (good to a couple of degrees,
+        # never fooled by scattered normals), refined by the normals near it
+        coarse = outline_yaw(mesh)
+        if abs(np.degrees(coarse)) < 1.5:
+            coarse = 0.0
+        turned = mesh
+        if coarse:
+            turned = mesh.copy()
+            turned.apply_transform(trimesh.transformations.rotation_matrix(coarse, [0, 1, 0]))
+        fine = dominant_yaw(turned)
+        yaw = coarse + (fine if abs(np.degrees(fine)) <= 5.0 or not coarse else 0.0)
     if abs(np.degrees(yaw)) < 0.05 or abs(np.degrees(yaw)) > max_degrees:
         return mesh
     aligned = mesh.copy()

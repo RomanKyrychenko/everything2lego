@@ -31,6 +31,15 @@ app = typer.Typer(help="Convert a 3D mesh or a set of images of one object into 
 console = Console()
 
 
+
+def _jsonable(o):
+    """numpy scalars and arrays in a report become plain JSON."""
+    if isinstance(o, np.generic):
+        return o.item()
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    raise TypeError(f"Object of type {o.__class__.__name__} is not JSON serializable")
+
 def _write_outputs(placements, out_dir: Path, *, model_name: str, report: dict) -> dict[str, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     placements = list(placements)
@@ -46,7 +55,7 @@ def _write_outputs(placements, out_dir: Path, *, model_name: str, report: dict) 
     instructions._render_step(placements, set(), (1400, 1000), instructions._bounds(placements),
                               order=order).save(preview)
     report_path = out_dir / "report.json"
-    report_path.write_text(json.dumps(report, indent=2) + "\n")
+    report_path.write_text(json.dumps(report, indent=2, default=_jsonable) + "\n")
     stl = io_stl.write_stl(placements, out_dir / "lego.stl")
     return {"ldr": ldr, "bricklink": xml, "viewer": viewer_index, "pdf": pdf,
             "preview": preview, "report": report_path, "lego_stl": stl}

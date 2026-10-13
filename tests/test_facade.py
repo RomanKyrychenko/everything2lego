@@ -20,7 +20,8 @@ PLAIN = range(16, 27)                     # main-block columns clear of the towe
 
 
 def _facade_from(solid: np.ndarray, *, cam_dist_m: float = 10.0, mm_per_m: float = 50.0,
-                 noise_mm: float = 2.0, yaw_deg: float = 4.0, px: int = 4) -> Facade:
+                 noise_mm: float = 2.0, yaw_deg: float = 4.0, px: int = 4,
+                 orbit: bool = False) -> Facade:
     """A metric camera-frame point map of `solid` (x right, y down, z
     away) as a pinhole camera on the +z side would measure it, by
     marching a ray through the voxels for every pixel — `px` pixels per
@@ -30,8 +31,14 @@ def _facade_from(solid: np.ndarray, *, cam_dist_m: float = 10.0, mm_per_m: float
     S = mm_per_m
     # camera: at the model's horizontal centre, mid-height, cam_dist in front of z=0, yawed
     yaw = np.deg2rad(yaw_deg)
-    C = np.array([X * 4.0, H * 1.6, cam_dist_m * S])          # mm, model frame
     Ry = np.array([[np.cos(yaw), 0, np.sin(yaw)], [0, 1, 0], [-np.sin(yaw), 0, np.cos(yaw)]])
+    if orbit:
+        # walked around the object: the camera orbits its centre
+        centre = np.array([X * 4.0, H * 1.6, Z * 4.0])
+        C = centre + Ry @ np.array([0.0, 0.0, cam_dist_m * S - Z * 4.0])   # mm, model frame
+    else:
+        # panned on the spot in front of the +z side
+        C = np.array([X * 4.0, H * 1.6, cam_dist_m * S])
     # camera axes in the model frame: right, down, forward (toward -z)
     right, down, fwd = Ry @ np.array([1.0, 0, 0]), np.array([0, -1.0, 0]), Ry @ np.array([0, 0, -1.0])
     # the frame is half again as wide and tall as the object, so the yawed
@@ -186,3 +193,31 @@ def test_photo_colours_the_seen_front_and_leaves_the_back():
     assert changed > 0
     assert out[15, 20, 13] == red                      # the main block's front face
     assert out[15, 20, 2] == 0                         # its back: unseen, unchanged
+
+
+def test_square_walls_restores_a_right_angle_a_three_quarter_view_bent():
+    """A ¾ view of a box, its depth bent the way a wrong focal length
+    bends it (the two walls meet at ~80°): after square_walls they meet
+    square again, and the fit still registers both sides."""
+    from everything2lego.facade import _apply, _dominant_wall, square_walls
+    box = np.zeros((40, 30, 30), bool)
+    box[0:30, 4:26, 4:26] = True
+    fac = _facade_from(box, yaw_deg=40.0, cam_dist_m=12.0, orbit=True)
+    bent = fac.pts.copy()
+    bent[..., 0] *= 0.8                                   # a focal-length error
+    fac = Facade(pts=bent, mask=fac.mask)
+    fit = register(fac, box)
+
+    def angle(f):
+        P = _apply(fit.T, f.points(max_points=20000))
+        n1, c1, _ = _dominant_wall(P, min_share=0.1)
+        rest = P[np.abs((P - c1) @ n1) > 10]
+        n2, _, _ = _dominant_wall(rest, min_share=0.1)
+        return float(np.degrees(np.arccos(abs(n1 @ n2))))
+
+    before = angle(fac)
+    fixed, corrections = square_walls(fac, fit)
+    after = angle(fixed)
+    assert abs(before - 90) > 4, before
+    assert corrections
+    assert abs(after - 90) < 1.5, after

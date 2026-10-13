@@ -19,6 +19,16 @@ _CORNER_LOW_CYCLE = ("+x+z", "+x-z", "-x-z", "-x+z")
 _slope_world_low = slope_world_low
 
 
+
+def _jsonable(o):
+    """numpy scalars and arrays in the scene become plain JSON."""
+    import numpy as np
+    if isinstance(o, np.generic):
+        return o.item()
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    raise TypeError(f"Object of type {o.__class__.__name__} is not JSON serializable")
+
 def _scene_dict(placements: Iterable[Placement]) -> dict:
     pal = palette()
     bricks_out: list[dict] = []
@@ -50,14 +60,14 @@ def write_viewer(placements: Iterable[Placement], out_dir: str | Path, *, report
 
     scene = _scene_dict(list(placements))
     scene["report"] = report or {}
-    (out_dir / "scene.json").write_text(json.dumps(scene, indent=2))
+    (out_dir / "scene.json").write_text(json.dumps(scene, indent=2, default=_jsonable))
 
     src = files("everything2lego.viewer")
     (out_dir / "main.js").write_text(src.joinpath("main.js").read_text())
     license_text = src.joinpath("THIRD_PARTY_LICENSES.txt").read_text()
     (out_dir / "THIRD_PARTY_LICENSES.txt").write_text(license_text)
     html = src.joinpath("index.html").read_text()
-    payload = json.dumps(scene).replace("<", "\\u003c")
+    payload = json.dumps(scene, default=_jsonable).replace("<", "\\u003c")
     html = html.replace("<!-- SCENE -->", f'<script id="scene-data" type="application/json">{payload}</script>')
     html = html.replace("<!-- VIEWER -->", "<!--\n" + license_text + "\n-->\n<script>" + src.joinpath("bundle.js").read_text() + "</script>")
     (out_dir / "index.html").write_text(html)
