@@ -1112,16 +1112,21 @@ def _plan_from_massing(regions: list[Region], target: MeshTarget, occ: np.ndarra
     from .massing import height_map, pitches_and_decks, solid_volume, walls_from_solid
     palette_idx = target.voxel_grid.palette_idx
     solid = solid_volume(occ)
-    facade_fit, facade_changed = None, 0
+    facade_fit, facade_changed, relief = None, 0, None
     if facade is not None:
-        from ..facade import apply_facade, register
+        from ..facade import apply_facade, measured_front, register
         facade_fit = register(facade, solid)
         solid, facade_changed = apply_facade(solid, facade, facade_fit)
         # the shell the recipes read colours from follows the new front
         occ = occ & solid
+        # the unsmoothed front: window reveals are a stud wide and a
+        # few plates deep, below what the smoothing keeps
+        raw_front, _ = measured_front(facade, facade_fit, solid.shape)
+        relief = (facade_fit, raw_front)
     pitches, decks, skin = pitches_and_decks(solid, palette_idx, ground_y=ground_y)
     walls = walls_from_solid(solid, palette_idx, target, ground_y=ground_y, exclude=skin,
-                             detect_openings=detect_openings, opening_delta_e=opening_delta_e)
+                             detect_openings=detect_openings, opening_delta_e=opening_delta_e,
+                             relief=relief)
     wall_colour = None
     if walls:
         vals, counts = np.unique([w.colour for w in walls], return_counts=True)

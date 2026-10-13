@@ -221,6 +221,32 @@ def measured_front(facade: Facade, fit: FacadeFit, grid_shape: tuple[int, int, i
     return front, top
 
 
+def smoothed_front(solid: np.ndarray, facade: Facade, fit: FacadeFit
+                   ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The measured front map, smoothed, plus the skyline and the model's
+    own front map: (front, top, model_front), each in grid units.
+
+    A facade is made of planes; the measurement is made of pixels.  A
+    median over 3 studs x 3 courses keeps a bay or a porch (studs wide,
+    storeys tall) and drops the per-pixel jitter that would otherwise
+    turn every wall into ribbons on neighbouring lines."""
+    from scipy.ndimage import median_filter
+    H, X, Z = solid.shape
+    front, top = measured_front(facade, fit, solid.shape)
+    U = X if fit.axis == "x" else Z
+    model_front = np.full((U, H), np.nan)
+    for u in range(U):
+        for y in range(H):
+            c = solid[y, u, :] if fit.axis == "x" else solid[y, :, u]
+            idx = np.flatnonzero(c)
+            if len(idx):
+                model_front[u, y] = idx.max() + 1 if fit.sign > 0 else idx.min()
+    filled = np.where(np.isnan(front), model_front, front)
+    filled = np.where(np.isnan(filled), np.nanmedian(filled), filled)
+    smooth = median_filter(filled, size=(3, 9), mode="nearest")
+    return np.where(np.isnan(front), np.nan, smooth), top, model_front
+
+
 def apply_facade(solid: np.ndarray, facade: Facade, fit: FacadeFit, *,
                  max_shift: int = 10, min_cells: int = 3) -> tuple[np.ndarray, int]:
     """Override the model's front with the measured one.
@@ -233,9 +259,8 @@ def apply_facade(solid: np.ndarray, facade: Facade, fit: FacadeFit, *,
     old front (a measurement through a window reveal must not slice a
     wall away).  Shifts are capped at `max_shift` studs.  Returns the new
     volume and the number of cells changed."""
-    from scipy.ndimage import median_filter
     H, X, Z = solid.shape
-    front, top = measured_front(facade, fit, solid.shape)
+    front, top, model_front = smoothed_front(solid, facade, fit)
     out = solid.copy()
     U = X if fit.axis == "x" else Z
     D = Z if fit.axis == "x" else X
@@ -243,21 +268,6 @@ def apply_facade(solid: np.ndarray, facade: Facade, fit: FacadeFit, *,
 
     def column(u: int, y: int) -> np.ndarray:
         return out[y, u, :] if fit.axis == "x" else out[y, :, u]
-
-    # A facade is made of planes; the measurement is made of pixels.  A
-    # median over 3 studs x 3 courses keeps a bay or a porch (studs wide,
-    # storeys tall) and drops the per-pixel jitter that would otherwise
-    # turn every wall into ribbons on neighbouring lines.
-    model_front = np.full((U, H), np.nan)
-    for u in range(U):
-        for y in range(H):
-            idx = np.flatnonzero(column(u, y))
-            if len(idx):
-                model_front[u, y] = idx.max() + 1 if fit.sign > 0 else idx.min()
-    filled = np.where(np.isnan(front), model_front, front)
-    filled = np.where(np.isnan(filled), np.nanmedian(filled), filled)
-    smooth = median_filter(filled, size=(3, 9), mode="nearest")
-    front = np.where(np.isnan(front), np.nan, smooth)
 
     # a column's measured top is the max over a small neighbourhood (a
     # single sampled pixel column misses the apex of a thin feature)
@@ -308,3 +318,34 @@ def apply_facade(solid: np.ndarray, facade: Facade, fit: FacadeFit, *,
                     c[have:want] = False
             changed += abs(want - have)
     return out, changed
+
+
+def wall_recess(fit: FacadeFit, raw_front: np.ndarray, *, axis_x: bool, other: int,
+                origin: int, length: int, y0: int, height: int,
+                min_depth: float = 0.6, max_depth: float = 2.5) -> Optional[np.ndarray]:
+    """For a wall on the camera side, the (length, height) mask of its
+    cells that the UNSMOOTHED measurement puts between `min_depth` and
+    `max_depth` studs behind the wall's face — window reveals, a recessed
+    door; deeper is not a reveal but something else behind the wall line
+    (the roof above the eave, the gap beside a bay).  None when the wall
+    is not on the measured side or not at the measured front (its face
+    more than a stud off the measurement's median there)."""
+    if axis_x != (fit.axis == "x"):
+        return None
+    U, H = raw_front.shape
+    face = other + 1 if fit.sign > 0 else other
+    us = np.arange(origin, origin + length)
+    ys = np.arange(y0, y0 + height)
+    ok_u = (us >= 0) & (us < U)
+    ok_y = (ys >= 0) & (ys < H)
+    if not ok_u.any() or not ok_y.any():
+        return None
+    sub = np.full((length, height), np.nan)
+    sub[np.ix_(ok_u, ok_y)] = raw_front[np.ix_(us[ok_u], ys[ok_y])]
+    if np.isfinite(sub).mean() < 0.3:
+        return None
+    med = np.nanmedian(sub)
+    if abs(med - face) > 1.0:
+        return None
+    depth = np.nan_to_num((face - sub) if fit.sign > 0 else (sub - face), nan=0.0)
+    return (depth >= min_depth) & (depth <= max_depth)

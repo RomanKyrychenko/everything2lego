@@ -247,6 +247,41 @@ def find_openings(region: PlanarRegion, target: MeshTarget, *,
     return out
 
 
+def openings_from_relief(frame: WallFrame, recess: np.ndarray, colour: int, *,
+                         min_fill: float = 0.55) -> list[Placement]:
+    """Window frames and doors for the RECESSED rectangles of a wall — the
+    reveals a measured front shows behind the wall plane.  `recess` is a
+    (length, height) mask of the wall's cells that lie at least a part of
+    a stud behind its face.  Same rectangle peeling, equalising and part
+    snapping as the colour path, so a window found by depth and one found
+    by colour come out as the same part on the same course."""
+    if frame.length < 2 or frame.height < 2 * COURSE or recess.sum() < 4:
+        return []
+    labels, n = _label(recess)
+    parts = {p.ldraw: p for p in full_catalog()}
+    out: list[Placement] = []
+    taken = np.zeros_like(recess)
+    patches = []
+    for u0, u1, y0, y1 in (box for k in range(1, n + 1) for box in rectangles(labels == k)):
+        width, height = u1 - u0, y1 - y0
+        if width < 2 or height < 2 * COURSE or recess[u0:u1, y0:y1].sum() < min_fill * width * height:
+            continue
+        patches.append(((u0 + u1) / 2, (y0 + y1) / 2, width, height, y0, colour))
+    for cu, cy, width, height, y0, col in equalise(patches, length=frame.length):
+        snapped = _snap(width, height, y0, frame.height)
+        if snapped is None:
+            continue
+        (w, h), ldraw = snapped
+        u = max(0, min(frame.length - w, int(round(cu - w / 2))))
+        y = int(round((cy - h / 2) / COURSE)) * COURSE
+        y = max(0, min(frame.height - h, y))
+        if taken[u:u + w, y:y + h].any():
+            continue
+        taken[u:u + w, y:y + h] = True
+        out.append(frame.placement(parts[ldraw], col, u, y, w))
+    return out
+
+
 Patch = tuple[float, float, int, int, int, int]   # centre u, centre y, width, height, bottom, colour
 
 

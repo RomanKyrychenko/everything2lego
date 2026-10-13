@@ -478,10 +478,35 @@ def drop_wall_supports(walls: list[WallSpec], solid: np.ndarray, ground_y: int,
     return added
 
 
+def _opening_colour(palette_idx: np.ndarray, frame: WallFrame) -> int:
+    """The colour of a window or door on this wall: the darkest colour the
+    wall's own cells carry, if it covers a few percent of them (frames
+    read dark against a facade), else the first palette entry."""
+    H, X, Z = palette_idx.shape
+    if frame.axis_x:
+        cells = palette_idx[frame.y0:frame.y0 + frame.height,
+                            max(0, frame.origin):frame.origin + frame.length, frame.other] \
+            if 0 <= frame.other < Z else np.array([])
+    else:
+        cells = palette_idx[frame.y0:frame.y0 + frame.height, frame.other,
+                            max(0, frame.origin):frame.origin + frame.length] \
+            if 0 <= frame.other < X else np.array([])
+    vals = cells[cells >= 0] if cells.size else cells
+    if vals.size == 0:
+        return 0
+    from ..colors import palette as _palette
+    pal = _palette()
+    counts = Counter(vals.tolist())
+    total = sum(counts.values())
+    dark = sorted((sum(pal[c].rgb) / 3, c) for c, n in counts.items()
+                  if n >= 0.03 * total and 0 <= c < len(pal))
+    return int(dark[0][1]) if dark else int(counts.most_common(1)[0][0])
+
+
 def walls_from_solid(solid: np.ndarray, palette_idx: np.ndarray, target: MeshTarget, *,
                      ground_y: int, exclude: Optional[np.ndarray] = None,
                      detect_openings: bool = True, opening_delta_e: float = 22.0,
-                     ) -> list[WallSpec]:
+                     relief=None) -> list[WallSpec]:
     """One WallSpec per plane line (axis, coordinate) holding every course
     in which the plan has a boundary run there.  A course counts where at
     least two of its three plates are solid.  Cells in `exclude` (a roof's
@@ -545,6 +570,19 @@ def walls_from_solid(solid: np.ndarray, palette_idx: np.ndarray, target: MeshTar
         region = _synthetic_region(frame, target, rgb)
         openings: list[Placement] = []
         boxes = target.metadata.get("forced_openings") or []
+        measured = None
+        if relief is not None:
+            # a measured front: openings are the reveals behind the face
+            from ..facade import wall_recess
+            from .openings import openings_from_relief
+            fit, raw_front = relief
+            recess = wall_recess(fit, raw_front, axis_x=axis_x, other=other, origin=origin,
+                                 length=frame.length, y0=frame.y0, height=frame.height)
+            if recess is not None:
+                # only where the wall is actually built (its courses)
+                built = np.repeat(sub, COURSE, axis=1)[:, :frame.height]
+                recess &= built
+                measured = openings_from_relief(frame, recess, _opening_colour(palette_idx, frame))
         try:
             if boxes:
                 openings = forced_openings(region, target, frame, boxes)
@@ -552,6 +590,19 @@ def walls_from_solid(solid: np.ndarray, palette_idx: np.ndarray, target: MeshTar
                 openings = find_openings(region, target, frame=frame, min_delta_e=opening_delta_e)
         except Exception:      # opening detection is a nicety; a wall without is still a wall
             openings = []
+        if measured is not None:
+            # Depth is the authority where it speaks (a reveal is a reveal);
+            # colour fills in the flush openings depth cannot see (a bay's
+            # glazing), where it does not collide with a measured one.
+            def box(p):
+                return (p.x_stud, p.x_stud + p.w_world, p.z_stud, p.z_stud + p.d_world,
+                        p.y_plate, p.y_plate + p.part.height_units)
+
+            def collide(a, b):
+                return not (a[1] <= b[0] or b[1] <= a[0] or a[3] <= b[2] or b[3] <= a[2]
+                            or a[5] <= b[4] or b[5] <= a[4])
+            extra = [p for p in openings if not any(collide(box(p), box(q)) for q in measured)]
+            openings = measured + extra
         reserved = reserved_cells(openings, frame) if openings else None
         walls.append(WallSpec(frame=frame, colour=int(colour), mask=sub, openings=openings,
                               reserved=reserved, region=region))

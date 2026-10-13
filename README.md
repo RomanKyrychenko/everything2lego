@@ -211,6 +211,10 @@ column by column.  On the house photo the registration lands at 10 mm RMS
 with 97 % inliers; the measured front agrees with the generator's within a
 stud, but the skyline doesn't: Hunyuan had stretched the tower ~20 % above
 the gable peaks, and the fused model has it at the photographed height.
+Openings on the measured side come from the same data: a window or door
+is a reveal — cells 0.6–2.5 studs behind the wall's face — peeled into
+rectangles and snapped to frame and door parts exactly like the colour
+path; colour still fills in flush glazing (a bay) where depth sees nothing.
 
 Set mode runs *without* `--soft-train` (the trainer's discretiser re-packs
 courses and undoes the bonding and slopes).  On a clean gable-house mesh it
