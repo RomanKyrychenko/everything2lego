@@ -1580,17 +1580,32 @@ def photo(
     py = sys.executable
     clean = out / "photo_clean.png"
     matte = out / "photo_clean.rgba.png"
-    _stage("1/6 matting", [py, _TOOLS / "remove_bg.py", image, clean], log=log)
+    ma_py = os.environ.get("MAPANYTHING_PY") if facade else None
+    if ma_py and not Path(ma_py).exists():
+        ma_py = None
+    raw_depth: Optional[Path] = None
+    if ma_py and facade_file is None:
+        # Measure the whole photo first: the depth refines the matte (a
+        # dark object's lit windows and shadowed base come back), and the
+        # same points become the facade once the matte is known.
+        raw_depth = out / "facade_raw.npz"
+        _stage("0/6 depth of the photo (MapAnything)",
+               [ma_py, _TOOLS / "facade_depth.py", image, raw_depth, "--raw"],
+               env={"OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS", "4")}, log=log)
+    _stage("1/6 matting", [py, _TOOLS / "remove_bg.py", image, clean]
+           + ([raw_depth] if raw_depth else []), log=log)
 
     mesh_dir = out / "mesh"
     if mesh is None:
         env = {"HUNYUAN3D_REPO": os.environ.get("HUNYUAN3D_REPO", "tencent/Hunyuan3D-2mini"),
                "HUNYUAN3D_SUBFOLDER": os.environ.get("HUNYUAN3D_SUBFOLDER", "hunyuan3d-dit-v2-mini"),
                "PYTORCH_ENABLE_MPS_FALLBACK": "1"}
+        # (the hunyuan command also packs a quick voxel model and exits 1
+        # when that wants structural review — the mesh is what we need)
         _stage("2/6 Hunyuan3D reconstruction", [
             py, "-m", "everything2lego.cli", "hunyuan", clean, "--out", mesh_dir,
             "--resolution", resolution, "--steps", steps, "--guidance", guidance,
-            "--no-delight", "--max-studs", 24], env=env, log=log)
+            "--no-delight", "--max-studs", 24], env=env, log=log, tolerate=(1,))
         mesh = mesh_dir / "model.glb"
         if not mesh.exists():
             raise typer.BadParameter(f"Hunyuan did not write {mesh}")
@@ -1605,17 +1620,20 @@ def photo(
            [py, _TOOLS / "quantise_colors.py", dec, q, colors], log=log)
 
     facade_npz: Optional[Path] = facade_file
-    if facade and facade_npz is None:
-        ma_py = os.environ.get("MAPANYTHING_PY")
-        if ma_py and Path(ma_py).exists():
-            facade_npz = out / "facade.npz"
-            src = matte if matte.exists() else clean
-            _stage("5/6 facade measurement (MapAnything)",
-                   [ma_py, _TOOLS / "facade_depth.py", src, facade_npz],
-                   env={"OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS", "4")}, log=log)
-        else:
-            console.print("[yellow]5/6 facade skipped: set MAPANYTHING_PY to MapAnything's venv python "
-                          "to measure the photographed side[/yellow]")
+    if facade and facade_npz is None and raw_depth is not None and matte.exists():
+        # the facade = the photo's points inside the refined matte
+        console.rule("[bold]5/6 facade[/bold] (photo depth inside the matte)")
+        from PIL import Image as _Image
+        d = np.load(raw_depth)
+        pts = np.asarray(d["pts3d"]).squeeze()
+        Hp, Wp = pts.shape[:2]
+        alpha = np.asarray(_Image.open(matte).convert("RGBA").resize((Wp, Hp), _Image.BILINEAR))[..., 3] > 128
+        from scipy.ndimage import binary_erosion
+        facade_npz = out / "facade.npz"
+        np.savez(facade_npz, pts3d=pts.astype(np.float32), mask=binary_erosion(alpha, iterations=2))
+    elif facade and facade_npz is None:
+        console.print("[yellow]5/6 facade skipped: set MAPANYTHING_PY to MapAnything's venv python "
+                      "to measure the photographed side[/yellow]")
     else:
         console.rule("[bold]5/6 facade[/bold] " + ("(reusing %s)" % facade_npz if facade_npz else "(off)"))
 

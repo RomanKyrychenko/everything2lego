@@ -31,9 +31,13 @@ def main(image_path: str, out: str) -> None:
     from mapanything.utils.image import load_images
 
     t0 = time.time()
+    raw = "--raw" in sys.argv          # the whole photo: no matte yet, mask = everything
     img = Image.open(image_path).convert("RGBA")
-    grey = Image.new("RGBA", img.size, (128, 128, 128, 255))
-    flat = Image.alpha_composite(grey, img).convert("RGB")
+    if raw:
+        flat = img.convert("RGB")
+    else:
+        grey = Image.new("RGBA", img.size, (128, 128, 128, 255))
+        flat = Image.alpha_composite(grey, img).convert("RGB")
     work = os.path.join(os.path.dirname(os.path.abspath(out)) or ".", "_facade_in")
     os.makedirs(work, exist_ok=True)
     flat.save(os.path.join(work, "view.png"))
@@ -60,13 +64,16 @@ def main(image_path: str, out: str) -> None:
     im = np.squeeze(im)
     if im.shape[0] == 3:
         im = np.moveaxis(im, 0, -1)
-    flat_px = np.round(im.reshape(-1, 3), 2)
-    vals, counts = np.unique(flat_px, axis=0, return_counts=True)
-    bg = vals[np.argmax(counts)]
-    mask = ~(np.abs(np.round(im, 2) - bg) < 0.03).all(axis=-1)
-    from scipy.ndimage import binary_erosion
-    mask = binary_erosion(mask, iterations=2)
-    np.savez(out, pts3d=pts.astype(np.float32), mask=mask)
+    if raw:
+        mask = np.ones(pts.shape[:2], dtype=bool)
+    else:
+        flat_px = np.round(im.reshape(-1, 3), 2)
+        vals, counts = np.unique(flat_px, axis=0, return_counts=True)
+        bg = vals[np.argmax(counts)]
+        mask = ~(np.abs(np.round(im, 2) - bg) < 0.03).all(axis=-1)
+        from scipy.ndimage import binary_erosion
+        mask = binary_erosion(mask, iterations=2)
+    np.savez(out, pts3d=pts.astype(np.float32), mask=mask, image_size=np.array(img.size))
     print("saved", out, "mask pixels", int(mask.sum()), "of", mask.size)
 
 

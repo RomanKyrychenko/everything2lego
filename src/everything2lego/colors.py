@@ -19,12 +19,21 @@ class LegoColor:
     rgb: tuple[int, int, int]
 
 
+def _buildable(c: dict) -> bool:
+    """Only colours a set is made of take part in nearest-colour matching:
+    the catalogue placeholder 9999 "[No Color/Any Color]" (whose swatch is
+    near-black and used to win every black object) and the pearl/chrome
+    finishes (rare, and never what a photo's grey means) are left out."""
+    name = c["name"]
+    return c["code"] != 9999 and not any(k in name for k in ("Pearl", "Chrome", "Metallic", "Trans"))
+
+
 @lru_cache(maxsize=1)
 def palette() -> tuple[LegoColor, ...]:
     raw = json.loads(files("everything2lego.data").joinpath("ldraw_colors.json").read_text())
     return tuple(
         LegoColor(code=c["code"], bl=c["bl"], name=c["name"], rgb=tuple(c["rgb"]))
-        for c in raw["colors"]
+        for c in raw["colors"] if _buildable(c)
     )
 
 

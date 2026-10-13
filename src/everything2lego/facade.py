@@ -247,8 +247,12 @@ def smoothed_front(solid: np.ndarray, facade: Facade, fit: FacadeFit
     return np.where(np.isnan(front), np.nan, smooth), top, model_front
 
 
+SKYLINE_MIN_INLIERS = 0.9   # cut a generator's skyline only on a registration this good
+
+
 def apply_facade(solid: np.ndarray, facade: Facade, fit: FacadeFit, *,
-                 max_shift: int = 10, min_cells: int = 3) -> tuple[np.ndarray, int]:
+                 max_shift: int = 10, min_cells: int = 3,
+                 skyline: Optional[bool] = None) -> tuple[np.ndarray, int]:
     """Override the model's front with the measured one.
 
     Skyline first: columns are cut down to the measured top (a generator
@@ -269,6 +273,12 @@ def apply_facade(solid: np.ndarray, facade: Facade, fit: FacadeFit, *,
     def column(u: int, y: int) -> np.ndarray:
         return out[y, u, :] if fit.axis == "x" else out[y, :, u]
 
+    # The skyline is cut only on a trustworthy registration: a matte with
+    # holes gives a measured top below the real one, and cutting to it
+    # would flatten a roof into a terrace.  The front relief is local and
+    # self-correcting; the skyline is not.
+    if skyline is None:
+        skyline = fit.inliers >= SKYLINE_MIN_INLIERS
     # a column's measured top is the max over a small neighbourhood (a
     # single sampled pixel column misses the apex of a thin feature)
     top_s = top.copy()
@@ -277,7 +287,7 @@ def apply_facade(solid: np.ndarray, facade: Facade, fit: FacadeFit, *,
         vals = top[lo:hi]
         if np.isfinite(vals).any():
             top_s[u] = np.nanmax(vals)
-    for u in range(U):
+    for u in range(U if skyline else 0):
         if np.isnan(top_s[u]):
             continue
         t = int(np.clip(round(top_s[u]), 0, H - 1))

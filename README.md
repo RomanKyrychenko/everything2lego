@@ -102,6 +102,14 @@ Each stage is a subprocess logged to `out_photo/photo.log`; the result is
 A figure (anything that isn't building-shaped) gets a stand; `--no-stand`
 to leave it off.
 
+With MapAnything available the photo is measured *first* and its depth
+refines the matte: a saliency net drops a dark object's lit windows and
+shadowed base, but those pixels sit at the object's depth inside its
+outline and are given back, while a table in front or trees behind stay
+out.  The same points become the facade measurement once the matte is
+known, so MapAnything runs once.  The skyline is only cut on a
+registration with ≥90 % inliers; a weak one still corrects the front.
+
 ### Photo → 3D → LEGO, step by step
 
 ```bash
