@@ -1119,6 +1119,87 @@ def plan_set(regions: list[Region], target: MeshTarget, *,
     return plan
 
 
+def _wall_face_cells(w: WallSpec, solid: np.ndarray) -> np.ndarray:
+    """Grid (x, y, z) points on a wall's outward face, one per (column,
+    plate) it builds, on the side of the line that is open air."""
+    f = w.frame
+    H, X, Z = solid.shape
+    mask = w.mask if w.mask is not None else np.ones((f.length, f.height // COURSE), bool)
+    us, cs = np.nonzero(mask)
+    if len(us) == 0:
+        return np.zeros((0, 3))
+    out = []
+    for u, c in zip(f.origin + us, cs):
+        for dy in range(COURSE):
+            y = int(min(H - 1, f.y0 + c * COURSE + dy))
+            if f.axis_x:
+                x, z = int(u), int(f.other)
+                plus = z + 1 >= Z or not solid[y, x, z + 1]
+                out.append((x + 0.5, y + 0.5, z + (0.9 if plus else 0.1)))
+            else:
+                x, z = int(f.other), int(u)
+                plus = x + 1 >= X or not solid[y, x + 1, z]
+                out.append((x + (0.9 if plus else 0.1), y + 0.5, z + 0.5))
+    return np.array(out, np.float64)
+
+
+def _colour_walls_from_photo(walls: list[WallSpec], solid: np.ndarray, facade, fit,
+                             *, seen_share: float = 0.3) -> None:
+    """Walls take their colour from the photo where it shows them, as the
+    dominant material of what it shows (not a vote of snapped cells).  A
+    single photo shows one or two sides; the generator inpainted the
+    rest, usually from whatever was nearest — roof slate, shadow.  A set
+    designer carries the photographed wall material around the building:
+    the walls the photo does not show take the dominant material of all
+    the walls it does."""
+    from ..colors import dominant_colour
+    from ..facade import _blurred_photo, camera_intrinsics, seen_rgb
+    K = camera_intrinsics(facade)
+    if K is None or facade.rgb is None or not walls:
+        return
+    photo = _blurred_photo(facade, fit, K)
+    samples: list[np.ndarray] = []
+    unseen: list[WallSpec] = []
+    for w in walls:
+        cells = _wall_face_cells(w, solid)
+        if len(cells) == 0:
+            continue
+        seen, rgb = seen_rgb(cells, facade, fit, K, photo=photo)
+        if seen.mean() >= seen_share and len(rgb) >= 6:
+            w.colour = dominant_colour(rgb)
+            samples.append(rgb)
+        else:
+            unseen.append(w)
+    if not samples:
+        return
+    body = dominant_colour(np.vstack(samples))
+    for w in unseen:
+        w.colour = body
+
+
+def _seen_roof_colour(pitches: list[PitchSpec], solid: np.ndarray, facade, fit) -> Optional[int]:
+    """The dominant material of the roof cells the photo shows."""
+    from ..colors import dominant_colour
+    from ..facade import camera_intrinsics, seen_rgb
+    from .massing import height_map
+    K = camera_intrinsics(facade)
+    if K is None or facade.rgb is None:
+        return None
+    top = height_map(solid)
+    cells = []
+    for p in pitches:
+        if p.cells is None or len(p.cells) == 0:
+            continue
+        xs, zs = p.cells[:, 0], p.cells[:, 1]
+        ys = top[xs, zs]
+        ok = ys >= 0
+        cells.append(np.c_[xs[ok] + 0.5, ys[ok] + 0.9, zs[ok] + 0.5])
+    if not cells:
+        return None
+    _, rgb = seen_rgb(np.vstack(cells), facade, fit, K, tol_studs=1.5)
+    return dominant_colour(rgb) if len(rgb) >= 6 else None
+
+
 def _plan_from_massing(regions: list[Region], target: MeshTarget, occ: np.ndarray, ground_y: int,
                        *, detect_openings: bool, opening_delta_e: float, facade=None,
                        stand: bool = True, stand_colour: Optional[int] = None) -> SetPlan:
@@ -1127,11 +1208,28 @@ def _plan_from_massing(regions: list[Region], target: MeshTarget, occ: np.ndarra
     solid = solid_volume(occ)
     facade_fit, facade_changed, relief = None, 0, None
     if facade is not None:
-        from ..facade import apply_facade, measured_front, register
+        from scipy.ndimage import binary_fill_holes
+        from ..facade import carve_facade, measured_front, register
         facade_fit = register(facade, solid)
-        solid, facade_changed = apply_facade(solid, facade, facade_fit)
+        solid, facade_changed = carve_facade(solid, facade, facade_fit)
+        # cavities the carving opened are closed again; the leaky-shell
+        # heuristics are NOT re-run, they would undo what the rays cut
+        solid = binary_fill_holes(solid)
         # the shell the recipes read colours from follows the new front
         occ = occ & solid
+        # cells the carve filled (a front brought forward) or exposed (the
+        # inside of a cut tower) carry no colour: they take the colour of
+        # the nearest coloured cell — the surface they replaced
+        from scipy.ndimage import distance_transform_edt
+        known = palette_idx >= 0
+        if known.any() and (solid & ~known).any():
+            _, (iy, ix, iz) = distance_transform_edt(~known, return_indices=True)
+            palette_idx = palette_idx.copy()
+            fill = solid & ~known
+            palette_idx[fill] = palette_idx[iy[fill], ix[fill], iz[fill]]
+        # and where the photo sees the model, the photo's own colours
+        from ..facade import photo_colours
+        palette_idx, _ = photo_colours(solid, palette_idx, facade, facade_fit)
         # the unsmoothed front: window reveals are a stud wide and a
         # few plates deep, below what the smoothing keeps
         raw_front, _ = measured_front(facade, facade_fit, solid.shape)
@@ -1140,6 +1238,8 @@ def _plan_from_massing(regions: list[Region], target: MeshTarget, occ: np.ndarra
     walls = walls_from_solid(solid, palette_idx, target, ground_y=ground_y, exclude=skin,
                              detect_openings=detect_openings, opening_delta_e=opening_delta_e,
                              relief=relief)
+    if facade_fit is not None:
+        _colour_walls_from_photo(walls, solid, facade, facade_fit)
     wall_colour = None
     if walls:
         vals, counts = np.unique([w.colour for w in walls], return_counts=True)
@@ -1178,6 +1278,12 @@ def _plan_from_massing(regions: list[Region], target: MeshTarget, occ: np.ndarra
         for p in pitches:
             weights[p.colour] = weights.get(p.colour, 0.0) + p.run * (p.span[1] - p.span[0])
         roof_colour = max(weights, key=weights.get)
+        if facade_fit is not None:
+            # what the photo shows of the roof decides its colour; the
+            # rest of the reconstruction's roof was inpainted
+            seen_roof = _seen_roof_colour(pitches, solid, facade, facade_fit)
+            if seen_roof is not None:
+                roof_colour = seen_roof
         for p in pitches:
             p.colour = roof_colour
     seat_pitches_on_walls(pitches, walls, ground_y=ground_y)

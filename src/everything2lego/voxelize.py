@@ -60,13 +60,60 @@ def dominant_yaw(mesh: trimesh.Trimesh, *, min_vertical: float = 0.9) -> float:
     return float(np.angle(mean) / 4.0)
 
 
+def outline_yaw(mesh: trimesh.Trimesh, *, samples: int = 40000, max_degrees: float = 44.0) -> float:
+    """Yaw (radians) of the object's walls from its PLAN rather than its
+    face normals: the heading at which the mid-height surface samples'
+    axis-aligned bounding rectangle has the least area (a square building
+    turned off the grid needs a bigger box).  Geometry only — a dark,
+    textured facade whose normals scatter still has a square plan.
+    Returns the angle to turn the mesh by (so that applying it squares
+    the plan); 0 when no heading is clearly better."""
+    pts, _ = trimesh.sample.sample_surface(mesh, samples)
+    pts = np.asarray(pts)
+    y = pts[:, 1]
+    lo, hi = np.percentile(y, 20), np.percentile(y, 70)   # walls, not roof or ground
+    xz = pts[(y >= lo) & (y <= hi)][:, [0, 2]]
+    if len(xz) < 500:
+        return 0.0
+    # robust extents: trim 1% each side so a stray sample cannot set the box
+    def area(theta: float) -> float:
+        c, s = np.cos(theta), np.sin(theta)
+        r = xz @ np.array([[c, -s], [s, c]])
+        lo_, hi_ = np.percentile(r, 1, axis=0), np.percentile(r, 99, axis=0)
+        return float(np.prod(hi_ - lo_))
+    coarse = np.radians(np.arange(-max_degrees, max_degrees + 0.5, 1.0))
+    areas = np.array([area(t) for t in coarse])
+    best = coarse[int(np.argmin(areas))]
+    fine = best + np.radians(np.arange(-1.0, 1.01, 0.1))
+    best = fine[int(np.argmin([area(t) for t in fine]))]
+    # no clear preference (a round plan): the best box is barely smaller
+    if areas.min() > 0.97 * np.median(areas):
+        return 0.0
+    # rotating the POINTS by +best squared them; the mesh turns the same way
+    return float(best)
+
+
 def align_to_axes(mesh: trimesh.Trimesh, *, max_degrees: float = 44.0) -> trimesh.Trimesh:
     """Turn the mesh about the vertical axis so its walls run along x and
     z.  A photo-derived mesh is rarely square to the camera, and a wall a
     few degrees off the grid voxelises as a staircase; squaring it first
     gives straight walls and lets the region detector see one plane per
-    wall.  Returns a rotated copy; the original is left alone."""
-    yaw = dominant_yaw(mesh)
+    wall.  The heading comes from the plan outline (robust to textured
+    facades), with the face-normal estimate as the fallback when the
+    outline has none.  Returns a rotated copy; the original is left alone."""
+    # coarse heading from the plan (good to a couple of degrees, never
+    # fooled by scattered normals) ...
+    coarse = outline_yaw(mesh)
+    if abs(np.degrees(coarse)) < 1.5:
+        coarse = 0.0
+    turned = mesh
+    if coarse:
+        turned = mesh.copy()
+        turned.apply_transform(trimesh.transformations.rotation_matrix(coarse, [0, 1, 0]))
+    # ... refined by the walls' normals, which are exact on clean walls,
+    # trusted only near the coarse heading
+    fine = dominant_yaw(turned)
+    yaw = coarse + (fine if abs(np.degrees(fine)) <= 5.0 or not coarse else 0.0)
     if abs(np.degrees(yaw)) < 0.05 or abs(np.degrees(yaw)) > max_degrees:
         return mesh
     aligned = mesh.copy()

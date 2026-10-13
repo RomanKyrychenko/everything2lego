@@ -59,6 +59,8 @@ def main(image_path: str, out: str) -> None:
     print("inference %.0fs" % (time.time() - t0), flush=True)
 
     pts = preds[0]["pts3d"][0].detach().cpu().numpy().squeeze()
+    conf = preds[0].get("conf")
+    conf = None if conf is None else conf[0].detach().cpu().numpy().squeeze().astype(np.float32)
     im = views[0]["img"]
     im = im.detach().cpu().numpy() if hasattr(im, "detach") else np.asarray(im)
     im = np.squeeze(im)
@@ -73,7 +75,8 @@ def main(image_path: str, out: str) -> None:
         mask = ~(np.abs(np.round(im, 2) - bg) < 0.03).all(axis=-1)
         from scipy.ndimage import binary_erosion
         mask = binary_erosion(mask, iterations=2)
-    np.savez(out, pts3d=pts.astype(np.float32), mask=mask, image_size=np.array(img.size))
+    extra = {} if conf is None else {"conf": conf}
+    np.savez(out, pts3d=pts.astype(np.float32), mask=mask, image_size=np.array(img.size), **extra)
     print("saved", out, "mask pixels", int(mask.sum()), "of", mask.size)
 
 

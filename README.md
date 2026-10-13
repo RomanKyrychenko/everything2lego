@@ -247,13 +247,34 @@ metric depth model gives the photographed side exactly.  `tools/
 facade_depth.py` runs [MapAnything](https://github.com/facebookresearch/map-anything)
 (its own environment; Apache checkpoint; ~60 s on CPU) on the matted
 photo and writes the metric point map of the object.  `semantic --set-mode
---facade facade.npz` then registers it to the model by ICP in isotropic
-millimetres — trying every side of the model, so it also learns which way
-the photo was taken — and overrides the model's front surface and skyline
-column by column.  On the house photo the registration lands at 10 mm RMS
-with 97 % inliers; the measured front agrees with the generator's within a
-stud, but the skyline doesn't: Hunyuan had stretched the tower ~20 % above
-the gable peaks, and the fused model has it at the photographed height.
+--facade facade.npz` then registers it to the model and carves the model
+with it.
+
+*Registration* tries the four headings the photo could have been taken
+from (a camera is right-handed, so never a reflection) and runs ICP in
+isotropic millimetres against the model's whole skin (cell faces, not
+centres), with the scale pinned by the object's measured width.  The
+dominant measured wall is then squared to the grid and re-seated in depth
+by its own points only, so a part of the front the generator misplaced
+cannot drag the rest.  The photo's outline fixes what surface matching
+leaves loose: the offsets and scale are refined to maximise the overlap
+of the model's projected silhouette with the matte.  The heading that
+wins is the one whose silhouette *and* relief (z-buffer depth vs the
+measured depth) both agree with the photo.
+
+*Carving* projects every voxel into the photo through the registered
+pinhole (its intrinsics read off the point map).  A cell in front of the
+measured surface is emptied; one just behind it, with model matter in
+reach, is filled (a sunken front comes forward); one on a background or
+sky pixel is emptied (the sky above a too-tall tower cuts it, whatever
+depth the depth model hallucinated for the sky); one hidden behind the
+surface but higher than the photographed top of its column is emptied
+too (the visible height is the height).  Matter the carve cuts loose and
+that no longer reaches the ground goes with it.  Background pixels are
+only trusted on a registration with ≥90 % inliers.  On the house photo
+the registration lands at ~9 mm RMS, 98 % inliers, silhouette IoU 0.85
+→ 0.88 after carving; Hunyuan's tower, stretched ~20 % above the gable
+peaks, comes down to the photographed height.
 Openings on the measured side come from the same data: a window or door
 is a reveal — cells 0.6–2.5 studs behind the wall's face — peeled into
 rectangles and snapped to frame and door parts exactly like the colour

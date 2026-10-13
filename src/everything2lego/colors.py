@@ -201,3 +201,27 @@ def reduce_palette(palette_idx: np.ndarray, k: int) -> np.ndarray:
             if src != target:
                 out[palette_idx == src] = target
     return out
+
+
+def dominant_colour(rgb: np.ndarray, *, neutral_chroma: float = 6.0) -> int:
+    """The palette colour of the dominant MATERIAL in a set of (N, 3)
+    uint8 photo colours.  A material keeps its hue in sun and shade while
+    its lightness and saturation swing with the light, so samples are
+    pooled by hue family — neutral (chroma below `neutral_chroma`) or one
+    of six 60° hue sectors — the biggest family wins, and its mean colour
+    is snapped to the palette with lightness at half weight.  Snapping
+    first and voting after splits one material (sunlit and shaded brick)
+    between palette entries and lets a minority (a stone base, window
+    glass, trims) win the vote."""
+    rgb = np.asarray(rgb, np.uint8).reshape(-1, 3)
+    if len(rgb) == 0:
+        return 0
+    lab = _rgb_to_lab(rgb.astype(np.float32) / 255.0)
+    chroma = np.hypot(lab[:, 1], lab[:, 2])
+    hue = (np.degrees(np.arctan2(lab[:, 2], lab[:, 1])) + 360.0) % 360.0
+    family = np.where(chroma < neutral_chroma, 6, (hue // 60).astype(int))
+    best = int(np.argmax(np.bincount(family, minlength=7)))
+    centre = lab[family == best].mean(axis=0)
+    w = np.array([0.5, 1.0, 1.0], np.float32)
+    pal = _palette_lab()
+    return int(np.argmin((((pal - centre) * w) ** 2).sum(axis=1)))

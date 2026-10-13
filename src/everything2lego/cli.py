@@ -1630,7 +1630,10 @@ def photo(
         alpha = np.asarray(_Image.open(matte).convert("RGBA").resize((Wp, Hp), _Image.BILINEAR))[..., 3] > 128
         from scipy.ndimage import binary_erosion
         facade_npz = out / "facade.npz"
-        np.savez(facade_npz, pts3d=pts.astype(np.float32), mask=binary_erosion(alpha, iterations=2))
+        extra = {"conf": d["conf"]} if "conf" in d else {}
+        # the photo itself, on the point map's grid: the colours of what it sees
+        extra["rgb"] = np.asarray(_Image.open(image).convert("RGB").resize((Wp, Hp), _Image.BILINEAR))
+        np.savez(facade_npz, pts3d=pts.astype(np.float32), mask=binary_erosion(alpha, iterations=2), **extra)
     elif facade and facade_npz is None:
         console.print("[yellow]5/6 facade skipped: set MAPANYTHING_PY to MapAnything's venv python "
                       "to measure the photographed side[/yellow]")
