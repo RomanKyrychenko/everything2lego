@@ -72,22 +72,23 @@ def test_different_colours_are_never_merged():
 
 
 def test_tall_pairs_are_rebuilt_as_staggered_courses():
-    a = place("30144.dat", 0, 0, 0)                     # Panel 1x4x6, 18 plates
-    b = place("30144.dat", 4, 0, 0)
+    a = place("2454.dat", 0, 0, 0)                      # Brick 1x2x5, 15 plates
+    b = place("2454.dat", 2, 0, 0)
     before = [a, b]
     assert stability.check(before).running_seam_count == 1
     after, stats = bonding.bond(before)
     assert stats["rebuilt"] == 1 and stability.check(after).running_seam_count == 0
     assert colour_cells(after) == colour_cells(before)
     assert all(p.part.shape == "brick" for p in after)
-    assert len(after) == 6                              # six 1x8 bricks
+    assert len(after) == 5                              # five 1x4 bricks
 
 
 def test_assemble_bonds_a_solid_block():
     grid = np.full((27, 12, 8), 4, dtype=np.int16)
     result = pipeline.assemble(pipeline.VoxelGrid(palette_idx=grid, metadata={}))
     bond = result.report["bonding"]
-    assert bond["running_seams_after"] < bond["running_seams_before"]
+    assert bond["running_seams_after"] <= bond["running_seams_before"]
+    assert bond["running_seam_layers_after"] < bond["running_seam_layers_before"]
     assert result.report["running_seams"] == bond["running_seams_after"]
     assert result.report["geometrically_connected"]
     assert not stability.check(result.placements).overlaps

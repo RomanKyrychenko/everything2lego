@@ -167,11 +167,10 @@ def _mark_covered(shape_yxz: tuple[int, int, int],
 # Brick promotion (3-plate stacks)
 # ---------------------------------------------------------------------------
 
-# Interior structural bricks.  brick_tall variants (2454, 30360) are 15
+# Interior structural bricks.  brick_tall (2454) is 15
 # plates tall = 5 real bricks in a single part — massive part-count
 # reduction on load-bearing columns.
 _INTERIOR_TALL_BRICKS = [
-    ("30360.dat", (2, 2), 15),   # Brick 2x2x5 = 15 plates tall
     ("2454.dat",  (2, 1), 15),   # Brick 1x2x5
 ]
 # Standard 3-plate bricks, ordered by footprint AREA descending so the

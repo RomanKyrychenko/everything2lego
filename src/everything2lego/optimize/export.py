@@ -4,7 +4,7 @@ The cell grid is at plate resolution (1 stud × 1 plate × 1 stud). This
 module runs a two-pass consolidator:
 
 1. **Brick promotion** — walk vertical 1-stud columns; wherever 3 consecutive
-   same-color same-type cells stack, emit one brick (3005 / 15533 / 30136 /
+   same-color same-type cells stack, emit one brick (3005 / 30136 /
    4070 …) covering that 3-plate span. This is the only way MASONRY / LOG /
    HEADLIGHT cells become their real (3-plate-tall) LEGO parts.
 
@@ -82,10 +82,10 @@ _TALL_PARTS: dict[int, tuple[str, tuple[int, int], int, int]] = {
     WINDOW_ZP:        ("60592.dat", (2, 1),  6, 270),
     WINDOW_ZM:        ("60592.dat", (2, 1),  6,  90),
     # Door (4x1x5, 15 plates tall).
-    DOOR_XP:          ("60623.dat", (4, 1), 15,   0),
-    DOOR_XM:          ("60623.dat", (4, 1), 15, 180),
-    DOOR_ZP:          ("60623.dat", (4, 1), 15, 270),
-    DOOR_ZM:          ("60623.dat", (4, 1), 15,  90),
+    DOOR_XP:          ("60623.dat", (4, 1), 18,   0),
+    DOOR_XM:          ("60623.dat", (4, 1), 18, 180),
+    DOOR_ZP:          ("60623.dat", (4, 1), 18, 270),
+    DOOR_ZM:          ("60623.dat", (4, 1), 18,  90),
     # Brick 1x2x5 (15 plates tall, 2 studs wide).
     BRICK_TALL:       ("2454.dat",  (2, 1), 15,   0),
     # Cheese slopes (54200): 1x1x2, tile-anywhere primitive for curved
@@ -106,11 +106,11 @@ _TALL_PARTS: dict[int, tuple[str, tuple[int, int], int, int]] = {
     SLOPE_4X2_XM:     ("3037.dat", (4, 2),  3, 180),
     SLOPE_4X2_ZP:     ("3037.dat", (4, 2),  3, 270),
     SLOPE_4X2_ZM:     ("3037.dat", (4, 2),  3,  90),
-    # Curved slope 2x4 (24309) — biggest curved slope primitive. 24 cells.
-    CURVED_2X4_XP:    ("24309.dat", (4, 2),  3,   0),
-    CURVED_2X4_XM:    ("24309.dat", (4, 2),  3, 180),
-    CURVED_2X4_ZP:    ("24309.dat", (4, 2),  3, 270),
-    CURVED_2X4_ZM:    ("24309.dat", (4, 2),  3,  90),
+    # Curved brick 4x2 (93606) — biggest curved slope primitive. 24 cells.
+    CURVED_2X4_XP:    ("93606.dat", (4, 2),  3,   0),
+    CURVED_2X4_XM:    ("93606.dat", (4, 2),  3, 180),
+    CURVED_2X4_ZP:    ("93606.dat", (4, 2),  3, 270),
+    CURVED_2X4_ZM:    ("93606.dat", (4, 2),  3,  90),
     # Curved 4x1 (61678) — long curved primitive. 12 cells.
     CURVED_4X1_XP:    ("61678.dat", (4, 1),  3,   0),
     CURVED_4X1_XM:    ("61678.dat", (4, 1),  3, 180),
@@ -145,7 +145,7 @@ _BRICK_TABLE: dict[int, list[tuple[str, tuple[int, int]]]] = {
                 ("3622.dat", (3, 1)),
                 ("3004.dat", (2, 1)),
                 ("3005.dat", (1, 1))],
-    MASONRY:   [("98283.dat", (2, 1)), ("15533.dat", (1, 1))],
+    MASONRY:   [("98283.dat", (2, 1))],
     LOG:       [("30136.dat", (2, 1))],
     HEADLIGHT: [("4070.dat", (1, 1))],
 }

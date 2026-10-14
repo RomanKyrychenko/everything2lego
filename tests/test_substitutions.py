@@ -35,11 +35,11 @@ def test_window_replaces_two_stacked_bricks_of_its_colour():
     assert not stability.check(out).overlaps
 
 
-def test_door_replaces_five_stacked_1x4_bricks():
-    stack = [brick("3010.dat", 0, 0, 3 * i, 70) for i in range(5)]
+def test_door_replaces_six_stacked_1x4_bricks():
+    stack = [brick("3010.dat", 0, 0, 3 * i, 70) for i in range(6)]
     out = pack.substitute_by_color(stack, {70: "60623.dat"})
     assert [p.part.ldraw for p in out] == ["60623.dat"]
-    assert out[0].part.height_units == 15 and not stability.check(out).overlaps
+    assert out[0].part.height_units == 18 and not stability.check(out).overlaps
 
 
 def test_mixed_colour_or_short_stacks_are_left_alone():

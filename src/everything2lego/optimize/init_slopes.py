@@ -4,7 +4,7 @@ Ordered passes over the surface, largest slope primitives first. Each
 pass claims cells before smaller primitives get a chance to fragment
 the region.  Order (by cells per instance):
 
-    1. CURVED 2×4 (24309)     — 24 cells, curved face
+    1. CURVED 4×2 (93606)     — 24 cells, curved face
     2. SLOPE  4×2 (3037)      — 24 cells, flat 45°
     3. CURVED 6×1 (62361)     — 18 cells, long curved
     4. CURVED 4×1 (61678)     — 12 cells, medium curved
@@ -118,7 +118,7 @@ def initial_assembly_with_slopes(target: Target) -> Assembly:
     ideal = target.ideal_type
     surface_coords = np.argwhere(target.surface).tolist()
 
-    # Pass 1: CURVED 2×4 (24309), 24-cell footprint
+    # Pass 1: CURVED 4×2 (93606), 24-cell footprint
     _pass_slope_family(a, target, surface_coords, CURVED_2X4_FAMILY := (
         CURVED_2X4_XP, CURVED_2X4_XM, CURVED_2X4_ZP, CURVED_2X4_ZM),
                         wide=4, thin=2)

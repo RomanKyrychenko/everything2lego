@@ -142,7 +142,7 @@ class ModernistBox(Template):
 
     def _openings(self, p) -> list[Placement]:
         window = part_by_ldraw("60592.dat")   # Window 1x2x2
-        door = part_by_ldraw("60623.dat")     # Door 1x4x5 Right
+        door = part_by_ldraw("60623.dat")     # Door 1x4x6
         if window is None or door is None:
             return []
         base_y = p.foundation_plates

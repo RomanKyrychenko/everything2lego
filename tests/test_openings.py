@@ -38,7 +38,7 @@ def test_two_windows_and_a_door_are_found_on_the_front_wall():
     t = target(house())
     found = openings.find_openings(front_wall(t), t)
     doors = [p for p in found if p.part.shape == "door"]
-    assert len(doors) == 1 and doors[0].y_plate == 0 and doors[0].part.ldraw == "60614.dat"
+    assert len(doors) == 1 and doors[0].y_plate == 0 and doors[0].part.ldraw == "60623.dat"
     windows = _window_rows([p for p in found if p.part.shape == "window"])
     assert len(windows) == 2
     # each 6-stud window is a row of identical frames as wide as it, the twins alike

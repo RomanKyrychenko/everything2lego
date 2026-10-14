@@ -377,7 +377,7 @@ class SoftTrainer:
                     brick_lookup.setdefault((w, d), p)
 
         # BRICK PRE-PASSES.  Two rounds:
-        #   Round A: brick_tall (15 plates = 5 bricks)  — 30360, 2454
+        #   Round A: brick_tall (15 plates = 5 bricks)  — 2454
         #   Round B: brick (3 plates)  — the standard 3-plate consolidation
         # A cell qualifies for consolidation when all N stacked layers
         # have the same PLATE type + same colour.  Greedy biggest-first
@@ -385,7 +385,6 @@ class SoftTrainer:
         consumed = np.zeros_like(hard_types, dtype=bool)
         out: list[Placement] = []
 
-        brick_tall_2x2 = part_by_ldraw("30360.dat")   # 2x2x5
         brick_tall_1x2 = part_by_ldraw("2454.dat")    # 1x2x5
 
         def _try_tall(part, fw, fd, height):
@@ -412,7 +411,6 @@ class SoftTrainer:
                             ))
                             consumed[sl] = True
 
-        _try_tall(brick_tall_2x2, 2, 2, 15)
         _try_tall(brick_tall_1x2, 2, 1, 15)
         packer_brick = MILPPacker(parts=brick_footprints,
                                      time_limit_s=1.0, max_mask_area=200) \

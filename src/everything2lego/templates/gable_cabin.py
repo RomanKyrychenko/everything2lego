@@ -33,7 +33,7 @@ def _hash(x: int, y: int, z: int) -> int:
 # footprint + height so any is a legal substitute anywhere.
 _WALL_1X2_MIX = ["3004.dat", "30136.dat", "98283.dat"]
 # 1x1 wall bricks the template rotates through on the wall interior.
-_WALL_1X1_MIX = ["3005.dat", "15533.dat"]
+_WALL_1X1_MIX = ["3005.dat"]
 # 1x1 side-stud accent bricks used at corners (cycled up the vertical run)
 # and at sparse wall positions.
 _CORNER_1X1_CYCLE = ["4070.dat", "87087.dat", "26604.dat", "47905.dat", "4733.dat"]
@@ -370,7 +370,7 @@ class GableCabin(Template):
         replaces the wall bricks the wall builder drew there.
         """
         window = part_by_ldraw("60592.dat")   # Window 1 x 2 x 2
-        door = part_by_ldraw("60623.dat")     # Door 1 x 4 x 5 Right
+        door = part_by_ldraw("60623.dat")     # Door 1 x 4 x 6
         if window is None or door is None:
             return []
 

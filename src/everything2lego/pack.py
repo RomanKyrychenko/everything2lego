@@ -1026,7 +1026,7 @@ def _refine_slopes(voxels: np.ndarray, placements: list[Placement], *,
 TEXTURE_PRESETS: dict[str, dict[str, str]] = {
     "log":     {"3004.dat": "30136.dat"},              # wood-cabin walls
     "masonry": {"3004.dat": "98283.dat",               # castle/stone walls
-                "3005.dat": "15533.dat"},
+                },
     "curved":  {"3039.dat": "15068.dat",               # softer roof edges
                 "3037.dat": "61678.dat"},
     "smooth":  {},
@@ -1052,7 +1052,7 @@ VARIETY_GROUPS: dict[str, dict[str, list[str]]] = {
         # straight run).
         "corner":       ["4070.dat", "87087.dat", "26604.dat", "47905.dat", "4733.dat"],
         "wall_accent":  ["4070.dat", "87087.dat"],
-        "wall":         ["3005.dat", "15533.dat"],
+        "wall":         ["3005.dat"],
         "interior":     ["3005.dat"],
     },
     "wall_1x2_h3": {
@@ -1284,8 +1284,8 @@ def _cluster_by_color(placements: list[Placement],
 
 # Window frames and doors by (studs wide, plates tall).
 _WINDOW_BY_SIZE = {(2, 6): "60592.dat", (2, 9): "60593.dat",
-                   (4, 9): "60594.dat", (6, 9): "3853.dat"}
-_DOOR_BY_SIZE = {(4, 15): "60623.dat", (4, 18): "60614.dat"}
+                   (4, 9): "60594.dat"}
+_DOOR_BY_SIZE = {(4, 18): "60623.dat"}
 
 
 def detect_windows_and_doors(placements: list[Placement], *,

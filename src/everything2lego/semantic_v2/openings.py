@@ -26,7 +26,7 @@ from .regions import PlanarRegion
 # several frames side by side, as sets build them.
 FRAME_SIZES: dict[tuple[int, int], str] = {
     (2, 6): "60592.dat", (2, 9): "60593.dat", (4, 9): "60594.dat"}
-DOOR_SIZES: dict[tuple[int, int], str] = {(4, 15): "60623.dat", (4, 18): "60614.dat"}
+DOOR_SIZES: dict[tuple[int, int], str] = {(4, 18): "60623.dat"}
 COURSE = 3   # plates per brick course; frames and doors are whole courses tall
 
 

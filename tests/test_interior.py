@@ -114,4 +114,4 @@ def test_hollow_keeps_2x2_columns_and_course_aligned_tall_bricks():
     assert np.array_equal(_coverage(placements, occ.shape), keep.astype(int))
     tall = [p for p in placements if p.part.height_units == 15]
     assert tall and all(p.y_plate % 3 == 0 for p in tall)
-    assert any(p.part.ldraw == "30360.dat" for p in tall)
+    assert all(p.part.ldraw == "2454.dat" for p in tall)
