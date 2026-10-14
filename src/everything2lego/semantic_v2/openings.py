@@ -22,9 +22,10 @@ from ..pack import Placement
 from .mesh_target import MeshTarget
 from .regions import PlanarRegion
 
-# Window frames and doors by (studs wide, plates tall).
+# Window frames and doors by (studs wide, plates tall).  A wider window is
+# several frames side by side, as sets build them.
 FRAME_SIZES: dict[tuple[int, int], str] = {
-    (2, 6): "60592.dat", (2, 9): "60593.dat", (4, 9): "60594.dat", (6, 9): "3853.dat"}
+    (2, 6): "60592.dat", (2, 9): "60593.dat", (4, 9): "60594.dat"}
 DOOR_SIZES: dict[tuple[int, int], str] = {(4, 15): "60623.dat", (4, 18): "60614.dat"}
 COURSE = 3   # plates per brick course; frames and doors are whole courses tall
 
@@ -136,6 +137,61 @@ def _snap(width: int, height: int, bottom: int, wall_height: int
     return (best[1], best[2]) if best else None
 
 
+def _window_frames(width: int, height: int, wall_height: int) -> tuple[int, list[tuple[int, str]]]:
+    """The frames that fill a window `width` studs by `height` plates:
+    the frame height nearest the window's (that fits the wall), and a row
+    of identical frames across its width — 4-wide ones when the width is a
+    whole number of them, else 2-wide.  Returns (frame height, [(width,
+    part)...]) with an empty list when no frame fits."""
+    heights = sorted({h for (_, h) in FRAME_SIZES if h <= wall_height})
+    if not heights:
+        return 0, []
+    h = min(heights, key=lambda hh: (abs(hh - height), -hh))
+    widths = sorted(w for (w, hh) in FRAME_SIZES if hh == h)
+    even = max(widths[0], 2 * int(round(width / 2)))
+    unit = max((w for w in widths if even % w == 0), default=widths[0])
+    n = max(1, even // unit)
+    return h, [(unit, FRAME_SIZES[(unit, h)])] * n
+
+
+def _window(frame: WallFrame, parts: dict, cu: float, cy: float, width: int, height: int,
+            bottom: int, colour: int, lab, taken: np.ndarray) -> list[Placement]:
+    """The frames (with their glass) for one opening centred on (cu, cy)
+    in wall cells, or a door when it is one; [] when nothing fits or the
+    cells are taken.  `colour` is the frame's (the wall recipe sets the
+    final trim colour), `lab` the photo's colour of the opening, which
+    picks the glass."""
+    from ..bricks import GLASS, made_in
+    from ..colors import nearest_glass
+    if bottom <= COURSE and height >= 12:
+        door = _snap(width, height, bottom, frame.height)
+        if door is None:
+            return []
+        (w, h), ldraw = door
+        units = [(w, ldraw)]
+    else:
+        h, units = _window_frames(width, height, frame.height)
+        if not units:
+            return []
+    total = sum(w for w, _ in units)
+    u = max(0, min(frame.length - total, int(round(cu - total / 2))))
+    y = int(round((cy - h / 2) / COURSE)) * COURSE
+    y = max(0, min(frame.height - h, y))
+    if u + total > frame.length or taken[u:u + total, y:y + h].any():
+        return []
+    taken[u:u + total, y:y + h] = True
+    out = []
+    for w, ldraw in units:
+        p = frame.placement(parts[ldraw], colour, u, y, w)
+        glass = GLASS.get(ldraw)
+        if glass is not None and lab is not None:
+            from dataclasses import replace
+            p = replace(p, glass=nearest_glass(lab, lambda code: made_in(glass, code)))
+        out.append(p)
+        u += w
+    return out
+
+
 def largest_rectangle(mask: np.ndarray) -> tuple[int, int, int, int, int]:
     """The largest all-True axis-aligned rectangle in a 2-D mask, as
     (area, u0, u1, y0, y1); the histogram-and-stack method, one pass per
@@ -207,22 +263,53 @@ def _grow(cells: np.ndarray, u0: int, u1: int, y0: int, y1: int,
 def find_openings(region: PlanarRegion, target: MeshTarget, *,
                   min_delta_e: float = 22.0, min_fill: float = 0.55,
                   frame: WallFrame | None = None) -> list[Placement]:
-    """Window frames and doors for the off-colour rectangles on a wall.
-
-    Each rectangle of cells whose colour is at least `min_delta_e` (CIE76)
-    from the wall's median colour (blobs peeled into their rectangles,
-    see `rectangles`), at least 2 studs by 2 courses and filled to `min_fill`,
-    becomes the frame or door nearest its size, centred on it and aligned
-    to the wall's brick courses.
-    """
+    """Window frames and doors for the off-colour rectangles on a wall,
+    read from the mesh's own surface colours (see `openings_from_grid`)."""
     frame = frame or wall_frame(region, target)
     if frame.length < 2 or frame.height < 2 * COURSE:
         return []
     mean, has = wall_colour_grid(region, target, frame)
-    if has.sum() < 4:
+    return openings_from_grid(frame, mean, has, min_delta_e=min_delta_e, min_fill=min_fill)
+
+
+def _otsu(values: np.ndarray, bins: int = 64) -> float:
+    """The threshold splitting `values` into two classes with the most
+    between-class variance."""
+    hist, edges = np.histogram(values, bins=bins)
+    mids = (edges[:-1] + edges[1:]) / 2
+    w0 = np.cumsum(hist)
+    w1 = w0[-1] - w0
+    m0 = np.cumsum(hist * mids) / np.maximum(w0, 1)
+    m1 = (np.sum(hist * mids) - np.cumsum(hist * mids)) / np.maximum(w1, 1)
+    return float(mids[int(np.argmax(w0 * w1 * (m0 - m1) ** 2))])
+
+
+def openings_from_grid(frame: WallFrame, mean: np.ndarray, has: np.ndarray, *,
+                       min_delta_e: float = 22.0, min_fill: float = 0.55,
+                       adaptive: bool = False) -> list[Placement]:
+    """Window frames and doors for the off-colour rectangles of a wall's
+    (length, height) Lab colour grid (`has` marks the cells with a colour).
+
+    Each rectangle of cells whose colour is at least `min_delta_e` (CIE76)
+    from the wall's median colour (blobs peeled into their rectangles,
+    see `rectangles`), at least 2 studs by 2 courses and filled to `min_fill`,
+    becomes a row of frames (or a door) as wide as it, centred on it and
+    aligned to the wall's brick courses, with glass the colour it shows.
+    `adaptive` lowers the threshold to the wall's own split between its
+    material and its openings (Otsu), down to 0.55 x `min_delta_e`.  A window has wall above and below
+    it, and is narrower than the wall; a band of another material along
+    the wall (a stone base, a cornice) is not an opening."""
+    if frame.length < 2 or frame.height < 2 * COURSE or has.sum() < 4:
         return []
     wall_lab = np.median(mean[has], axis=0)
     delta = np.linalg.norm(mean - wall_lab, axis=2)
+    if adaptive:
+        # each wall's own split between its material and its openings (a
+        # lit window on dark timber is far off; white curtains on warm
+        # brick are not)
+        # a wall whose openings stand out plainly needs no more than the
+        # default; one whose openings are subtle gets its own, lower split
+        min_delta_e = float(np.clip(_otsu(delta[has]), 0.55 * min_delta_e, min_delta_e))
     off = has & (delta >= min_delta_e)
     labels, n = _label(off)
     parts = {p.ldraw: p for p in full_catalog()}
@@ -230,37 +317,38 @@ def find_openings(region: PlanarRegion, target: MeshTarget, *,
     out: list[Placement] = []
     taken = np.zeros_like(off)
     patches = []
+    labs: dict[tuple[float, float], np.ndarray] = {}
     for u0, u1, y0, y1 in (box for k in range(1, n + 1) for box in rectangles(labels == k)):
         cells = np.zeros_like(off)
         cells[u0:u1, y0:y1] = off[u0:u1, y0:y1]
         width, height = u1 - u0, y1 - y0
         if width < 2 or height < 2 * COURSE or cells.sum() < min_fill * width * height:
             continue
-        colour = int(np.argmin(np.linalg.norm(pal_lab - mean[cells].mean(axis=0), axis=1)))
+        if y1 > frame.height - COURSE:
+            continue          # no wall above it: an eave's shadow or the sky, not a window
+        if width > 0.6 * frame.length:
+            continue          # a band along the wall: a base, a cornice
+        if y0 < COURSE and height < 12:
+            continue          # no wall below it and too low for a door: a plinth
+        lab = mean[cells].mean(axis=0)
+        colour = int(np.argmin(np.linalg.norm(pal_lab - lab, axis=1)))
+        labs[((u0 + u1) / 2, (y0 + y1) / 2)] = lab
         patches.append(((u0 + u1) / 2, (y0 + y1) / 2, width, height, y0, colour))
     for cu, cy, width, height, y0, colour in equalise(patches, length=frame.length):
-        snapped = _snap(width, height, y0, frame.height)
-        if snapped is None:
-            continue
-        (w, h), ldraw = snapped
-        u = max(0, min(frame.length - w, int(round(cu - w / 2))))
-        y = int(round((cy - h / 2) / COURSE)) * COURSE
-        y = max(0, min(frame.height - h, y))
-        if taken[u:u + w, y:y + h].any():
-            continue
-        taken[u:u + w, y:y + h] = True
-        out.append(frame.placement(parts[ldraw], colour, u, y, w))
+        lab = min(labs.items(), key=lambda kv: abs(kv[0][0] - cu) + abs(kv[0][1] - cy))[1]
+        out += _window(frame, parts, cu, cy, width, height, y0, colour, lab, taken)
     return out
 
 
 def openings_from_relief(frame: WallFrame, recess: np.ndarray, colour: int, *,
-                         min_fill: float = 0.55) -> list[Placement]:
+                         min_fill: float = 0.55, glass_lab=None) -> list[Placement]:
     """Window frames and doors for the RECESSED rectangles of a wall — the
     reveals a measured front shows behind the wall plane.  `recess` is a
     (length, height) mask of the wall's cells that lie at least a part of
     a stud behind its face.  Same rectangle peeling, equalising and part
     snapping as the colour path, so a window found by depth and one found
-    by colour come out as the same part on the same course."""
+    by colour come out as the same part on the same course.  `glass_lab`
+    is the photo's colour in the openings, for their glass."""
     if frame.length < 2 or frame.height < 2 * COURSE or recess.sum() < 4:
         return []
     labels, n = _label(recess)
@@ -274,17 +362,7 @@ def openings_from_relief(frame: WallFrame, recess: np.ndarray, colour: int, *,
             continue
         patches.append(((u0 + u1) / 2, (y0 + y1) / 2, width, height, y0, colour))
     for cu, cy, width, height, y0, col in equalise(patches, length=frame.length):
-        snapped = _snap(width, height, y0, frame.height)
-        if snapped is None:
-            continue
-        (w, h), ldraw = snapped
-        u = max(0, min(frame.length - w, int(round(cu - w / 2))))
-        y = int(round((cy - h / 2) / COURSE)) * COURSE
-        y = max(0, min(frame.height - h, y))
-        if taken[u:u + w, y:y + h].any():
-            continue
-        taken[u:u + w, y:y + h] = True
-        out.append(frame.placement(parts[ldraw], col, u, y, w))
+        out += _window(frame, parts, cu, cy, width, height, y0, col, glass_lab, taken)
     return out
 
 
@@ -383,22 +461,12 @@ def forced_openings(region: PlanarRegion, target: MeshTarget, frame: WallFrame,
         y0, y1 = max(0, y0), min(frame.height, y1)
         if u1 - u0 < 1 or y1 - y0 < 1:
             continue
-        snapped = _snap(u1 - u0, y1 - y0, y0, frame.height)
-        if snapped is None:
-            continue
-        (w, h), ldraw = snapped
-        if box.get("name") == "door":
-            door = _snap(u1 - u0, max(y1 - y0, 15), 0, frame.height)
-            if door is not None:
-                (w, h), ldraw = door
-                y0 = 0
-        u = max(0, min(frame.length - w, int(round((u0 + u1) / 2 - w / 2))))
-        y = int(round(((y0 + y1) / 2 - h / 2) / COURSE)) * COURSE
-        y = max(0, min(frame.height - h, y))
-        if taken[u:u + w, y:y + h].any():
-            continue
-        taken[u:u + w, y:y + h] = True
         rgb = box.get("colour") or (60, 60, 60)
-        colour = int(np.argmin(np.linalg.norm(pal_lab - _rgb_to_lab(np.array(rgb, np.float32)[None] / 255.0)[0], axis=1)))
-        out.append(frame.placement(parts[ldraw], colour, u, y, w))
+        lab = _rgb_to_lab(np.array(rgb, np.float32)[None] / 255.0)[0]
+        colour = int(np.argmin(np.linalg.norm(pal_lab - lab, axis=1)))
+        width, height = u1 - u0, y1 - y0
+        if box.get("name") == "door":
+            y0, y1, height = 0, max(y1 - y0, 15), max(y1 - y0, 15)
+        out += _window(frame, parts, (u0 + u1) / 2, (y0 + y1) / 2, width, height, y0,
+                       colour, lab, taken)
     return out

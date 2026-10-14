@@ -82,6 +82,46 @@ def snap_rgb_to_palette(rgb: np.ndarray) -> np.ndarray:
     return idx.reshape(orig_shape)
 
 
+@lru_cache(maxsize=1)
+def trans_colours() -> tuple[LegoColor, ...]:
+    """The transparent colours (window glass, lights): not part of the
+    buildable palette, which is what a model's surface is snapped to."""
+    raw = json.loads(files("everything2lego.data").joinpath("ldraw_colors.json").read_text())
+    return tuple(LegoColor(code=c["code"], bl=c["bl"], name=c["name"], rgb=tuple(c["rgb"]))
+                 for c in raw.get("trans", []))
+
+
+def colour_by_code(code: int) -> LegoColor:
+    """Any colour the exporters may meet — palette or transparent — by
+    LDraw code."""
+    for c in palette() + trans_colours():
+        if c.code == code:
+            return c
+    raise KeyError(f"Unknown LDraw color code {code}")
+
+
+TRANS_CLEAR = 47
+
+
+def nearest_glass(lab: np.ndarray, ok, *, max_delta_e: float = 20.0) -> int | None:
+    """The LDraw code of the glass for a window whose photo colour is `lab`,
+    among the transparent colours `ok(code)` allows.  Clear glass shows
+    what is behind it, so it is the default; a tint is chosen only when it
+    is itself within `max_delta_e` of the photo (the yellow of a lit room,
+    the pale blue of a pane reflecting sky).  None when no glass is made."""
+    cand = [c for c in trans_colours() if ok(c.code)]
+    if not cand:
+        return None
+    labs = _rgb_to_lab(np.array([c.rgb for c in cand], np.float32) / 255.0)
+    d = np.sqrt(((labs - np.asarray(lab, np.float32)) ** 2).sum(axis=1))
+    tinted = [i for i, c in enumerate(cand) if c.code != TRANS_CLEAR and d[i] <= max_delta_e]
+    if tinted:
+        return cand[min(tinted, key=lambda i: d[i])].code
+    if any(c.code == TRANS_CLEAR for c in cand):
+        return TRANS_CLEAR
+    return cand[int(np.argmin(d))].code
+
+
 def nearest_where(idx: int, ok) -> int:
     """Palette index `idx` if `ok(code)` holds for it, else the perceptually
     nearest palette colour for which it does (`idx` when none does)."""

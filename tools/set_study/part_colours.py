@@ -34,16 +34,20 @@ def main() -> None:
 
     # Rebrickable colour id -> LDraw code, by name
     rb = pd.read_csv(D / "colors.csv.gz")
-    ld = json.loads((REPO / "src/everything2lego/data/ldraw_colors.json").read_text())["colors"]
-    by_name = {c["name"].lower(): c["code"] for c in ld}
-    to_ldraw = {int(i): by_name[n.lower()] for i, n in zip(rb.id, rb.name) if n.lower() in by_name}
+    data = json.loads((REPO / "src/everything2lego/data/ldraw_colors.json").read_text())
+    ld = data["colors"] + data.get("trans", [])
+
+    def norm(name: str) -> str:
+        return name.lower().replace("-", " ").replace("_", " ")
+    by_name = {norm(c["name"]): c["code"] for c in ld}
+    to_ldraw = {int(i): by_name[norm(n)] for i, n in zip(rb.id, rb.name) if norm(n) in by_name}
     n_sets = n_sets[[c in to_ldraw for c in n_sets.index.get_level_values(1)]]
     n_sets.index = pd.MultiIndex.from_arrays([n_sets.index.get_level_values(0),
                                               [to_ldraw[c] for c in n_sets.index.get_level_values(1)]])
     n_sets = n_sets.groupby(level=[0, 1]).sum()
 
-    from everything2lego.bricks import full_catalog
-    items = [{"ldraw": p.ldraw} for p in full_catalog()]
+    from everything2lego.bricks import GLASS, full_catalog
+    items = [{"ldraw": p.ldraw} for p in full_catalog()] + [{"ldraw": g} for g in GLASS.values()]
     # Moulds that replace one another ("A" is an alternate of "B") count as one part.
     alt = rel[rel.rel_type.isin(["A", "M"])]
     known = set(n_sets.index.get_level_values(0))

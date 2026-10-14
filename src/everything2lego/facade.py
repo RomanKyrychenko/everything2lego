@@ -559,6 +559,39 @@ def depth_agreement(solid: np.ndarray, facade: Facade, fit: FacadeFit,
     return float(agree.sum() / ok.sum())
 
 
+def model_visible(cells: np.ndarray, solid: np.ndarray, facade: Facade, fit: FacadeFit,
+                  K: Optional[tuple[float, float, float, float]] = None, *, tol_studs: float = 0.75
+                  ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Which of `cells` (N, 3 grid (x, y, z) centres) the registered camera
+    sees on the MODEL — on the photo's object, with no cell of `solid` in
+    front — and the pixel each lands on: (visible, u, v).  Unlike
+    `seen_mask` it does not ask the photo's measured depth to agree: for a
+    surface the plan itself has defined (a straightened wall), the model is
+    the authority on where the surface is, the photo on what it looks like."""
+    K = K or camera_intrinsics(facade)
+    n = len(cells)
+    if K is None or n == 0:
+        return np.zeros(n, bool), np.zeros(n, int), np.zeros(n, int)
+    from scipy.ndimage import binary_erosion, minimum_filter
+    skin = solid & ~binary_erosion(solid, iterations=1, border_value=0)
+    sk = np.argwhere(skin)
+    cu, cv, cz, cin = _project_cells(np.c_[sk[:, 1] + 0.5, sk[:, 0] + 0.5, sk[:, 2] + 0.5],
+                                     facade, fit, K)
+    Hh, Ww = facade.mask.shape
+    zbuf = np.full(Hh * Ww, np.inf)
+    np.minimum.at(zbuf, cv[cin] * Ww + cu[cin], cz[cin])
+    s_mm_per_m = float(np.cbrt(abs(np.linalg.det(fit.T[:3, :3]))))
+    zs_ok = facade.pts[..., 2][facade.valid]
+    cell_px = K[0] * STUD_MM / s_mm_per_m / max(float(np.nanmedian(zs_ok)), 1e-6)
+    zbuf = minimum_filter(zbuf.reshape(Hh, Ww), size=int(np.ceil(cell_px)) + 1, mode="nearest")
+    u, v, zc, inside = _project_cells(np.asarray(cells, np.float64), facade, fit, K)
+    tol = tol_studs * STUD_MM / s_mm_per_m
+    vis = np.zeros(n, bool)
+    i = np.flatnonzero(inside)
+    vis[i] = facade.mask[v[i], u[i]] & (zc[i] <= zbuf[v[i], u[i]] + tol)
+    return vis, u, v
+
+
 def seen_mask(cells: np.ndarray, facade: Facade, fit: FacadeFit,
               K: Optional[tuple[float, float, float, float]] = None, *, tol_studs: float = 1.0
               ) -> np.ndarray:

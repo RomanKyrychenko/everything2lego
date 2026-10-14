@@ -15,7 +15,7 @@ from everything2lego.cli import app
 from everything2lego.semantic_v2 import PipelineConfig, SemanticLegoPipeline, labeller, parts
 from everything2lego.semantic_v2.mesh_target import MeshTarget
 from everything2lego.semantic_v2.regions import RegionLabel
-from meshes import house, noisy_house
+from meshes import house, noisy_house, opening_kinds
 
 
 @pytest.fixture(autouse=True)
@@ -125,8 +125,7 @@ def test_naming_feeds_the_builders(tmp_path):
     assert pipe.last_naming is not None and t.metadata["naming"].object == "a small house"
     assert sorted(b["name"] for b in t.metadata["forced_openings"]) == ["door", "window", "window"]
     assert any(r.label == RegionLabel.PLANAR_ROOF for r in result.regions)
-    kinds = sorted(p.part.shape for p in result.placements if p.part.shape in ("window", "door"))
-    assert kinds == ["door", "window", "window"]
+    assert opening_kinds(result.placements) == ["door", "window", "window"]
     assert stability.check(result.placements).ok
     assert (tmp_path / "pics" / "overview-front-left.png").exists()
     assert Image.open(tmp_path / "pics" / "overview-front-left.png").size == (768, 768)

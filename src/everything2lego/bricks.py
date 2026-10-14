@@ -181,6 +181,15 @@ def made_in(part: "Part | str", code: int) -> bool:
     return cols is None or code in cols
 
 
+# The glass each window frame takes, placed with the frame's own transform
+# (LDraw draws frame and glass about the same origin).
+GLASS: dict[str, str] = {"60592.dat": "60601.dat", "60593.dat": "60602.dat",
+                         "60594.dat": "60603.dat"}
+# ...except where the official models offset it, in the frame's own LDU
+# (60603 is an opening pane: 8 down and 4 in, as the OMR's sets place it).
+GLASS_OFFSET: dict[str, tuple[int, int, int]] = {"60594.dat": (0, 8, 4)}
+
+
 # The parts every colour of a set's palette must come in: a wall, a floor,
 # a sculpted course can always be finished in 1x1 and 1x2 bricks and plates.
 CORE_PARTS = ("3005.dat", "3004.dat", "3024.dat", "3023.dat")

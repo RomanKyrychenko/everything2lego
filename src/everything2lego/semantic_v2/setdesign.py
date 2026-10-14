@@ -346,9 +346,18 @@ def build_wall(spec: WallSpec, claimed: Optional[np.ndarray] = None) -> list[Pla
     f = spec.frame
     bricks = dict(_in_colour(_parts(_BRICKS), spec.colour))
     plates = dict(_in_colour(_parts(_PLATES), spec.colour))
+    # Window frames and doors trim the wall in its own colour (the nearest
+    # they are made in), as sets do: the colour the photo shows inside an
+    # opening is the room and the glass, not the frame.
+    from ..colors import nearest_where
+    from dataclasses import replace
+
+    def trimmed(o: Placement) -> Placement:
+        return replace(o, color_idx=nearest_where(spec.colour, lambda code: made_in(o.part, code)))
+    openings = [trimmed(o) for o in spec.openings]
     if not bricks:
-        return list(spec.openings)
-    out: list[Placement] = list(spec.openings)
+        return openings
+    out: list[Placement] = openings
     n_courses = f.height // COURSE
     for c in range(n_courses):
         y = f.y0 + c * COURSE
@@ -1201,6 +1210,82 @@ def _wall_face_cells(w: WallSpec, solid: np.ndarray) -> np.ndarray:
     return np.array(out, np.float64)
 
 
+def _openings_from_photo(walls: list[WallSpec], solid: np.ndarray, facade, fit, *,
+                         min_seen: float = 0.3, opening_delta_e: float = 22.0) -> int:
+    """Where the photo shows a wall, its windows and doors are the photo's:
+    the photo's colour of every (stud, plate) cell of the wall's face, and
+    the off-colour rectangles in it (`openings_from_grid`).  The mesh's
+    colours are the photo's after a generator, a decimation and a
+    quantisation, and lose all but the boldest openings.  Visibility is the
+    model's own (`model_visible`): the walls were straightened after the
+    photo was matched to the model, so the photo's depths no longer sit on
+    them.  Walls seen less than `min_seen` keep what the mesh gave.
+    Returns the walls whose openings came from the photo."""
+    from ..colors import _rgb_to_lab
+    from ..facade import PLATE_MM, STUD_MM, _blurred_photo, camera_intrinsics, model_visible
+    from .openings import openings_from_grid, reserved_cells
+    K = camera_intrinsics(facade)
+    if K is None or facade.rgb is None:
+        return 0
+    photo = _blurred_photo(facade, fit, K)
+    H, X, Z = solid.shape
+    camera = fit.T[:3, 3]                               # camera centre, model mm
+    scale = np.array([STUD_MM, PLATE_MM, STUD_MM])
+    # A cell's colour is the photo averaged over its footprint; within that
+    # footprint of the matte's edge the average takes in the background
+    # (a bright band under every eave), so only cells inside it count.
+    from scipy.ndimage import binary_erosion
+    s_mm_per_m = float(np.cbrt(abs(np.linalg.det(fit.T[:3, :3]))))
+    zs = facade.pts[..., 2][facade.valid]
+    cell_px = K[0] * STUD_MM / s_mm_per_m / max(float(np.nanmedian(zs)), 1e-6)
+    inner = binary_erosion(facade.mask, iterations=max(1, int(np.ceil(cell_px))))
+    done = 0
+    for w in walls:
+        f = w.frame
+        mask = w.mask if w.mask is not None else np.ones((f.length, f.height // COURSE), bool)
+        idx, pts, normals = [], [], []
+        for u in range(f.length):
+            for yp in range(f.height):
+                if not mask[u, min(mask.shape[1] - 1, yp // COURSE)]:
+                    continue
+                y = int(min(H - 1, f.y0 + yp))
+                if f.axis_x:
+                    x, z = f.origin + u, f.other
+                    if not (0 <= x < X and 0 <= z < Z):
+                        continue
+                    plus = z + 1 >= Z or not solid[y, x, z + 1]
+                    pts.append((x + 0.5, y + 0.5, z + (0.9 if plus else 0.1)))
+                    normals.append((0.0, 0.0, 1.0 if plus else -1.0))
+                else:
+                    x, z = f.other, f.origin + u
+                    if not (0 <= x < X and 0 <= z < Z):
+                        continue
+                    plus = x + 1 >= X or not solid[y, x + 1, z]
+                    pts.append((x + (0.9 if plus else 0.1), y + 0.5, z + 0.5))
+                    normals.append((1.0 if plus else -1.0, 0.0, 0.0))
+                idx.append((u, yp))
+        if not pts:
+            continue
+        pts_a = np.array(pts, np.float64)
+        seen, pu, pv = model_visible(pts_a, solid, facade, fit, K)
+        # and only a face turned toward the camera (a wall's back shows
+        # nothing of it, whatever slips past the z-buffer at the outline)
+        seen &= ((camera - pts_a * scale) * np.array(normals)).sum(axis=1) > 0
+        seen[seen] &= inner[pv[seen], pu[seen]]
+        if seen.mean() < min_seen:
+            continue
+        rgb = np.clip(photo[pv[seen], pu[seen]], 0, 255).astype(np.uint8)
+        idx = np.array(idx)[seen]
+        mean = np.zeros((f.length, f.height, 3))
+        has = np.zeros((f.length, f.height), bool)
+        mean[idx[:, 0], idx[:, 1]] = _rgb_to_lab(rgb.astype(np.float32) / 255.0)
+        has[idx[:, 0], idx[:, 1]] = True
+        w.openings = openings_from_grid(f, mean, has, min_delta_e=opening_delta_e, adaptive=True)
+        w.reserved = reserved_cells(w.openings, f)
+        done += 1
+    return done
+
+
 def _colour_walls_from_photo(walls: list[WallSpec], solid: np.ndarray, facade, fit,
                              *, seen_share: float = 0.3) -> None:
     """Walls take their colour from the photo where it shows them, as the
@@ -1595,6 +1680,8 @@ def _plan_from_massing(regions: list[Region], target: MeshTarget, occ: np.ndarra
     ground_walls(walls, ground_y=ground_y)
     if facade is not None:
         _colour_walls_from_photo(walls, solid, facade, facade_fit)
+        if detect_openings:
+            _openings_from_photo(walls, solid, facade, facade_fit, opening_delta_e=opening_delta_e)
     wall_colour = None
     if walls:
         vals, counts = np.unique([w.colour for w in walls], return_counts=True)

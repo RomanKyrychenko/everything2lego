@@ -28,6 +28,10 @@ class Placement:
     w_world: int        # footprint width after rotation (along +x)
     d_world: int        # footprint depth after rotation (along +z)
     rotation_deg: int   # 0, 90, 180 or 270 (bricks use 0/90; slopes use all four)
+    # A window frame's glass, clipped into the frame as one unit: the LDraw
+    # colour code of the glass part (bricks.GLASS), or None.  It shares the
+    # frame's cells, so the structure never sees it; the exporters write it.
+    glass: int | None = None
 
 
 def _try_fit(voxels: np.ndarray, filled: np.ndarray,

@@ -22,17 +22,31 @@ def front_wall(t):
     return next(r for r in walls if openings.wall_frame(r, t).other == 20)
 
 
+def _window_rows(frames):
+    """Frames side by side on one course are one window: (x0, x1, y, parts)."""
+    rows = []
+    for p in sorted(frames, key=lambda q: (q.y_plate, q.x_stud)):
+        if rows and rows[-1][2] == p.y_plate and rows[-1][1] == p.x_stud:
+            x0, _, y, parts = rows[-1]
+            rows[-1] = (x0, p.x_stud + p.w_world, y, parts + [p.part.ldraw])
+        else:
+            rows.append((p.x_stud, p.x_stud + p.w_world, p.y_plate, [p.part.ldraw]))
+    return rows
+
+
 def test_two_windows_and_a_door_are_found_on_the_front_wall():
     t = target(house())
     found = openings.find_openings(front_wall(t), t)
-    shapes = sorted(p.part.shape for p in found)
-    assert shapes == ["door", "window", "window"]
-    door = next(p for p in found if p.part.shape == "door")
-    assert door.y_plate == 0 and door.part.ldraw == "60614.dat"
-    windows = [p for p in found if p.part.shape == "window"]
-    assert windows[0].part.ldraw == windows[1].part.ldraw, "twin windows get one frame"
-    assert windows[0].y_plate == windows[1].y_plate == 15
+    doors = [p for p in found if p.part.shape == "door"]
+    assert len(doors) == 1 and doors[0].y_plate == 0 and doors[0].part.ldraw == "60614.dat"
+    windows = _window_rows([p for p in found if p.part.shape == "window"])
+    assert len(windows) == 2
+    # each 6-stud window is a row of identical frames as wide as it, the twins alike
+    (a0, a1, ay, ap), (b0, b1, by, bp) = windows
+    assert a1 - a0 == b1 - b0 == 6 and ay == by == 15 and ap == bp and len(set(ap)) == 1
     assert all(p.w_world == p.part.footprint[0] and p.d_world == 1 for p in found)
+    # with clear glass in every frame
+    assert all(p.glass == 47 for p in found if p.part.shape == "window")
 
 
 def test_plain_wall_has_no_openings():
@@ -55,7 +69,8 @@ def test_walls_are_packed_around_the_openings():
     report = stability.check(result.placements)
     assert report.ok
     kept = [p for p in result.placements if p.part.shape in ("window", "door")]
-    assert sorted(p.part.shape for p in kept) == ["door", "window", "window"]
+    assert sum(p.part.shape == "door" for p in kept) == 1
+    assert len(_window_rows([p for p in kept if p.part.shape == "window"])) == 2
     bricks = [p for p in result.placements if p.part.shape == "brick" and p.z_stud == 20]
     for o in kept:
         for b in bricks:

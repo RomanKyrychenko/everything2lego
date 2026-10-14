@@ -478,6 +478,33 @@ def drop_wall_supports(walls: list[WallSpec], solid: np.ndarray, ground_y: int,
     return added
 
 
+def _recess_lab(palette_idx: np.ndarray, frame: WallFrame, recess: np.ndarray,
+                depth: int = 3) -> Optional[np.ndarray]:
+    """The mean colour (Lab) the photo gave the cells in a wall's window
+    reveals — what shows through the glass: the coloured cells within
+    `depth` studs of the wall plane, on either side, behind each recessed
+    (u, y) cell."""
+    from ..colors import _rgb_to_lab, palette
+    H, X, Z = palette_idx.shape
+    us, ys = np.nonzero(recess)
+    if len(us) == 0:
+        return None
+    pal = np.array([c.rgb for c in palette()], np.float32)
+    rgb = []
+    for u, y in zip(us, ys):
+        yy, along = frame.y0 + y, frame.origin + u
+        if not 0 <= yy < H:
+            continue
+        for k in range(-depth, depth + 1):
+            across = frame.other + k
+            x, z = (along, across) if frame.axis_x else (across, along)
+            if 0 <= x < X and 0 <= z < Z and palette_idx[yy, x, z] >= 0:
+                rgb.append(pal[palette_idx[yy, x, z]])
+    if not rgb:
+        return None
+    return _rgb_to_lab(np.array(rgb) / 255.0).mean(axis=0)
+
+
 def _opening_colour(palette_idx: np.ndarray, frame: WallFrame) -> int:
     """The colour of a window or door on this wall: the darkest colour the
     wall's own cells carry, if it covers a few percent of them (frames
@@ -582,7 +609,8 @@ def walls_from_solid(solid: np.ndarray, palette_idx: np.ndarray, target: MeshTar
                 # only where the wall is actually built (its courses)
                 built = np.repeat(sub, COURSE, axis=1)[:, :frame.height]
                 recess &= built
-                measured = openings_from_relief(frame, recess, _opening_colour(palette_idx, frame))
+                measured = openings_from_relief(frame, recess, _opening_colour(palette_idx, frame),
+                                                glass_lab=_recess_lab(palette_idx, frame, recess))
         try:
             if boxes:
                 openings = forced_openings(region, target, frame, boxes)

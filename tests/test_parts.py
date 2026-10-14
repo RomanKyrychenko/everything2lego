@@ -11,7 +11,7 @@ from everything2lego import stability
 from everything2lego.semantic_v2 import SemanticLegoPipeline, PipelineConfig, parts
 from everything2lego.semantic_v2.mesh_target import MeshTarget
 from everything2lego.semantic_v2.regions import RegionLabel
-from meshes import house
+from meshes import house, opening_kinds
 
 
 def painted_house():
@@ -71,8 +71,7 @@ def test_pipeline_from_labelled_mesh_builds_openings(tmp_path):
         {"#c8c8c8": "wall", "#ff0000": "roof", "#0000ff": "window", "#ffff00": "door"}))
     cfg = PipelineConfig(max_studs=30, n_samples=30000, color_samples=30000, parts_path=str(parts_path))
     result = SemanticLegoPipeline(cfg).run(mesh_path)
-    kinds = sorted(p.part.shape for p in result.placements if p.part.shape in ("window", "door"))
-    assert kinds == ["door", "window", "window"]
+    assert opening_kinds(result.placements) == ["door", "window", "window"]
     assert stability.check(result.placements).ok
 
 
@@ -86,7 +85,7 @@ def test_builtin_segmenter_separates_walls_roof_and_openings():
     assert sum(r.label == RegionLabel.PLANAR_WALL for r in regions) >= 4
     assert len(t.metadata["forced_openings"]) == 3
     result = SemanticLegoPipeline(PipelineConfig(max_studs=30, segmenter="builtin")).run_on_target(t)
-    assert sorted(p.part.shape for p in result.placements if p.part.shape in ("window", "door")) == ["door", "window", "window"]
+    assert opening_kinds(result.placements) == ["door", "window", "window"]
     assert stability.check(result.placements).ok
 
 
@@ -129,6 +128,5 @@ def test_builtin_segmenter_on_a_photo_like_house(name, mesh):
 def test_builtin_segmenter_pipeline_on_the_noisy_house():
     t = MeshTarget.from_mesh(noisy_house(), max_studs=30, n_samples=30000, color_samples=30000, seed=1)
     result = SemanticLegoPipeline(PipelineConfig(max_studs=30, segmenter="builtin")).run_on_target(t)
-    kinds = sorted(p.part.shape for p in result.placements if p.part.shape in ("window", "door"))
-    assert kinds == ["door", "window", "window"]
+    assert opening_kinds(result.placements) == ["door", "window", "window"]
     assert stability.check(result.placements).ok

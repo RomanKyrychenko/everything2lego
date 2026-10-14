@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Iterable
 from xml.sax.saxutils import escape
 
-from .colors import palette
+from .bricks import GLASS
+from .colors import colour_by_code, palette
 from .pack import Placement
 
 
@@ -28,6 +29,10 @@ def write_wanted_list(placements: Iterable[Placement], out_path: str | Path,
     for p in placements:
         key = (p.part.bl, pal[p.color_idx].bl)
         counts[key] = counts.get(key, 0) + 1
+        glass = GLASS.get(p.part.ldraw)
+        if glass is not None and p.glass is not None:      # a window's glass is its own part
+            key = (glass.removesuffix(".dat"), colour_by_code(p.glass).bl)
+            counts[key] = counts.get(key, 0) + 1
 
     lines = ["<INVENTORY>"]
     for (part_id, color_id), qty in sorted(counts.items()):

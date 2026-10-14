@@ -880,8 +880,9 @@ def _write_cover(c, placements, steps, page_w, page_h) -> None:
     c.setFont("Helvetica-Bold", 32)
     c.drawCentredString(page_w / 2, page_h - 1.6 * inch, "everything2lego")
     c.setFont("Helvetica", 14)
+    n_glass = sum(1 for p in placements if p.glass is not None and p.part.ldraw in bricks.GLASS)
     c.drawCentredString(page_w / 2, page_h - 2.1 * inch,
-                        f"{len(placements)} parts in {len(steps)} steps "
+                        f"{len(placements) + n_glass} parts in {len(steps)} steps "
                         f"({n_layers} plate layers)")
 
     counts = Counter((p.part.ldraw, p.color_idx) for p in placements)

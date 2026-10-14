@@ -555,5 +555,178 @@
         29
       ]
     }
-  ]
+  ],
+  "trans": [
+    {
+      "code": 33,
+      "name": "Trans-Dark Blue",
+      "bl": 14,
+      "rgb": [
+        0,
+        32,
+        160
+      ]
+    },
+    {
+      "code": 34,
+      "name": "Trans-Green",
+      "bl": 20,
+      "rgb": [
+        35,
+        120,
+        65
+      ]
+    },
+    {
+      "code": 35,
+      "name": "Trans-Bright Green",
+      "bl": 108,
+      "rgb": [
+        86,
+        230,
+        70
+      ]
+    },
+    {
+      "code": 36,
+      "name": "Trans-Red",
+      "bl": 17,
+      "rgb": [
+        201,
+        26,
+        9
+      ]
+    },
+    {
+      "code": 37,
+      "name": "Trans-Dark Pink",
+      "bl": 50,
+      "rgb": [
+        223,
+        102,
+        149
+      ]
+    },
+    {
+      "code": 38,
+      "name": "Trans-Neon Orange",
+      "bl": 18,
+      "rgb": [
+        255,
+        128,
+        13
+      ]
+    },
+    {
+      "code": 39,
+      "name": "Trans-Very Light Blue",
+      "bl": 113,
+      "rgb": [
+        193,
+        223,
+        240
+      ]
+    },
+    {
+      "code": 40,
+      "name": "Trans-Black",
+      "bl": 13,
+      "rgb": [
+        99,
+        95,
+        82
+      ]
+    },
+    {
+      "code": 41,
+      "name": "Trans-Medium Blue",
+      "bl": 74,
+      "rgb": [
+        85,
+        154,
+        183
+      ]
+    },
+    {
+      "code": 42,
+      "name": "Trans-Neon Green",
+      "bl": 16,
+      "rgb": [
+        192,
+        255,
+        0
+      ]
+    },
+    {
+      "code": 43,
+      "name": "Trans-Light Blue",
+      "bl": 15,
+      "rgb": [
+        174,
+        233,
+        239
+      ]
+    },
+    {
+      "code": 44,
+      "name": "Trans-Light Purple",
+      "bl": 114,
+      "rgb": [
+        150,
+        112,
+        159
+      ]
+    },
+    {
+      "code": 45,
+      "name": "Trans-Pink",
+      "bl": 107,
+      "rgb": [
+        252,
+        151,
+        172
+      ]
+    },
+    {
+      "code": 46,
+      "name": "Trans-Yellow",
+      "bl": 19,
+      "rgb": [
+        245,
+        205,
+        47
+      ]
+    },
+    {
+      "code": 47,
+      "name": "Trans-Clear",
+      "bl": 12,
+      "rgb": [
+        252,
+        252,
+        252
+      ]
+    },
+    {
+      "code": 52,
+      "name": "Trans-Purple",
+      "bl": 51,
+      "rgb": [
+        165,
+        165,
+        203
+      ]
+    },
+    {
+      "code": 57,
+      "name": "Trans-Orange",
+      "bl": 98,
+      "rgb": [
+        240,
+        143,
+        28
+      ]
+    }
+  ],
+  "_comment_trans": "Transparent colours (glass), from LDraw's LDConfig.ldr; not part of the buildable palette."
 }

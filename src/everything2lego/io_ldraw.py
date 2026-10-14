@@ -15,7 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable
 
-from .bricks import LDU_PER_PLATE, LDU_PER_STUD
+from .bricks import GLASS, GLASS_OFFSET, LDU_PER_PLATE, LDU_PER_STUD
 from .colors import palette
 from .pack import Placement
 
@@ -45,7 +45,18 @@ def placement_to_line(p: Placement) -> str:
 
     m = _ROT[p.rotation_deg]
     matrix = " ".join(_fmt_num(v) for v in m)
-    return f"1 {ldraw_color} {_fmt_num(x)} {_fmt_num(y)} {_fmt_num(z)} {matrix} {p.part.ldraw}"
+    at = f"{_fmt_num(x)} {_fmt_num(y)} {_fmt_num(z)} {matrix}"
+    line = f"1 {ldraw_color} {at} {p.part.ldraw}"
+    glass = GLASS.get(p.part.ldraw)
+    if glass is not None and p.glass is not None:
+        # the frame's glass, clipped in with the frame's own transform
+        # (shifted where the part pair needs it)
+        dx, dy, dz = GLASS_OFFSET.get(p.part.ldraw, (0, 0, 0))
+        gx = x + m[0] * dx + m[1] * dy + m[2] * dz
+        gy = y + m[3] * dx + m[4] * dy + m[5] * dz
+        gz = z + m[6] * dx + m[7] * dy + m[8] * dz
+        line += f"\n1 {p.glass} {_fmt_num(gx)} {_fmt_num(gy)} {_fmt_num(gz)} {matrix} {glass}"
+    return line
 
 
 def write_ldr(placements: Iterable[Placement], out_path: str | Path,

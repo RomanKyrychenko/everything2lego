@@ -10,7 +10,7 @@ from everything2lego.semantic_v2 import openings
 from everything2lego.semantic_v2.detector import RegionDetector
 from everything2lego.semantic_v2.mesh_target import MeshTarget
 from everything2lego.semantic_v2.regions import PlanarRegion
-from meshes import house
+from meshes import house, opening_kinds
 
 
 def turned(mesh, degrees):
@@ -44,7 +44,7 @@ def test_openings_are_found_on_a_turned_house():
     t = MeshTarget.from_mesh(turned(house(), 9), max_studs=30, n_samples=60000, color_samples=60000, seed=7)
     walls = [r for r in RegionDetector().detect(t) if isinstance(r, PlanarRegion) and r.is_vertical]
     found = [p for r in walls for p in openings.find_openings(r, t)]
-    assert sorted(p.part.shape for p in found) == ["door", "window", "window"]
+    assert opening_kinds(found) == ["door", "window", "window"]
 
 
 def test_mirrored_openings_become_symmetric():

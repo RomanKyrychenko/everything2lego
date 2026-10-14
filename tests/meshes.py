@@ -38,3 +38,21 @@ def noisy_house(seed=0, noise=18, shade=0.35, rotate_deg=0.0):
     if rotate_deg:
         m.apply_transform(trimesh.transformations.rotation_matrix(np.radians(rotate_deg), [0, 1, 0]))
     return m
+
+
+def opening_kinds(placements):
+    """Sorted kinds of the openings among `placements`: a door each door,
+    and one "window" per row of frames side by side on one course of one
+    wall (a wide window is several frames, as sets build it)."""
+    frames = [p for p in placements if p.part.shape == "window"]
+    rows = []
+    for p in sorted(frames, key=lambda q: (q.y_plate, q.z_stud, q.x_stud)):
+        along_x = p.d_world == 1
+        key = (p.y_plate, along_x, p.z_stud if along_x else p.x_stud)
+        start = p.x_stud if along_x else p.z_stud
+        if rows and rows[-1][0] == key and rows[-1][1] == start:
+            rows[-1][1] = start + (p.w_world if along_x else p.d_world)
+        else:
+            rows.append([key, start + (p.w_world if along_x else p.d_world)])
+    doors = sum(p.part.shape == "door" for p in placements)
+    return sorted(["door"] * doors + ["window"] * len(rows))
