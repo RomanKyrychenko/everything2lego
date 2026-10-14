@@ -174,7 +174,7 @@ def _production() -> dict[str, frozenset[int]]:
 def made_in(part: "Part | str", code: int) -> bool:
     """Whether LEGO makes `part` in LDraw colour `code`: it came in at least
     two sets since 2010 (data/part_colours.json, from Rebrickable's
-    inventories; tools/set_study/part_colours.py).  A catalogue part with no
+    inventories, by mould; tools/partsdb/export.py).  A catalogue part with no
     production record is made in nothing; a part outside the table (a
     decoration a styling pass names by id) is not judged."""
     cols = _production().get(part if isinstance(part, str) else part.ldraw)

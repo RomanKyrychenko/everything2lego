@@ -18,7 +18,7 @@ rather than inventing rules.
 | Pattern survey, one row per model | `/Volumes/PRO-G40/lego_data/analysis/patterns.csv` | `tools/set_study/patterns.py <dir> out.csv`, then `by_group.py out.csv` |
 | Instruction booklets (PDF) | `/Volumes/PRO-G40/lego_instructions/` | see "Look up a set" |
 | Part shapes and connection points | `/Applications/Studio 2.0/ldraw` (`parts/`, `connectivity/*.conn`) | the LDraw library BrickLink Studio ships |
-| Which colours each catalogue part is made in | `src/everything2lego/data/part_colours.json` | `tools/set_study/part_colours.py` |
+| Which colours each catalogue part is made in, and how real sets use it (per role, joints) | `src/everything2lego/data/part_colours.json`, `part_usage.json` | `tools/partsdb/export.py` |
 | The 120 most used parts, by kind of set | `top_parts.md` (next to this file) | |
 
 ## The parts database: ask it first

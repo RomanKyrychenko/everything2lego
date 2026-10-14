@@ -18,9 +18,12 @@ from pathlib import Path
 import numpy as np
 
 LDRAW = Path(os.environ.get("LDRAWDIR", "/Applications/Studio 2.0/ldraw"))
+# the official ldraw.org library first (newer moulds), Studio's copy after
+LDRAW_OFFICIAL = Path(os.environ.get("LDRAW_OFFICIAL", "/Volumes/PRO-G40/lego_data/ldraw_official/ldraw"))
 CACHE = Path(os.environ.get("SET_STUDY_CACHE", "/Volumes/PRO-G40/lego_data/cache"))
-SEARCH = [LDRAW / "parts", LDRAW / "p", LDRAW / "p" / "48", LDRAW / "parts" / "s",
-          LDRAW / "UnOfficial" / "parts", LDRAW / "UnOfficial" / "p"]
+SEARCH = [d for root in (LDRAW_OFFICIAL, LDRAW)
+          for d in (root / "parts", root / "p", root / "p" / "48", root / "parts" / "s",
+                    root / "UnOfficial" / "parts", root / "UnOfficial" / "p")]
 
 
 @dataclass

@@ -58,3 +58,18 @@ def test_a_slate_roof_that_cant_be_sand_blue_reads_as_dark_bluish_grey():
     assert palette()[dominant_colour(slate)].code == 379
     roof = dominant_colour(slate, ok=lambda code: made_in("3037.dat", code) and made_in("4286.dat", code))
     assert palette()[roof].code == 72
+
+
+def test_runs_split_the_way_real_sets_split_them():
+    """A roof row of 8 studs is two 2x4 slopes, as real roofs are mostly
+    built (the 2x8 is far rarer), not the one 2x8 the fewest parts give."""
+    from everything2lego.semantic_v2.setdesign import _SLOPES_45, _pack_run, _parts
+    table = _parts(_SLOPES_45)
+    assert [w for _, w in _pack_run(8, table)] == [8]                    # fewest parts
+    assert [w for _, w in _pack_run(8, table, role="roof")] == [4, 4]    # as sets do
+
+
+def test_part_costs_follow_how_often_sets_use_a_part():
+    from everything2lego.usage import part_costs
+    c = part_costs(["3037.dat", "4445.dat"], role="roof")
+    assert c["3037.dat"] < c["4445.dat"]

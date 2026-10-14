@@ -121,30 +121,45 @@ def _runs(free: np.ndarray) -> list[tuple[int, int]]:
     return out
 
 
-def _fewest_parts(length: int, lengths: tuple[int, ...]) -> list[int]:
-    """Widths tiling `length` with the fewest parts, and among those the
-    fewest 1-wide ones (so 7 is 4+3, not 6+1).  Lengths are small, so a
-    plain DP."""
+def _fewest_parts(length: int, lengths: tuple[int, ...],
+                  cost: Optional[dict[int, float]] = None) -> list[int]:
+    """Widths tiling `length`.  Without `cost`: the fewest parts, and among
+    those the fewest 1-wide ones (so 7 is 4+3, not 6+1).  With `cost` (per
+    width, see `_run_costs`): the least total cost — the split real sets
+    make most likely — and among equal costs the fewest parts.  Lengths
+    are small, so a plain DP."""
     best: list[Optional[list[int]]] = [None] * (length + 1)
     best[0] = []
 
-    def cost(ws):
-        return (len(ws), sum(1 for w in ws if w == 1))
+    def key(ws):
+        if cost is None:
+            return (len(ws), sum(1 for w in ws if w == 1))
+        return (round(sum(cost[w] for w in ws), 9), len(ws))
 
     for n in range(1, length + 1):
         for L in sorted(lengths, reverse=True):
             if L <= n and best[n - L] is not None:
                 cand = [L] + best[n - L]
-                if best[n] is None or cost(cand) < cost(best[n]):
+                if best[n] is None or key(cand) < key(best[n]):
                     best[n] = cand
     return best[length] or []
 
 
-def _pack_run(length: int, table: list[tuple[int, Part]], *, lead_short: bool = False
-              ) -> list[tuple[int, int]]:
-    """(offset, width) parts tiling `length` with the fewest parts.
-    `lead_short` starts with a 2 so the seams land mid-part on the course
-    below."""
+def _run_costs(table: list[tuple[int, Part]], role: Optional[str]) -> Optional[dict[int, float]]:
+    """Per width, -log how often real sets use that part for `role` among
+    the table's parts (usage.part_costs); None without a role."""
+    if role is None or not table:
+        return None
+    from ..usage import part_costs
+    c = part_costs([p.ldraw for _, p in table], role)
+    return {L: c[p.ldraw] for L, p in table}
+
+
+def _pack_run(length: int, table: list[tuple[int, Part]], *, lead_short: bool = False,
+              role: Optional[str] = None) -> list[tuple[int, int]]:
+    """(offset, width) parts tiling `length`: the split real sets make most
+    likely for `role` (the fewest parts without one).  `lead_short` starts
+    with a 2 so the seams land mid-part on the course below."""
     lengths = tuple(L for L, _ in table)
     if not lengths:
         return []
@@ -152,7 +167,7 @@ def _pack_run(length: int, table: list[tuple[int, Part]], *, lead_short: bool = 
     if lead_short and length >= 4 and 2 in lengths:
         out.append((0, 2))
         pos = 2
-    for w in _fewest_parts(length - pos, lengths):
+    for w in _fewest_parts(length - pos, lengths, _run_costs(table, role)):
         out.append((pos, w))
         pos += w
     return out
@@ -288,19 +303,62 @@ def _wall_mask(region: PlanarRegion, target: MeshTarget, frame: WallFrame, n_cou
     return mask
 
 
+def _bonded_split(length: int, table: list[tuple[int, Part]], cost: Optional[dict[int, float]],
+                  avoid: set[int]) -> list[tuple[int, int]]:
+    """(offset, width) parts tiling `length` at the least total cost, where
+    a joint at an offset in `avoid` (a joint of the course below) costs as
+    much as the dearest part: a wall bonds — its joints stagger — before
+    it is made of the likeliest parts.  Without `cost` every part costs 1."""
+    lengths = tuple(L for L, _ in table)
+    c = cost or {L: 1.0 for L in lengths}
+    penalty = max(c.values())
+    best: list[Optional[tuple[float, int, list[int]]]] = [None] * (length + 1)
+    best[0] = (0.0, 0, [])
+    for n in range(1, length + 1):
+        for L in lengths:
+            if L > n or best[n - L] is None:
+                continue
+            prev_cost, prev_n, ws = best[n - L]
+            joint = penalty if (n - L) > 0 and (n - L) in avoid else 0.0
+            cand = (round(prev_cost + c[L] + joint, 9), prev_n + 1, ws + [L])
+            if best[n] is None or cand[:2] < best[n][:2]:
+                best[n] = cand
+    out, pos = [], 0
+    for w in (best[length][2] if best[length] else []):
+        out.append((pos, w))
+        pos += w
+    return out
+
+
 def bond_course(length: int, course: int, free: np.ndarray,
-                lengths: tuple[int, ...] = (16, 12, 8, 6, 4, 3, 2, 1)) -> list[tuple[int, int]]:
+                lengths: tuple[int, ...] = (16, 12, 8, 6, 4, 3, 2, 1), *,
+                parts: Optional[dict[int, Part]] = None, role: Optional[str] = None,
+                below: Optional[set[int]] = None) -> list[tuple[int, int]]:
     """(start, width) bricks for one course over the free cells of a wall.
 
-    Each run of free cells is tiled longest-brick-first.  Odd courses lead
-    each run with a 2-stud brick so the vertical seams land mid-brick on
-    the course below — a running bond — rather than stacking in line."""
-    table = [(L, None) for L in lengths]
+    With the joints of the course `below` (wall offsets where two of its
+    parts meet), each run of free cells is split so its joints don't land
+    on those — a running bond — at the least cost: the fewest parts, or,
+    given the `parts` and a `role`, the split real sets make most likely
+    (`_run_costs`).  Without `below`, odd courses lead each run with a
+    2-stud brick so the seams land mid-brick on the course below."""
+    table = [(L, parts[L] if parts else None) for L in lengths]
+    cost = _run_costs(table, role) if parts else None
     out: list[tuple[int, int]] = []
     for start, run in _runs(free):
-        out.extend((start + off, w) for off, w in
-                   _pack_run(run, table, lead_short=(course % 2 == 1)))
+        if below is None:
+            split = _pack_run(run, table, lead_short=(course % 2 == 1), role=role if parts else None)
+        else:
+            avoid = {j - start for j in below if start < j < start + run}
+            split = _bonded_split(run, table, cost, avoid)
+        out.extend((start + off, w) for off, w in split)
     return out
+
+
+def _joints(course: list[tuple[int, int]]) -> set[int]:
+    """Offsets where two parts of a course meet."""
+    ends = {u + w for u, w in course}
+    return {u for u, _ in course if u in ends}
 
 
 def interlock_corners(walls: list[WallSpec]) -> int:
@@ -359,6 +417,25 @@ def build_wall(spec: WallSpec, claimed: Optional[np.ndarray] = None) -> list[Pla
         return openings
     out: list[Placement] = openings
     n_courses = f.height // COURSE
+    below: set[int] = set()            # joints of the course just laid
+
+    def opening_cols(c: int) -> np.ndarray:
+        if spec.reserved is None or not 0 <= c < n_courses:
+            return np.zeros(f.length, bool)
+        return spec.reserved[:, c * COURSE:(c + 1) * COURSE].any(axis=1)
+
+    def sill_and_lintel(c: int) -> set[int]:
+        """Offsets where course c must not have a joint: across and at the
+        edges of an opening that starts on it (its sill) or ends under it
+        (its lintel) — the brick there spans past the opening, or the
+        opening and the brick under it hang on each other alone."""
+        here = opening_cols(c)
+        out_: set[int] = set()
+        for edge in (opening_cols(c + 1) & ~here, opening_cols(c - 1) & ~here):
+            for a, n in _runs(edge):
+                out_.update(range(a, a + n + 1))
+        return out_
+
     for c in range(n_courses):
         y = f.y0 + c * COURSE
         plated = c in spec.plate_courses and plates
@@ -376,11 +453,17 @@ def build_wall(spec: WallSpec, claimed: Optional[np.ndarray] = None) -> list[Pla
         if plated:
             # two plate layers, the upper one bonded against the lower
             for layer in (0, 1):
-                for u, w in bond_course(f.length, c + layer, free, tuple(sorted(plates, reverse=True))):
+                course = bond_course(f.length, c + layer, free, tuple(sorted(plates, reverse=True)),
+                                     parts=plates, role="wall", below=below | sill_and_lintel(c))
+                for u, w in course:
                     out.append(f.placement(plates[w], spec.colour, u, c * COURSE + layer, w))
+                below = _joints(course)
         else:
-            for u, w in bond_course(f.length, c, free, tuple(sorted(bricks, reverse=True))):
+            course = bond_course(f.length, c, free, tuple(sorted(bricks, reverse=True)),
+                                 parts=bricks, role="wall", below=below | sill_and_lintel(c))
+            for u, w in course:
                 out.append(f.placement(bricks[w], spec.colour, u, c * COURSE, w))
+            below = _joints(course)
     return out
 
 
@@ -749,14 +832,15 @@ def _slope_rotation(axis: str, sign: int) -> int:
     return 90 if sign > 0 else 270
 
 
-def _pack_run_supported(length: int, table: list[tuple[int, Part]], unsup: np.ndarray
-                        ) -> list[tuple[int, int]]:
+def _pack_run_supported(length: int, table: list[tuple[int, Part]], unsup: np.ndarray,
+                        *, role: Optional[str] = None) -> list[tuple[int, int]]:
     """Like `_pack_run`, but no part may lie entirely on unsupported cells
     (`unsup`, one flag per cell of the run): an eave that overhangs the
     wall is carried by parts that also sit on the wall, never by a loose
     part over the void.  Falls back to the plain packing when the whole
     run is unsupported (nothing can help it)."""
-    base = _pack_run(length, table)
+    base = _pack_run(length, table, role=role)
+    cost = _run_costs(table, role)
     if not unsup.any() or unsup.all():
         return base
     lengths = tuple(L for L, _ in table)
@@ -770,7 +854,7 @@ def _pack_run_supported(length: int, table: list[tuple[int, Part]], unsup: np.nd
             mid = length - w0 - w1
             if mid < 0:
                 continue
-            inner = _fewest_parts(mid, lengths) if mid else []
+            inner = _fewest_parts(mid, lengths, cost) if mid else []
             cand = ([w0] if w0 else []) + inner + ([w1] if w1 else [])
             if sum(cand) != length:
                 continue
@@ -783,7 +867,8 @@ def _pack_run_supported(length: int, table: list[tuple[int, Part]], unsup: np.nd
                 pos += w
             if not ok:
                 continue
-            key = (len(cand), sum(1 for w in cand if w == 1))
+            key = ((round(sum(cost[w] for w in cand), 9), len(cand)) if cost is not None
+                   else (len(cand), sum(1 for w in cand if w == 1)))
             if best is None or key < best[0]:
                 best = (key, cand)
     if best is None:
@@ -894,18 +979,19 @@ def build_gable(g: GableSpec, claimed: Optional[np.ndarray] = None,
         free = np.array([cell_free(y, p, r, hgt) for r in range(r0, r1)], dtype=bool)
         rot = 90 if axis == "x" else 0
         for start, run in _runs(free):
-            for off, w in _pack_run(run, table):
+            for off, w in _pack_run(run, table, role="roof"):
                 part = next(pt for L, pt in table if L == w)
                 put(part, p, r0 + start + off, y, 1, w, rot, colour)
 
     def lay_along_pitch(y: int, r: int, lo: int, hi: int, table: list[tuple[int, Part]],
                         colour: int, *, may_hide: bool = True) -> None:
-        """A 1xN run along the pitch axis at ridge-coordinate r."""
+        """A 1xN run along the pitch axis at ridge-coordinate r (gable-end
+        and fill bricks: packed as a wall's are)."""
         free = np.array([cell_free(y, p, r, table[0][1].height_units) for p in range(lo, hi)],
                         dtype=bool)
         rot = 0 if axis == "x" else 90
         for start, run in _runs(free):
-            for off, w in _pack_run(run, table):
+            for off, w in _pack_run(run, table, role="wall"):
                 part = next(pt for L, pt in table if L == w)
                 put(part, lo + start + off, r, y, w, 1, rot, colour, may_hide=may_hide)
 
@@ -983,7 +1069,7 @@ def build_gable(g: GableSpec, claimed: Optional[np.ndarray] = None,
             unsup_all = np.array([not any(column_supported(lo_p + dp, r) for dp in range(depth))
                                   for r in range(rs0, rs1)], dtype=bool)
             for start, run in _runs(free):
-                packed = _pack_run_supported(run, table, unsup_all[start:start + run])
+                packed = _pack_run_supported(run, table, unsup_all[start:start + run], role="roof")
                 for off, w in packed:
                     part = next(pt for L, pt in table if L == w)
                     put(part, lo_p, rs0 + start + off, y, depth, w, rot, face.colour)
@@ -1006,7 +1092,7 @@ def build_gable(g: GableSpec, claimed: Optional[np.ndarray] = None,
             free = np.array([all(cell_free(y, p, r_edge + dr, COURSE) for dr in range(hdepth))
                              for p in range(lo, hi)], dtype=bool)
             for start, run in _runs(free):
-                for off, w in _pack_run(run, hip_table):
+                for off, w in _pack_run(run, hip_table, role="roof"):
                     part = next(pt for L, pt in hip_table if L == w)
                     put(part, lo + start + off, r_edge, y, w, hdepth, rot, g.colour)
             band = (range(r_edge + hdepth, min(rs1, r_edge + hdepth + hstep + 2)) if sign > 0

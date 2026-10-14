@@ -280,6 +280,13 @@ class SemanticLegoPipeline:
             counts["structure:added_supports"] = added
             counts["structure:bridges"] = bridged
             counts["structure:dropped_islands"] = shed
+        if placements:
+            # the build's joints against official models' (data/part_usage.json)
+            from ..usage import joint_realism
+            jr = joint_realism(placements)
+            counts["joints:total"] = jr["joints"]
+            counts["joints:unlike_sets_pct"] = jr["unlike_sets_pct"]
+            counts["joints:unrecorded_pct"] = jr["unrecorded_pct"]
         return PipelineResult(
             placements=placements,
             surface_placements=surface,

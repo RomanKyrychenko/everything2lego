@@ -24,10 +24,14 @@ from pathlib import Path
 
 import numpy as np
 
+# The official LDraw library (ldraw.org complete.zip) first: it has the
+# newer moulds; BrickLink Studio's older copy fills in what only it has.
+LDRAW_OFFICIAL = Path(os.environ.get("LDRAW_OFFICIAL", "/Volumes/PRO-G40/lego_data/ldraw_official/ldraw"))
 LDRAW = Path(os.environ.get("LDRAWDIR", "/Applications/Studio 2.0/ldraw"))
 SHADOW = Path(os.environ.get("LDCAD_SHADOW", "/Volumes/PRO-G40/lego_data/LDCadShadowLibrary"))
-_LD_DIRS = [LDRAW / "parts", LDRAW / "p", LDRAW / "parts" / "s", LDRAW / "p" / "48",
-            LDRAW / "UnOfficial" / "parts", LDRAW / "UnOfficial" / "p"]
+_LD_DIRS = [d for root in (LDRAW_OFFICIAL, LDRAW)
+            for d in (root / "parts", root / "p", root / "parts" / "s", root / "p" / "48",
+                      root / "UnOfficial" / "parts", root / "UnOfficial" / "p")]
 _SH_DIRS = [SHADOW / "parts", SHADOW / "p", SHADOW / "parts" / "s", SHADOW / "p" / "48"]
 
 

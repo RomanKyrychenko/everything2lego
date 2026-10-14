@@ -141,12 +141,29 @@ Words from the names of the official models' sub-models that a part sits
 in ("roof", "floor", "wheel", "tree"): what real-world thing it builds.
 The set's own title words are left out.
 
-## Known gaps
+## Coverage
 
-- **Unmapped parts:** about 1.3% of pieces since 1990 (mostly Technic
-  pins and hinge assemblies) have LDraw numbers that don't map yet. They
-  need an alias table.
-- **Contacts:** these only cover parts that appear in the OMR. Common
-  parts are there; new moulds may not be.
-- **Roles:** these are raw words. A curated mapping to roles (roof, wall,
-  window, door, floor, wheel, plant…) is the next step.
+- **Mapping:** LDraw files reach Rebrickable parts by the same number, the
+  LEGO design ID (through Studio's part table), the BrickLink number, the
+  mould letter and Rebrickable's mould links (`ldraw_name.how`).
+- **Geometry:** the official ldraw.org library comes first
+  (`$LDRAW_OFFICIAL`). Geometry covers 99.3% of the pieces in sets since
+  1990. The rest is non-building parts: watch links, rubber bands.
+- **Roles:** come from the innermost named sub-model around a part. A
+  role needs at least 3 official models showing it.
+- **Contacts:** only cover parts that appear in the OMR.
+
+## Used by the pipeline
+
+`tools/partsdb/export.py` writes `src/everything2lego/data/part_colours.json`
+and `part_usage.json`, read by `everything2lego.usage`:
+
+- **Colours:** parts are only used in the colours LEGO makes them in now
+  (sets since 2010).
+- **Run splitting:** a wall course, a roof row or a ridge is split the way
+  real sets most often split it for that role (`part_costs`). Wall courses
+  still bond: joints off the joints below, and off the sills and lintels
+  of openings.
+- **Report:** `joints:unlike_sets_pct` is the share of a build's stud
+  joints between part pairs that real sets join no more than 0.2 times as
+  often as chance.

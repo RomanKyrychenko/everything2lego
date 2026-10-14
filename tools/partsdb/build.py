@@ -8,7 +8,9 @@ Writes $PARTSDB (default /Volumes/PRO-G40/lego_data/parts.sqlite).  Stages:
 
   catalog    part, category, colour, part_colour, part_theme, relationship
              (Rebrickable dumps in $LEGO_DATA)
-  geometry   ldraw_name, geometry (size in studs/plates), connector,
+  names      ldraw_name: each LDraw file's Rebrickable part (same number,
+             LEGO design ID, BrickLink number, mould letter, mould links)
+  geometry   names, then geometry (size in studs/plates), connector,
              connector_summary (LDraw library + LDCad shadow library)
   inherit    prints and mould variants without an LDraw file take their
              family's geometry and connectors
@@ -44,11 +46,13 @@ DATA = Path(os.environ.get("LEGO_DATA", "/Volumes/PRO-G40/lego_data"))
 DB = Path(os.environ.get("PARTSDB", DATA / "parts.sqlite"))
 OMR = DATA / "omr" / "files"
 SINCE = 1990            # set statistics count sets from this year on
+IN_PRODUCTION = 2010    # a part+colour in sets since then is still made
 NON_SYSTEM = {"Minifigs", "Minifig Heads", "Minifig Upper Body", "Minifig Lower Body",
               "Minifig Headwear", "Minifig Accessories", "Stickers", "Duplo, Quatro and Primo",
               "Non-System Parts", "Minifig Shields, Weapons, & Tools", "Minifig Hipwear",
               "Minifig Neckwear", "Minifig Headwear Accessories", "Minidoll Heads",
-              "Minidoll Upper Body", "Minidoll Lower Body", "Non-Buildable Figures (Duplo, Fabuland, etc)"}
+              "Minidoll Upper Body", "Minidoll Lower Body", "Non-Buildable Figures (Duplo, Fabuland, etc)",
+              "Pen & Watch", "Clikits"}
 
 
 def connect() -> sqlite3.Connection:
@@ -112,6 +116,11 @@ def stage_catalog(con: sqlite3.Connection) -> None:
     pc = ip.groupby(["part_num", "color_id"]).agg(
         n_sets=("set_num", "nunique"), n_pieces=("quantity", "sum"),
         year_from=("year", "min"), year_to=("year", "max")).reset_index()
+    # in production: sets since IN_PRODUCTION (a colour retired in 2004
+    # can't be bought new however many sets once had it)
+    cur = ip[ip.year >= IN_PRODUCTION].groupby(["part_num", "color_id"]).set_num.nunique() \
+        .rename("n_sets_current").reset_index()
+    pc = pc.merge(cur, on=["part_num", "color_id"], how="left").fillna({"n_sets_current": 0})
     pc = pc.merge(colour[["rb_id", "ldraw_code", "name"]], left_on="color_id", right_on="rb_id") \
         .drop(columns=["rb_id"]).rename(columns={"color_id": "rb_colour", "name": "colour"})
     pc.to_sql("part_colour", con, if_exists="replace", index=False)
@@ -138,35 +147,95 @@ def stage_catalog(con: sqlite3.Connection) -> None:
 # ---------------------------------------------------------------------------
 
 def _ldraw_files() -> dict[str, Path]:
-    from connectors import LDRAW
+    from connectors import LDRAW, LDRAW_OFFICIAL
     out = {}
-    for d in (LDRAW / "UnOfficial" / "parts", LDRAW / "parts"):     # official wins
+    # later directories win: Studio's unofficial, Studio's official, then
+    # the current ldraw.org library
+    for d in (LDRAW / "UnOfficial" / "parts", LDRAW / "parts", LDRAW_OFFICIAL / "parts"):
         if d.exists():
             for f in d.glob("*.dat"):
                 out[f.name.lower()] = f
     return out
 
 
+STUDIO_PARTS = Path("/Applications/Studio 2.0/data/StudioPartDefinition2.txt")
+
+
+def _ldraw_to_rebrickable(files: dict[str, Path], known: set[str]) -> pd.DataFrame:
+    """(ldraw file, Rebrickable part, how): each LDraw file's part, by in
+    order the same number; the LEGO design ID (Rebrickable's elements ->
+    Studio's part table) or the BrickLink number (Studio's table); the
+    number with or without a mould letter.  A part may have several files
+    (3040.dat and 3040b.dat are both 3040b).  Then each part still without
+    a file borrows one through Rebrickable's mould and alternate links
+    ("mould": it shares that part's shape)."""
+    rows: list[tuple[str, str, str]] = []
+    done_files: set[str] = set()
+
+    def add(fname: str, pn: str, how: str) -> None:
+        if fname in files and pn in known and fname not in done_files:
+            rows.append((fname, pn, how))
+            done_files.add(fname)
+
+    for fname in files:
+        add(fname, fname[:-4], "same")
+    if STUDIO_PARTS.exists():
+        sd = pd.read_csv(STUDIO_PARTS, sep="\t", dtype=str)
+        sd = sd[sd["LDraw ItemNo"].notna()]
+        ld = sd["LDraw ItemNo"].str.lower()
+        for pn, f in zip(sd["BL ItemNo"], ld):
+            if isinstance(pn, str):
+                add(f, pn, "bricklink")
+        by_design = {}
+        for d, f in zip(sd["LDD ItemNo"], ld):
+            if isinstance(d, str):
+                by_design.setdefault(d, []).append(f)
+        el = _csv("elements", dtype=str).dropna(subset=["design_id"])
+        for pn, d in el.drop_duplicates(["part_num", "design_id"])[["part_num", "design_id"]].values:
+            for f in [d + ".dat"] + by_design.get(d, []):
+                add(f, pn, "design_id")
+    for fname in files:
+        stem = fname[:-4]
+        for cand in [stem + c for c in "abcd"] + ([stem[:-1]] if stem[-1:].isalpha() else []):
+            add(fname, cand, "variant")
+    file_of: dict[str, str] = {}
+    for f, pn, _ in rows:
+        file_of.setdefault(pn, f)
+    rel = _csv("part_relationships")
+    rel = rel[rel.rel_type.isin(["M", "A", "T"])]
+    for c, p_ in zip(rel.child_part_num, rel.parent_part_num):
+        for a, b in ((c, p_), (p_, c)):
+            if a in known and a not in file_of and b in file_of:
+                rows.append((file_of[b], a, "mould"))
+                file_of[a] = file_of[b]
+    return pd.DataFrame(rows, columns=["ldraw", "part_num", "how"])
+
+
+def stage_names(con: sqlite3.Connection) -> None:
+    files = _ldraw_files()
+    part = pd.read_sql("SELECT part_num FROM part", con)
+    ldmap = _ldraw_to_rebrickable(files, set(part.part_num))
+    ldmap.to_sql("ldraw_name", con, if_exists="replace", index=False)
+    con.commit()
+    print(f"names: {ldmap.ldraw.nunique()} LDraw files mapped to {ldmap.part_num.nunique()} parts")
+
+
+def _ld_to_part(con: sqlite3.Connection) -> dict[str, str]:
+    """LDraw file -> Rebrickable part, the strongest match winning (several
+    Rebrickable moulds can share one LDraw file)."""
+    rank = {"same": 0, "design_id": 1, "bricklink": 2, "variant": 3, "mould": 4}
+    df = pd.read_sql("SELECT ldraw, part_num, how FROM ldraw_name", con)
+    df["r"] = df.how.map(rank).fillna(9)
+    df = df.sort_values("r", ascending=False)                      # best last, so it wins
+    return dict(zip(df.ldraw, df.part_num))
+
+
 def stage_geometry(con: sqlite3.Connection) -> None:
     from connectors import part_connectors, summary, facing
     from ldraw_read import part_bbox, save_cache
-    files = _ldraw_files()
+    stage_names(con)
     part = pd.read_sql("SELECT part_num, name, system, n_sets FROM part", con)
-    known = set(part.part_num)
-    # LDraw file -> Rebrickable part: the same number, else the number
-    # without Rebrickable's mould letter (3040 -> 3040b) or with it
-    rows = []
-    for fname in files:
-        stem = fname[:-4]
-        if stem in known:
-            rows.append((fname, stem, "same"))
-            continue
-        cand = [stem + c for c in "abcd" if stem + c in known] or \
-               ([stem[:-1]] if stem[-1:].isalpha() and stem[:-1] in known else [])
-        if cand:
-            rows.append((fname, cand[0], "variant"))
-    ldmap = pd.DataFrame(rows, columns=["ldraw", "part_num", "how"])
-    ldmap.to_sql("ldraw_name", con, if_exists="replace", index=False)
+    ldmap = pd.read_sql("SELECT ldraw, part_num, how FROM ldraw_name", con)
     # geometry and connectors for parts that matter: used in sets, system
     used = set(part[(part.n_sets.fillna(0) >= 1) & part.system].part_num)
     todo = ldmap[ldmap.part_num.isin(used)].drop_duplicates("part_num")
@@ -305,7 +374,7 @@ def stage_contacts(con: sqlite3.Connection, *, tol: float = 1.5) -> None:
     from scipy.spatial import cKDTree
     from connectors import facing, part_connectors
     from ldraw_read import flatten, part_bbox
-    ldmap = dict(pd.read_sql("SELECT ldraw, part_num FROM ldraw_name", con).values)
+    ldmap = _ld_to_part(con)
     files = sorted(OMR.glob("*.mpd")) + sorted(OMR.glob("*.ldr"))
     pair_n: Counter = Counter()
     pair_models: dict = defaultdict(set)
@@ -405,7 +474,7 @@ set assembly assy section piece pieces small big large mini x y z""".split())
 
 def stage_roles(con: sqlite3.Connection) -> None:
     from ldraw_read import flatten
-    ldmap = dict(pd.read_sql("SELECT ldraw, part_num FROM ldraw_name", con).values)
+    ldmap = _ld_to_part(con)
     words: dict = defaultdict(Counter)
     files = sorted(OMR.glob("*.mpd"))
     # the set's own title names every part of it ("titanic", "coaster"):
@@ -427,6 +496,10 @@ def stage_roles(con: sqlite3.Connection) -> None:
                 out.add(t)
         return out
 
+    role_of = {w: r for r, ws in ROLES.items() for w in ws.split()}
+    word_models: dict = defaultdict(lambda: defaultdict(set))
+    nearest: dict = defaultdict(Counter)              # part -> role -> uses
+    nearest_models: dict = defaultdict(lambda: defaultdict(set))
     for f in files:
         try:
             parts = flatten(f)
@@ -434,11 +507,23 @@ def stage_roles(con: sqlite3.Connection) -> None:
             continue
         drop = titles.get(f.stem.split("_")[0], set())
         for p in parts:
+            pn = ldmap.get(p.name, p.name[:-4])
             toks = set()
             for sub in p.path:
                 toks |= tokens(sub) - drop
             for t in toks:
-                words[ldmap.get(p.name, p.name[:-4])][t] += 1
+                words[pn][t] += 1
+                word_models[pn][t].add(f.stem)
+            # the role: the innermost assembly around the part whose name
+            # names one (a skeleton in "roof decoration" is decoration's,
+            # not the roof's — its own sub-model says so first)
+            for sub in reversed(p.path):
+                roles = {role_of[t] for t in tokens(sub) - drop if t in role_of}
+                if roles:
+                    for r in roles:
+                        nearest[pn][r] += 1
+                        nearest_models[pn][r].add(f.stem)
+                    break
     rows = []
     df = Counter()
     for c in words.values():
@@ -448,12 +533,16 @@ def stage_roles(con: sqlite3.Connection) -> None:
         total = sum(c.values())
         for t, k in c.most_common(12):
             idf = np.log(n_parts / (1 + df[t]))
-            rows.append((pn, t, k, k / total, k / total * idf))
-    pd.DataFrame(rows, columns=["part_num", "word", "n", "share", "tfidf"]) \
+            rows.append((pn, t, k, len(word_models[pn][t]), k / total, k / total * idf))
+    pd.DataFrame(rows, columns=["part_num", "word", "n", "n_models", "share", "tfidf"]) \
         .to_sql("role", con, if_exists="replace", index=False)
+    ev = [(pn, r, k, len(nearest_models[pn][r])) for pn, c in nearest.items() for r, k in c.items()]
+    pd.DataFrame(ev, columns=["part_num", "role", "n", "n_models"]) \
+        .to_sql("role_evidence", con, if_exists="replace", index=False)
     con.execute("CREATE INDEX IF NOT EXISTS ix_role ON role(part_num)")
     con.commit()
-    print(f"roles: {len(words)} parts named in sub-models, {len(rows)} part-word rows")
+    print(f"roles: {len(words)} parts named in sub-models, {len(rows)} part-word rows, "
+          f"{len(ev)} part-role evidence rows")
 
 
 # Roles a part can play, by the words official models name their
@@ -480,13 +569,13 @@ ROLES = {
 }
 
 
-def stage_part_roles(con: sqlite3.Connection) -> None:
-    """part_role: each part's share of uses (sub-model words) in each role."""
-    words = {w: r for r, ws in ROLES.items() for w in ws.split()}
-    role = pd.read_sql("SELECT part_num, word, n FROM role", con)
-    role["role"] = role.word.map(words)
-    hit = role.dropna(subset=["role"])
-    pr = hit.groupby(["part_num", "role"]).n.sum().reset_index()
+def stage_part_roles(con: sqlite3.Connection, *, min_models: int = 3) -> None:
+    """part_role: each System part's share of uses in each role, from the
+    innermost named assembly around it (role_evidence), counting a role
+    only where at least `min_models` official models show it."""
+    ev = pd.read_sql("""SELECT e.part_num, e.role, e.n, e.n_models FROM role_evidence e
+                        JOIN part p ON p.part_num = e.part_num WHERE p.system""", con)
+    pr = ev[ev.n_models >= min_models].copy()
     pr["share"] = pr.n / pr.groupby("part_num").n.transform("sum")
     pr.to_sql("part_role", con, if_exists="replace", index=False)
     con.execute("CREATE INDEX IF NOT EXISTS ix_prole ON part_role(part_num)")
@@ -494,7 +583,7 @@ def stage_part_roles(con: sqlite3.Connection) -> None:
     print(f"part_roles: {pr.part_num.nunique()} parts with a role")
 
 
-STAGES = {"catalog": stage_catalog, "geometry": stage_geometry, "inherit": stage_inherit,
+STAGES = {"catalog": stage_catalog, "names": stage_names, "geometry": stage_geometry, "inherit": stage_inherit,
           "cooccur": stage_cooccur,
           "contacts": stage_contacts, "roles": stage_roles, "part_roles": stage_part_roles}
 

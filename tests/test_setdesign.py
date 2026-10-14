@@ -316,3 +316,18 @@ def test_one_roof_per_block_but_a_cross_gable_keeps_both():
     wing = pair_pitches([_face("x", +1, 10.0, 14.0, (20, 30), 30, 45),
                          _face("x", -1, 18.0, 14.0, (20, 30), 30, 45)])
     assert len(one_roof_per_block(along_x + wing, solid)) == 2
+
+
+def test_wall_courses_bond_while_packing_the_way_sets_do():
+    """Courses split by real-set usage still bond: no joint sits on a
+    joint of the course below."""
+    from everything2lego.semantic_v2.setdesign import _joints
+    frame = WallFrame(axis_x=True, origin=0, other=0, y0=0, length=14, height=5 * COURSE)
+    ps = build_wall(WallSpec(frame=frame, colour=4))
+    courses = {}
+    for p in ps:
+        courses.setdefault(p.y_plate, []).append((p.x_stud, p.w_world))
+    ys = sorted(courses)
+    for lo, hi in zip(ys, ys[1:]):
+        assert not (_joints(courses[lo]) & _joints(courses[hi])), (lo, courses[lo], courses[hi])
+    assert check(ps).components == 1
