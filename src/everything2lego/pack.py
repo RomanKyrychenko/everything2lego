@@ -1279,7 +1279,7 @@ def _cluster_by_color(placements: list[Placement],
 
 
 # Window frames and doors by (studs wide, plates tall).
-_WINDOW_BY_SIZE = {(2, 6): "60592.dat", (2, 9): "60800.dat",
+_WINDOW_BY_SIZE = {(2, 6): "60592.dat", (2, 9): "60593.dat",
                    (4, 9): "60594.dat", (6, 9): "3853.dat"}
 _DOOR_BY_SIZE = {(4, 15): "60623.dat", (4, 18): "60614.dat"}
 

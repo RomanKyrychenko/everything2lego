@@ -87,7 +87,7 @@ def test_window_detection_swaps_an_exact_cluster_and_nothing_else():
     taller += [brick("3004.dat", 4, 0, 9, code=71), brick("3004.dat", 6, 0, 9, code=4)]
     out, stats = pack.detect_windows_and_doors(taller)
     assert stats["windows_placed"] == 1
-    assert next(p for p in out if p.part.shape == "window").part.ldraw == "60800.dat"
+    assert next(p for p in out if p.part.shape == "window").part.ldraw == "60593.dat"
     assert max(cells(out).values()) == 1
 
 

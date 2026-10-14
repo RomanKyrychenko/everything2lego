@@ -62,11 +62,9 @@
     {"ldraw": "3684.dat",  "bl": "3684",  "shape": "slope", "footprint": [2, 2], "height_units": 9, "slope_dir": "+x", "name": "Slope 75 2 x 2 x 3"},
     {"ldraw": "3678b.dat", "bl": "3678b", "shape": "slope", "footprint": [2, 2], "height_units": 6, "slope_dir": "+x", "name": "Slope 65 2 x 2 x 2"},
     {"ldraw": "3660.dat",  "bl": "3660",  "shape": "slope_inv", "footprint": [2, 2], "height_units": 3, "slope_dir": "+x", "name": "Slope 45 2 x 2 Inverted (dup safe)"},
-    {"ldraw": "3746b.dat", "bl": "3746b", "shape": "slope_inv", "footprint": [3, 1], "height_units": 3, "slope_dir": "+x", "name": "Slope 45 3 x 1 Inverted"},
     {"ldraw": "3747b.dat", "bl": "3747b", "shape": "slope_inv", "footprint": [3, 2], "height_units": 3, "slope_dir": "+x", "name": "Slope 45 3 x 2 Inverted"},
     {"ldraw": "3688.dat",  "bl": "3688",  "shape": "slope", "footprint": [2, 2], "height_units": 9, "slope_dir": "+x", "name": "Slope 75 2 x 2 x 3 Double Convex"},
     {"ldraw": "6091.dat",  "bl": "6091",  "shape": "slope", "footprint": [2, 2], "height_units": 2, "slope_dir": "+x", "name": "Slope 45 2 x 2 x 2/3 Double Convex"},
-    {"ldraw": "65326.dat", "bl": "65326", "shape": "slope", "footprint": [4, 1], "height_units": 3, "slope_dir": "+x", "name": "Slope Curved 4 x 1 (alt)"},
     {"ldraw": "62361.dat", "bl": "62361", "shape": "slope", "footprint": [6, 1], "height_units": 3, "slope_dir": "+x", "name": "Slope Curved 6 x 1"},
     {"ldraw": "43708.dat", "bl": "43708", "shape": "slope_inv", "footprint": [4, 2], "height_units": 3, "slope_dir": "+x", "name": "Slope Curved 4 x 2 Inverted"},
 
@@ -106,7 +104,7 @@
     {"ldraw": "87552.dat", "bl": "87552", "shape": "panel", "footprint": [2, 1], "height_units": 6, "name": "Panel 1 x 2 x 2 with Side Supports"},
     {"ldraw": "6081.dat",  "bl": "6081",  "shape": "panel", "footprint": [4, 1], "height_units": 6, "name": "Panel 1 x 4 x 2"},
     {"ldraw": "60581.dat", "bl": "60581", "shape": "panel", "footprint": [4, 1], "height_units": 9, "name": "Panel 1 x 4 x 3 with Side Supports"},
-    {"ldraw": "35286.dat", "bl": "35286", "shape": "panel", "footprint": [6, 1], "height_units": 9, "name": "Panel 1 x 6 x 3"},
+    {"ldraw": "98280.dat", "bl": "98280", "shape": "panel", "footprint": [6, 1], "height_units": 9, "name": "Panel 1 x 6 x 3 with Studs on Sides"},
     {"ldraw": "30144.dat", "bl": "30144", "shape": "panel", "footprint": [4, 1], "height_units": 18, "name": "Panel 1 x 4 x 6"},
     {"ldraw": "3633.dat",  "bl": "3633",  "shape": "panel", "footprint": [4, 1], "height_units": 6, "name": "Fence 1 x 4 x 2 Lattice", "plain": false},
     {"ldraw": "30046.dat", "bl": "30046", "shape": "panel", "footprint": [4, 1], "height_units": 6, "name": "Fence 1 x 4 x 2 Ornamental", "plain": false},
@@ -114,7 +112,7 @@
 
     {"ldraw": "60592.dat", "bl": "60592", "shape": "window", "footprint": [2, 1], "height_units": 6, "name": "Window 1 x 2 x 2 Frame"},
     {"ldraw": "60594.dat", "bl": "60594", "shape": "window", "footprint": [4, 1], "height_units": 9, "name": "Window 1 x 4 x 3 Frame"},
-    {"ldraw": "60800.dat", "bl": "60800", "shape": "window", "footprint": [2, 1], "height_units": 9, "name": "Window 1 x 2 x 3 Frame"},
+    {"ldraw": "60593.dat", "bl": "60593", "shape": "window", "footprint": [2, 1], "height_units": 9, "name": "Window 1 x 2 x 3 Frame"},
     {"ldraw": "3853.dat",  "bl": "3853",  "shape": "window", "footprint": [6, 1], "height_units": 9, "name": "Window 1 x 6 x 3 Frame"},
 
     {"ldraw": "60623.dat", "bl": "60623", "shape": "door",   "footprint": [4, 1], "height_units": 15, "name": "Door 1 x 4 x 5 Right"},
@@ -132,7 +130,7 @@
     {"ldraw": "4162.dat",  "bl": "4162",  "shape": "tile",  "footprint": [8, 1],  "height_units": 1, "name": "Tile 1 x 8"},
     {"ldraw": "69729.dat", "bl": "69729", "shape": "tile",  "footprint": [6, 2],  "height_units": 1, "name": "Tile 2 x 6"},
     {"ldraw": "26603.dat", "bl": "26603", "shape": "tile",  "footprint": [3, 2],  "height_units": 1, "name": "Tile 2 x 3"},
-    {"ldraw": "4109.dat",  "bl": "4109",  "shape": "tile",  "footprint": [1, 1],  "height_units": 1, "name": "Tile 1 x 1 Round", "plain": false},
+    {"ldraw": "98138.dat", "bl": "98138", "shape": "tile",  "footprint": [1, 1],  "height_units": 1, "name": "Tile 1 x 1 Round", "plain": false},
     {"ldraw": "4218.dat",  "bl": "4218",  "shape": "tile",  "footprint": [2, 1],  "height_units": 1, "name": "Grille Tile 1 x 2"},
     {"ldraw": "2412b.dat", "bl": "2412b", "shape": "tile",  "footprint": [2, 1],  "height_units": 1, "name": "Grille Tile 1 x 2 with Handle"},
     {"ldraw": "4032a.dat", "bl": "4032",  "shape": "plate", "footprint": [2, 2],  "height_units": 1, "name": "Plate Round 2 x 2 with Hole", "plain": false},
