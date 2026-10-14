@@ -331,3 +331,12 @@ def test_wall_courses_bond_while_packing_the_way_sets_do():
     for lo, hi in zip(ys, ys[1:]):
         assert not (_joints(courses[lo]) & _joints(courses[hi])), (lo, courses[lo], courses[hi])
     assert check(ps).components == 1
+
+
+def test_a_long_wall_is_built_from_the_bricks_real_walls_use():
+    """Official models' walls never use a 1x16 brick, and real sets rarely
+    build on one: a 16-stud wall course is not one 1x16."""
+    frame = WallFrame(axis_x=True, origin=0, other=0, y0=0, length=16, height=4 * COURSE)
+    ps = build_wall(WallSpec(frame=frame, colour=4))
+    assert not any(p.part.ldraw == "2465.dat" for p in ps)
+    assert check(ps).components == 1

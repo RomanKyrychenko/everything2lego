@@ -27,17 +27,26 @@ def _usage() -> dict:
         return {"all": {}, "roles": {}, "joints": {}}
 
 
-def part_costs(ldraws: list[str], role: str | None = None, *, min_evidence: int = 20) -> dict[str, float]:
-    """-log P(part | role) over `ldraws` (add-one smoothed).  Uses the role's
-    counts when the official models show the role with these parts at least
-    `min_evidence` times, else how often sets use each part at all."""
+def part_costs(ldraws: list[str], role: str | None = None, *, min_evidence: int = 20,
+               prior: float = 20.0) -> dict[str, float]:
+    """-log P(part | role) over `ldraws`.  The role's counts from official
+    models are sparse (a 1x16 brick never appears in their walls), so they
+    are smoothed toward how often sets use each part at all: P = (n_role +
+    prior * share_all) / (N_role + prior).  A part the role never shows
+    then costs about what its overall rarity says, not the flat 1/N an
+    add-one count would give it.  Without enough role evidence
+    (`min_evidence`), the overall shares alone."""
     u = _usage()
+    allc = u.get("all", {})
+    g = [allc.get(ld, 0) + 1 for ld in ldraws]                  # overall, add-one
+    gz = float(sum(g))
+    share = [x / gz for x in g]
     counts = u.get("roles", {}).get(role or "", {})
     n = [counts.get(ld, 0) for ld in ldraws]
     if sum(n) < min_evidence:
-        n = [u.get("all", {}).get(ld, 0) for ld in ldraws]
-    total = sum(n) + len(ldraws)
-    return {ld: -math.log((k + 1) / total) for ld, k in zip(ldraws, n)}
+        return {ld: -math.log(sh) for ld, sh in zip(ldraws, share)}
+    total = sum(n) + prior
+    return {ld: -math.log((k + prior * sh) / total) for ld, k, sh in zip(ldraws, n, share)}
 
 
 def joint_ratio(male: str, female: str) -> float | None:
@@ -75,3 +84,28 @@ def joint_realism(placements, *, rare: float = 0.2) -> dict[str, float]:
     return {"joints": total,
             "unlike_sets_pct": round(100 * rare_n / known, 1) if known else 0.0,
             "unrecorded_pct": round(100 * unknown / total, 1) if total else 0.0}
+
+
+UNRECORDED_JOINT = 1.0   # cost of a joint the official models never show (about -log 0.37)
+
+
+def joint_cost(male: str, female: str) -> float:
+    """-log of how often official models make this joint against chance,
+    floored at 0 (a joint as common as chance or more costs nothing);
+    UNRECORDED_JOINT when the pair has no record."""
+    r = joint_ratio(male, female)
+    if r is None:
+        return UNRECORDED_JOINT
+    return max(0.0, -math.log(max(r, 1e-3)))
+
+
+def landing_tax(ldraws: list[str], role: str | None = None) -> dict[str, float]:
+    """For each part, the joint cost it can expect from what lands on it:
+    sum over the parts `ldraws` (what goes on top, as often as real sets
+    use them for `role`) of P(q) * joint_cost(part, q).  A part real sets
+    rarely build on — a 1x16 brick in a wall — is dear before anything
+    sits on it, not only after."""
+    costs = part_costs(ldraws, role)
+    probs = {q: math.exp(-c) for q, c in costs.items()}
+    z = sum(probs.values()) or 1.0
+    return {p: sum(probs[q] / z * joint_cost(p, q) for q in ldraws) for p in ldraws}

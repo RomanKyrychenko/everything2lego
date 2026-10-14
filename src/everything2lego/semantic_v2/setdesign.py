@@ -304,14 +304,26 @@ def _wall_mask(region: PlanarRegion, target: MeshTarget, frame: WallFrame, n_cou
 
 
 def _bonded_split(length: int, table: list[tuple[int, Part]], cost: Optional[dict[int, float]],
-                  avoid: set[int]) -> list[tuple[int, int]]:
+                  avoid: set[int], under: Optional[list[Optional[str]]] = None
+                  ) -> list[tuple[int, int]]:
     """(offset, width) parts tiling `length` at the least total cost, where
     a joint at an offset in `avoid` (a joint of the course below) costs as
     much as the dearest part: a wall bonds — its joints stagger — before
-    it is made of the likeliest parts.  Without `cost` every part costs 1."""
+    it is made of the likeliest parts.  `under` (the LDraw part under each
+    cell, None where nothing) adds what each part's joints with the parts
+    it lands on cost (usage.joint_cost: unusual pairings in real sets are
+    dear).  Without `cost` every part costs 1."""
+    from ..usage import joint_cost
     lengths = tuple(L for L, _ in table)
+    parts = dict(table)
     c = cost or {L: 1.0 for L in lengths}
     penalty = max(c.values())
+
+    def landing(a: int, L: int) -> float:
+        if under is None or parts.get(L) is None:
+            return 0.0
+        return sum(joint_cost(m, parts[L].ldraw) for m in {under[i] for i in range(a, a + L)} if m)
+
     best: list[Optional[tuple[float, int, list[int]]]] = [None] * (length + 1)
     best[0] = (0.0, 0, [])
     for n in range(1, length + 1):
@@ -320,7 +332,7 @@ def _bonded_split(length: int, table: list[tuple[int, Part]], cost: Optional[dic
                 continue
             prev_cost, prev_n, ws = best[n - L]
             joint = penalty if (n - L) > 0 and (n - L) in avoid else 0.0
-            cand = (round(prev_cost + c[L] + joint, 9), prev_n + 1, ws + [L])
+            cand = (round(prev_cost + c[L] + joint + landing(n - L, L), 9), prev_n + 1, ws + [L])
             if best[n] is None or cand[:2] < best[n][:2]:
                 best[n] = cand
     out, pos = [], 0
@@ -333,25 +345,43 @@ def _bonded_split(length: int, table: list[tuple[int, Part]], cost: Optional[dic
 def bond_course(length: int, course: int, free: np.ndarray,
                 lengths: tuple[int, ...] = (16, 12, 8, 6, 4, 3, 2, 1), *,
                 parts: Optional[dict[int, Part]] = None, role: Optional[str] = None,
-                below: Optional[set[int]] = None) -> list[tuple[int, int]]:
+                below: Optional[set[int]] = None,
+                under: Optional[list[Optional[str]]] = None) -> list[tuple[int, int]]:
     """(start, width) bricks for one course over the free cells of a wall.
 
     With the joints of the course `below` (wall offsets where two of its
     parts meet), each run of free cells is split so its joints don't land
     on those — a running bond — at the least cost: the fewest parts, or,
     given the `parts` and a `role`, the split real sets make most likely
-    (`_run_costs`).  Without `below`, odd courses lead each run with a
-    2-stud brick so the seams land mid-brick on the course below."""
+    (`_run_costs`), each part also paying for how unusual its joints with
+    the parts `under` it are in real sets.  Without `below`, odd courses
+    lead each run with a 2-stud brick so the seams land mid-brick on the
+    course below."""
     table = [(L, parts[L] if parts else None) for L in lengths]
     cost = _run_costs(table, role) if parts else None
+    if cost is not None and under is not None:
+        # what the next course will pay to land on each part, expected
+        from ..usage import landing_tax
+        tax = landing_tax([p.ldraw for _, p in table], role)
+        cost = {L: cost[L] + tax[p.ldraw] for L, p in table}
     out: list[tuple[int, int]] = []
     for start, run in _runs(free):
         if below is None:
             split = _pack_run(run, table, lead_short=(course % 2 == 1), role=role if parts else None)
         else:
             avoid = {j - start for j in below if start < j < start + run}
-            split = _bonded_split(run, table, cost, avoid)
+            split = _bonded_split(run, table, cost, avoid,
+                                  under[start:start + run] if under is not None else None)
         out.extend((start + off, w) for off, w in split)
+    return out
+
+
+def _under(course: list[tuple[int, int]], parts: dict[int, Part], length: int) -> list[Optional[str]]:
+    """The LDraw part at each cell of a course just laid (None where none)."""
+    out: list[Optional[str]] = [None] * length
+    for u, w in course:
+        for i in range(u, min(length, u + w)):
+            out[i] = parts[w].ldraw
     return out
 
 
@@ -418,6 +448,7 @@ def build_wall(spec: WallSpec, claimed: Optional[np.ndarray] = None) -> list[Pla
     out: list[Placement] = openings
     n_courses = f.height // COURSE
     below: set[int] = set()            # joints of the course just laid
+    under: list[Optional[str]] = [None] * f.length   # the part under each cell
 
     def opening_cols(c: int) -> np.ndarray:
         if spec.reserved is None or not 0 <= c < n_courses:
@@ -454,16 +485,20 @@ def build_wall(spec: WallSpec, claimed: Optional[np.ndarray] = None) -> list[Pla
             # two plate layers, the upper one bonded against the lower
             for layer in (0, 1):
                 course = bond_course(f.length, c + layer, free, tuple(sorted(plates, reverse=True)),
-                                     parts=plates, role="wall", below=below | sill_and_lintel(c))
+                                     parts=plates, role="wall", below=below | sill_and_lintel(c),
+                                     under=under)
                 for u, w in course:
                     out.append(f.placement(plates[w], spec.colour, u, c * COURSE + layer, w))
                 below = _joints(course)
+                under = _under(course, plates, f.length)
         else:
             course = bond_course(f.length, c, free, tuple(sorted(bricks, reverse=True)),
-                                 parts=bricks, role="wall", below=below | sill_and_lintel(c))
+                                 parts=bricks, role="wall", below=below | sill_and_lintel(c),
+                                 under=under)
             for u, w in course:
                 out.append(f.placement(bricks[w], spec.colour, u, c * COURSE, w))
             below = _joints(course)
+            under = _under(course, bricks, f.length)
     return out
 
 
