@@ -69,6 +69,23 @@ pub struct Problem {
     pub n_ref: f64, // pairs a real set of the target's volume has
     pub w_dens: f64,
     pub dens_sd: f64, // spread of log(pairs per cell) over the reference models
+    pub w_sil: f64,
+    pub style: f64,
+    pub w_glob2: f64,
+    pub logp2: *const f64, // n_tok*n_tok*3: log p_ref of path patterns (a - b - c as (a, c, where))
+    pub middle_w: *const f64, // n_tok: a path's weight through a part of this token
+    // each option's outline in the three axis views, sample pixels box-local:
+    // along x (sy, sz), along y (sx, sz), along z (sy, sx)
+    pub pixx_start: *const i32,
+    pub pixx: *const i32,
+    pub pixy_start: *const i32,
+    pub pixy: *const i32,
+    pub pixz_start: *const i32,
+    pub pixz: *const i32,
+    // the target's outline in those views: (H*4, Z*4), (X*4, Z*4), (H*4, X*4)
+    pub tsx: *const u8,
+    pub tsy: *const u8,
+    pub tsz: *const u8,
     pub t_start_share: f64,
     pub t_final_share: f64,
     pub iters: i64,
@@ -90,8 +107,9 @@ pub struct Problem {
     pub hist: *mut f64,
 }
 
-const INFO_LEN: usize = 12;
+const INFO_LEN: usize = 16;
 const NSAMP: f64 = 64.0;
+const SUB: i32 = 4;
 
 // ---------------------------------------------------------------------------
 // random numbers: xoshiro256**, seeded by splitmix64
@@ -151,6 +169,7 @@ struct Opt {
     bottom: Vec<(i32, i32)>,
     sides: Vec<(i32, i32, i32, i32, i32)>,
     halo: Vec<(i32, i32, i32)>,
+    pix: [Vec<(i32, i32)>; 3],
     top_mask: Vec<bool>, // W*D
     bot_mask: Vec<bool>,
 }
@@ -192,6 +211,13 @@ struct Data {
     n_ref: f64,
     w_dens: f64,
     dens_sd: f64,
+    w_sil: f64,
+    style: f64,
+    w_glob2: f64,
+    logp2: Vec<f64>,
+    middle_w: Vec<f64>,
+    tsil: [Vec<bool>; 3],
+    scols: [i32; 3], // columns of each view (rows are implied)
     top_k: usize,
 }
 
@@ -229,6 +255,12 @@ impl Data {
         let sv = v(p.side_v, ss[n_opt] as usize * 5);
         let hs = v(p.halo_start, n_opt + 1);
         let hv = v(p.halo_yxz, hs[n_opt] as usize * 3);
+        let pstart = [v(p.pixx_start, n_opt + 1), v(p.pixy_start, n_opt + 1), v(p.pixz_start, n_opt + 1)];
+        let pvals = [
+            v(p.pixx, pstart[0][n_opt] as usize * 2),
+            v(p.pixy, pstart[1][n_opt] as usize * 2),
+            v(p.pixz, pstart[2][n_opt] as usize * 2),
+        ];
         let mut opts = Vec::with_capacity(n_opt);
         let mut boxes = std::collections::HashMap::new();
         for k in 0..n_opt {
@@ -271,6 +303,11 @@ impl Data {
                 bottom,
                 sides,
                 halo,
+                pix: [0, 1, 2].map(|a| {
+                    (pstart[a][k] as usize..pstart[a][k + 1] as usize)
+                        .map(|c| (pvals[a][2 * c], pvals[a][2 * c + 1]))
+                        .collect()
+                }),
                 top_mask,
                 bot_mask,
             });
@@ -305,6 +342,17 @@ impl Data {
             n_ref: p.n_ref,
             w_dens: p.w_dens,
             dens_sd: p.dens_sd,
+            w_sil: p.w_sil,
+            style: p.style,
+            w_glob2: p.w_glob2,
+            logp2: v(p.logp2, n_tok * n_tok * 3),
+            middle_w: v(p.middle_w, n_tok),
+            tsil: [
+                v(p.tsx, (p.h * SUB * p.z * SUB) as usize).iter().map(|&b| b != 0).collect(),
+                v(p.tsy, (p.x * SUB * p.z * SUB) as usize).iter().map(|&b| b != 0).collect(),
+                v(p.tsz, (p.h * SUB * p.x * SUB) as usize).iter().map(|&b| b != 0).collect(),
+            ],
+            scols: [p.z * SUB, p.z * SUB, p.x * SUB],
             top_k: p.top_k.max(1) as usize,
         }
     }
@@ -317,6 +365,17 @@ impl Data {
     #[inline]
     fn key(&self, a: usize, b: usize, d: u8) -> usize {
         (a * self.n_tok + b) * 3 + d as usize
+    }
+
+    /// Index into view `a` of an option's outline pixel (u, v) placed at (oy, ox, oz).
+    #[inline]
+    fn pix_idx(&self, a: usize, u: i32, v: i32, oy: i32, ox: i32, oz: i32) -> usize {
+        let (r, c) = match a {
+            0 => (u + SUB * oy, v + SUB * oz),
+            1 => (u + SUB * ox, v + SUB * oz),
+            _ => (u + SUB * oy, v + SUB * ox),
+        };
+        (r * self.scols[a] + c) as usize
     }
 
     /// Colour error of the cells that show, if this option took this colour there.
@@ -399,6 +458,43 @@ impl Data {
 // state
 // ---------------------------------------------------------------------------
 
+/// KL(counts || reference) under count changes: sum c log c, sum c log p, n.
+struct Kl {
+    counts: Vec<f64>,
+    s_clogc: f64,
+    s_clogp: f64,
+    n: f64,
+}
+
+impl Kl {
+    fn new(len: usize) -> Kl {
+        Kl { counts: vec![0.0; len], s_clogc: 0.0, s_clogp: 0.0, n: 0.0 }
+    }
+    fn add(&mut self, key: usize, dc: f64, logp: f64) {
+        // counts may be weights (paths); a count within EPS of 0 is 0
+        let c0 = self.counts[key];
+        let mut c1 = c0 + dc;
+        if c1 < 1e-9 {
+            c1 = 0.0;
+        }
+        if c0 > 0.0 {
+            self.s_clogc -= c0 * c0.ln();
+        }
+        if c1 > 0.0 {
+            self.s_clogc += c1 * c1.ln();
+        }
+        self.s_clogp += dc * logp;
+        self.n += dc;
+        self.counts[key] = c1;
+    }
+    fn value(&self) -> f64 {
+        if self.n <= 1e-9 {
+            return 0.0;
+        }
+        (self.s_clogc - self.s_clogp) / self.n - self.n.ln()
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Item {
     opt: usize,
@@ -418,10 +514,12 @@ struct State<'a> {
     live_pos: Vec<usize>,
     unsup: Vec<bool>,
     n_unsup: i64,
-    counts: Vec<f64>,
-    s_clogc: f64,
-    s_clogp: f64,
-    n_pairs: f64,
+    kl1: Kl, // touching pairs
+    kl2: Kl, // paths of two through a shared neighbour
+    adj: Vec<Vec<(usize, u8)>>,
+    path_queue: Vec<(usize, f64)>,
+    csil: [Vec<i32>; 3], // parts covering each outline pixel
+    sil: i64,            // outline pixels wrong
     loc: f64,
     col: f64,
     fid: f64,
@@ -455,10 +553,12 @@ impl<'a> State<'a> {
             live_pos: Vec::new(),
             unsup: Vec::new(),
             n_unsup: 0,
-            counts: vec![0.0; d.n_tok * d.n_tok * 3],
-            s_clogc: 0.0,
-            s_clogp: 0.0,
-            n_pairs: 0.0,
+            kl1: Kl::new(d.n_tok * d.n_tok * 3),
+            kl2: Kl::new(d.n_tok * d.n_tok * 3),
+            adj: Vec::new(),
+            path_queue: Vec::new(),
+            csil: [0, 1, 2].map(|a| vec![0; d.tsil[a].len()]),
+            sil: d.tsil.iter().map(|t| t.iter().filter(|&&b| b).count() as i64).sum(),
             loc: 0.0,
             col: 0.0,
             fid: d.fill.iter().sum(),
@@ -555,55 +655,146 @@ impl<'a> State<'a> {
         false
     }
 
-    fn kl_add(&mut self, key: usize, dc: f64) {
-        let c0 = self.counts[key];
-        let c1 = c0 + dc;
-        if c0 > 0.0 {
-            self.s_clogc -= c0 * c0.ln();
-        }
-        if c1 > 0.0 {
-            self.s_clogc += c1 * c1.ln();
-        }
-        self.s_clogp += dc * self.d.logp[key];
-        self.n_pairs += dc;
-        self.counts[key] = c1;
-    }
-
     fn pairs(&mut self, i: usize, nb: &[(usize, u8)], sign: f64) {
         let ti = self.opt(i).token;
         for &(j, dir) in nb {
             let tj = self.opt(j).token;
             for (a, b, dd) in [(ti, tj, dir), (tj, ti, flip(dir))] {
                 let k = self.d.key(a, b, dd);
-                self.kl_add(k, sign);
+                self.kl1.add(k, sign, self.d.logp[k]);
                 self.loc += sign * self.d.nll[k];
             }
         }
     }
 
-    fn kl(&self) -> f64 {
-        // sum c log c / n - sum c log p / n - log n
-        if self.n_pairs <= 0.0 {
-            return 0.0;
+    /// Where b is from a, from the two boxes (features.vertical).
+    fn where_(&self, a: usize, b: usize) -> u8 {
+        let (ia, ib) = (self.item(a), self.item(b));
+        let (ha, hb) = (self.d.opts[ia.opt].h, self.d.opts[ib.opt].h);
+        if ib.y >= ia.y + ha {
+            UP
+        } else if ib.y + hb <= ia.y {
+            DOWN
+        } else {
+            LEVEL
         }
-        (self.s_clogc - self.s_clogp) / self.n_pairs - self.n_pairs.ln()
     }
 
-    fn energy(&self) -> f64 {
+    /// Queue adding or removing the paths a - b - c that i is in: as the
+    /// middle (every two of its neighbours) and as an end (through each
+    /// neighbour b, to b's other neighbours), each weighing b's middle
+    /// weight (style.middle_weight); adjacency without i on the far side.
+    /// Applied merged by pattern.
+    fn paths(&mut self, i: usize, nb: &[(usize, u8)], sign: f64) {
+        let d = self.d;
+        let w = sign * d.middle_w[self.opt(i).token];
+        for &(a, _) in nb {
+            for &(c, _) in nb {
+                if a != c {
+                    let key = d.key(self.opt(a).token, self.opt(c).token, self.where_(a, c));
+                    self.path_queue.push((key, w));
+                }
+            }
+        }
+        let ti = self.opt(i).token;
+        for &(b, _) in nb {
+            let wb = sign * d.middle_w[self.opt(b).token];
+            for k in 0..self.adj[b].len() {
+                let c = self.adj[b][k].0;
+                if c != i {
+                    let tc = self.opt(c).token;
+                    let k1 = d.key(ti, tc, self.where_(i, c));
+                    let k2 = d.key(tc, ti, self.where_(c, i));
+                    self.path_queue.push((k1, wb));
+                    self.path_queue.push((k2, wb));
+                }
+            }
+        }
+        self.flush_paths();
+    }
+
+    fn flush_paths(&mut self) {
+        let mut q = std::mem::take(&mut self.path_queue);
+        q.sort_unstable_by_key(|&(k, _)| k);
+        let mut i = 0;
+        while i < q.len() {
+            let key = q[i].0;
+            let mut dc = 0.0;
+            while i < q.len() && q[i].0 == key {
+                dc += q[i].1;
+                i += 1;
+            }
+            if dc != 0.0 {
+                self.kl2.add(key, dc, self.d.logp2[key]);
+            }
+        }
+        q.clear();
+        self.path_queue = q;
+    }
+
+    /// Change in outline pixels wrong from adding this option here.
+    fn sil_delta(&self, o: &Opt, oy: i32, ox: i32, oz: i32) -> i64 {
+        let mut dlt = 0;
+        for a in 0..3 {
+            for &(u, v) in &o.pix[a] {
+                let p = self.d.pix_idx(a, u, v, oy, ox, oz);
+                if self.csil[a][p] == 0 {
+                    dlt += if self.d.tsil[a][p] { -1 } else { 1 };
+                }
+            }
+        }
+        dlt
+    }
+
+    fn sil_apply(&mut self, o: &Opt, oy: i32, ox: i32, oz: i32, sign: i32) {
+        for a in 0..3 {
+            for &(u, v) in &o.pix[a] {
+                let p = self.d.pix_idx(a, u, v, oy, ox, oz);
+                let t = self.d.tsil[a][p];
+                if sign > 0 {
+                    if self.csil[a][p] == 0 {
+                        self.sil += if t { -1 } else { 1 };
+                    }
+                    self.csil[a][p] += 1;
+                } else {
+                    self.csil[a][p] -= 1;
+                    if self.csil[a][p] == 0 {
+                        self.sil += if t { 1 } else { -1 };
+                    }
+                }
+            }
+        }
+    }
+
+    fn kl(&self) -> f64 {
+        self.kl1.value()
+    }
+
+    fn content(&self) -> f64 {
+        let d = self.d;
+        d.w_cov * self.fid + d.w_sil * self.sil as f64 / (SUB * SUB) as f64 + d.w_col * self.col
+    }
+
+    fn style_loss(&self) -> f64 {
         // the pairs' typicality weighed by the pairs a real set this size
         // has, not by the build's own count (sampler.py's docstring)
         let d = self.d;
-        let typical = if self.n_pairs > 0.0 {
-            let r = (self.n_pairs / d.n_ref).ln();
-            d.w_loc * self.loc / self.n_pairs + d.w_glob * self.kl() + d.w_dens * r * r / (2.0 * d.dens_sd * d.dens_sd)
-        } else {
-            0.0
-        };
-        d.w_cov * self.fid
-            + d.w_col * self.col
-            + d.n_ref * typical
-            + d.w_sup * self.n_unsup as f64
-            + d.w_side * self.bare as f64
+        let n = self.kl1.n;
+        if n <= 0.0 {
+            return 0.0;
+        }
+        let r = (n / d.n_ref).ln();
+        d.style
+            * d.n_ref
+            * (d.w_loc * self.loc / n
+                + d.w_glob * self.kl1.value()
+                + d.w_glob2 * self.kl2.value()
+                + d.w_dens * r * r / (2.0 * d.dens_sd * d.dens_sd))
+    }
+
+    fn energy(&self) -> f64 {
+        let d = self.d;
+        self.content() + self.style_loss() + d.w_sup * self.n_unsup as f64 + d.w_side * self.bare as f64
     }
 
     fn set_unsup(&mut self, j: usize, v: bool) {
@@ -629,6 +820,7 @@ impl<'a> State<'a> {
                 self.items.push(None);
                 self.unsup.push(false);
                 self.live_pos.push(0);
+                self.adj.push(Vec::new());
                 self.items.len() - 1
             }
         };
@@ -645,8 +837,14 @@ impl<'a> State<'a> {
         }
         self.bare += d.bare_sides(o, it.y, it.x, it.z);
         self.col += d.colour_cost(o, it.y, it.x, it.z, it.colour);
+        self.sil_apply(o, it.y, it.x, it.z, 1);
         let nb = self.neighbours(i);
         self.pairs(i, &nb, 1.0);
+        self.paths(i, &nb, 1.0);
+        for &(j, dir) in &nb {
+            self.adj[j].push((i, flip(dir)));
+        }
+        self.adj[i] = nb.clone();
         let mut ids: Vec<usize> = nb.iter().map(|&(j, _)| j).collect();
         ids.push(i);
         self.refresh_support(&ids);
@@ -655,10 +853,15 @@ impl<'a> State<'a> {
 
     fn remove(&mut self, i: usize) -> Item {
         let it = *self.item(i);
-        let nb = self.neighbours(i);
+        let nb = std::mem::take(&mut self.adj[i]);
+        for &(j, _) in &nb {
+            self.adj[j].retain(|&(k, _)| k != i);
+        }
+        self.paths(i, &nb, -1.0);
         self.pairs(i, &nb, -1.0);
         let d = self.d;
         let o = &d.opts[it.opt];
+        self.sil_apply(o, it.y, it.x, it.z, -1);
         for &(y, x, z, _, _) in &o.cells {
             let c = d.idx(it.y + y, it.x + x, it.z + z);
             self.owner[c] = -1;
@@ -764,7 +967,8 @@ impl Filler {
                 wrong += (bits ^ t).count_ones();
             }
             let resid = wrong as f64 / NSAMP;
-            out.push((o.logprior - d.w_cov * resid, k, oy, ox, oz, resid));
+            // style and content weighed as in the energy
+            out.push((d.style * o.logprior - d.w_cov * resid, k, oy, ox, oz, resid));
         }
         let k = d.top_k;
         if out.len() > k {
@@ -792,8 +996,10 @@ impl Filler {
             for &(_, k, oy, ox, oz, resid) in &cands {
                 let o = &d.opts[k];
                 let colour = d.colour_for(o, oy, ox, oz, &mut self.colour_counts);
-                let stat = Filler::stat_score(st, k, oy, ox, oz);
-                let mut fit = -d.w_cov * resid - d.w_col * d.colour_cost(o, oy, ox, oz, colour);
+                let stat = d.style * Filler::stat_score(st, k, oy, ox, oz);
+                let mut fit = -d.w_cov * resid
+                    - d.w_sil * st.sil_delta(o, oy, ox, oz) as f64 / (SUB * SUB) as f64
+                    - d.w_col * d.colour_cost(o, oy, ox, oz, colour);
                 if !Filler::held(st, o, oy, ox, oz) {
                     fit -= d.w_sup;
                 }
@@ -915,7 +1121,7 @@ fn merge(st: &mut State, rng: &mut Rng) -> Option<Undo> {
     if ao.boxk < 0 {
         return None;
     }
-    for (j, dir) in st.neighbours(i) {
+    for (j, dir) in st.adj[i].clone() {
         if dir != LEVEL {
             continue;
         }
@@ -1029,13 +1235,13 @@ unsafe fn run(p: &Problem) -> i32 {
         accepted as f64 / iters.max(1) as f64,
         t_start,
         kl,
-        st.loc / st.n_pairs.max(1.0),
+        st.loc / st.kl1.n.max(1.0),
         st.fid,
         st.bad_cells() as f64,
         st.n_unsup as f64,
         st.bare as f64,
         st.live.len() as f64,
-        st.n_pairs,
+        st.kl1.n,
         {
             // from scratch: every part re-added to an empty state
             let mut fresh = State::new(&d);
@@ -1045,6 +1251,10 @@ unsafe fn run(p: &Problem) -> i32 {
             }
             fresh.energy()
         },
+        st.kl2.value(),
+        st.sil as f64 / (SUB * SUB) as f64,
+        st.content(),
+        st.style_loss(),
     ];
     for (k, v) in info.iter().enumerate().take(INFO_LEN) {
         *p.info.add(k) = *v;
@@ -1073,5 +1283,5 @@ pub unsafe extern "C" fn e2l_sample(p: *const Problem) -> i32 {
 /// The layout version: Python checks it before calling.
 #[no_mangle]
 pub extern "C" fn e2l_abi() -> i32 {
-    4
+    6
 }

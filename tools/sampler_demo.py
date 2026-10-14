@@ -1,6 +1,6 @@
 """Sample a build of any mesh with the statistics sampler and render it.
 
-    python tools/sampler_demo.py mesh.glb out_dir [--studs 24] [--iters 20000] [--kind building]
+    python tools/sampler_demo.py mesh.glb out_dir [--studs 24] [--iters 20000] [--kind building] [--style 1]
 
 The target is the mesh's voxel shell (real sets are hollow): the solid's
 cells within `--shell` studs of its surface, coloured by the mesh, each
@@ -101,12 +101,14 @@ def main() -> None:
     ap.add_argument("--shell", type=int, default=2)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--kind", default=None)
+    ap.add_argument("--style", type=float, default=1.0, help="style weight: real-set statistics against form")
     a = ap.parse_args()
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     target = target_from_mesh(a.mesh, a.studs, a.shell, a.kind)
     models = load_models()
     t0 = time.time()
-    ps, info = sample(target, models, iters=a.iters, seed=a.seed)
+    from everything2lego.sampler import Weights
+    ps, info = sample(target, models, iters=a.iters, seed=a.seed, weights=Weights(style=a.style))
     info["seconds"] = round(time.time() - t0, 1)
     write_ldr(ps, out / "model.ldr")
     (out / "info.json").write_text(json.dumps({k: v for k, v in info.items()}, indent=1, default=float))

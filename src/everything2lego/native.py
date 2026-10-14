@@ -28,8 +28,8 @@ from typing import Optional
 
 import numpy as np
 
-ABI = 4
-INFO_LEN = 12
+ABI = 6
+INFO_LEN = 16
 
 _P = C.POINTER
 
@@ -55,6 +55,12 @@ class Problem(C.Structure):
         ("w_cov", C.c_double), ("w_col", C.c_double), ("w_loc", C.c_double),
         ("w_glob", C.c_double), ("w_sup", C.c_double), ("w_side", C.c_double),
         ("n_ref", C.c_double), ("w_dens", C.c_double), ("dens_sd", C.c_double),
+        ("w_sil", C.c_double), ("style", C.c_double), ("w_glob2", C.c_double), ("logp2", _P(C.c_double)),
+        ("middle_w", _P(C.c_double)),
+        ("pixx_start", _P(C.c_int32)), ("pixx", _P(C.c_int32)),
+        ("pixy_start", _P(C.c_int32)), ("pixy", _P(C.c_int32)),
+        ("pixz_start", _P(C.c_int32)), ("pixz", _P(C.c_int32)),
+        ("tsx", _P(C.c_uint8)), ("tsy", _P(C.c_uint8)), ("tsz", _P(C.c_uint8)),
         ("t_start_share", C.c_double), ("t_final_share", C.c_double),
         ("iters", C.c_int64), ("warmup", C.c_int64), ("seed", C.c_uint64),
         ("top_k", C.c_int32), ("log_every", C.c_int64),
@@ -181,17 +187,24 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
     dirs = ("up", "down", "level")
     nll = np.empty((n_tok, n_tok, 3))
     logp = np.empty((n_tok, n_tok, 3))
+    logp2 = np.empty((n_tok, n_tok, 3))
     for a, ta in enumerate(toks):
         for b, tb in enumerate(toks):
             for k, d in enumerate(dirs):
                 nll[a, b, k] = stats.nll(ta, tb, d)
                 logp[a, b, k] = math.log(stats.ref.p((ta, tb, d)))
+                logp2[a, b, k] = math.log(stats.ref2.p((ta, tb, d)))
+    from .sampler import unpack
+    fine = unpack(target.bits)
+    tsil = (fine.any(axis=1), fine.any(axis=0), fine.any(axis=2))
     # options
     pid = {id(v): i for i, v in enumerate(vocab)}
     opts = [(v, o) for v in vocab for o in v.orients]
     boxk = {"brick": 0, "plate": 1, "tile": 2}
     cs, ts, bs, ss, hs = [0], [0], [0], [0], [0]
     halo = []
+    pstart = ([0], [0], [0])
+    pvals = ([], [], [])
     cyxz, cbits, co, txz, bxz, sv = [], [], [], [], [], []
     for v, o in opts:
         cyxz.append(o.cells)
@@ -206,6 +219,9 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         ss.append(len(sv))
         halo.append(o.halo)
         hs.append(hs[-1] + len(o.halo))
+        for a in range(3):
+            pvals[a].append(o.pix[a])
+            pstart[a].append(pstart[a][-1] + len(o.pix[a]))
     snap = snap_table(vocab, n_col)
     cap = int(target.want.sum()) + 16
     out = {k: np.zeros(cap, np.int32) for k in ("opt", "colour", "y", "x", "z")}
@@ -247,6 +263,14 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         w_cov=weights.cov, w_col=weights.col, w_loc=weights.loc, w_glob=weights.glob,
         w_sup=weights.sup, w_side=weights.side,
         n_ref=stats.density * float(target.fill.sum()), w_dens=weights.dens, dens_sd=stats.density_sd,
+        w_sil=weights.sil, style=weights.style, w_glob2=weights.glob2,
+        logp2=_ptr(arr(logp2, np.float64), C.c_double),
+        middle_w=_ptr(arr([stats.middle_w(t) for t in toks], np.float64), C.c_double),
+        pixx_start=_ptr(arr(pstart[0], np.int32), C.c_int32), pixx=_ptr(arr(np.concatenate(pvals[0]), np.int32), C.c_int32),
+        pixy_start=_ptr(arr(pstart[1], np.int32), C.c_int32), pixy=_ptr(arr(np.concatenate(pvals[1]), np.int32), C.c_int32),
+        pixz_start=_ptr(arr(pstart[2], np.int32), C.c_int32), pixz=_ptr(arr(np.concatenate(pvals[2]), np.int32), C.c_int32),
+        tsx=_ptr(arr(tsil[0], np.uint8), C.c_uint8), tsy=_ptr(arr(tsil[1], np.uint8), C.c_uint8),
+        tsz=_ptr(arr(tsil[2], np.uint8), C.c_uint8),
         t_start_share=t_start_share, t_final_share=t_final_share,
         iters=iters, warmup=warmup, seed=seed, top_k=top_k, log_every=log_every,
         out_cap=cap, out_n=_ptr(out_n, C.c_int32),
@@ -264,7 +288,8 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
     items = [(opts[int(out["opt"][i])][0], opts[int(out["opt"][i])][1], int(out["colour"][i]),
               int(out["y"][i]), int(out["x"][i]), int(out["z"][i])) for i in range(n)]
     keys = ("energy", "accepted", "t_start", "kl", "local_per_pair", "fidelity", "bad_cells",
-            "unsupported", "bare_side_connectors", "parts", "pairs", "energy_recomputed")
+            "unsupported", "bare_side_connectors", "parts", "pairs", "energy_recomputed",
+            "kl_paths", "outline", "content_loss", "style_loss")
     inf = {k: float(v) for k, v in zip(keys, info)}
     for k in ("bad_cells", "unsupported", "bare_side_connectors", "parts"):
         inf[k] = int(inf[k])

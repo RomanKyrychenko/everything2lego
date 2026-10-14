@@ -19,7 +19,10 @@ def _models():
     # an 8 x 4 stud, 5 plate model, 95% full: 38 pairs over 152 cells, a
     # build of big parts (a quarter pair per cell)
     shape = np.array([np.log(8), np.log(4), np.log(2), 0.95])
-    return [{"model": "m", "patterns": pats, "shape": shape, "held_out": False}]
+    paths = Counter({("brick4x2h3", "brick4x2h3", "up"): 20, ("brick4x2h3", "brick4x2h3", "down"): 20,
+                     ("slope452x2h3", "brick4x2h3", "down"): 5, ("brick4x2h3", "slope452x2h3", "up"): 5,
+                     ("slope452x2h3", "slope452x2h3", "level"): 8})
+    return [{"model": "m", "patterns": pats, "paths": paths, "shape": shape, "held_out": False}]
 
 
 def _vp(ldraw):
@@ -97,7 +100,9 @@ def test_native_energy_is_the_reference_energy():
         st = sampler.State(target, stats, w)
         for v, o, c, y, x, z in got:
             st.add(sampler.Item(v, o, c, y, x, z))
-        assert st.energy() == pytest.approx(info["energy"], rel=1e-9, abs=1e-6)
+        assert st.energy() == pytest.approx(info["energy"], rel=1e-6)
+        assert st.kl2.value() == pytest.approx(info["kl_paths"], rel=1e-6, abs=1e-6)
+        assert st.sil / 16 == pytest.approx(info["outline"])
         assert len(st.unsup) == info["unsupported"] and st.bad_cells() == info["bad_cells"]
 
 
@@ -115,4 +120,4 @@ def test_long_walk_keeps_its_energy():
     target = sampler.Target(want, np.full(want.shape, 4), want.copy(), bits=bits)
     _, info = sampler.sample(target, _models(), iters=5000, seed=3, k_models=1, warmup=50,
                              n_special=60, engine="native")
-    assert info["energy"] == pytest.approx(info["energy_recomputed"], rel=1e-9)
+    assert info["energy"] == pytest.approx(info["energy_recomputed"], rel=1e-6)

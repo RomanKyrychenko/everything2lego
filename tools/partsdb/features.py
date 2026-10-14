@@ -4,7 +4,8 @@ pair of touching parts as a pattern (token A, token B, where B is: up,
 down or level), and the kind of model (building, vehicle, figure, other)
 read from what its parts are used for in official models.
 
-    python tools/partsdb/features.py      # -> $LEGO_DATA/analysis/features.pkl
+    python tools/partsdb/features.py        # -> $LEGO_DATA/analysis/features.pkl
+    python tools/partsdb/features.py paths  # adds each model's paths (needs the first)
 
 Tokens are coarse on purpose: exact parts at exact offsets are too sparse
 to compare models by (most of a real model's exact patterns occur nowhere
@@ -28,6 +29,9 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "set_study"))
 from build import DATA, DB, OMR, _ld_to_part  # noqa: E402
 from neighbours import held_out, model_parts, neighbour_pairs, part_classes  # noqa: E402
+
+sys.path.insert(0, str(HERE.parents[1] / "src"))
+from everything2lego.style import middle_weight, token_degree  # noqa: E402
 
 OUT = DATA / "analysis" / "features.pkl"
 
@@ -144,10 +148,83 @@ def features(f: Path):
             "shape": shape_descriptor(ext, vol)}
 
 
+def paths(items, toks, adj, degree: dict[str, float]) -> Counter:
+    """The second scale of the patterns: walks a - b - c through a shared
+    neighbour b (a != c), as (token a, token c, where c is from a), each
+    weighted by b's middle_weight.  Pairs are what touches; paths are what
+    sits around a part's neighbours — the larger receptive field, as style
+    transfer matches feature correlations at more than one layer."""
+    import numpy as np
+    vocab = sorted(set(toks))
+    index = {t: i for i, t in enumerate(vocab)}
+    tid = np.array([index[t] for t in toks])
+    lo = np.array([it[2][1] for it in items])
+    hi = np.array([it[3][1] for it in items])
+    V = len(vocab)
+    acc = np.zeros(V * V * 3)
+    for b, nb in adj.items():
+        if len(nb) < 2:
+            continue
+        nb = np.fromiter(nb, int)
+        A, Cc = nb[:, None], nb[None, :]
+        # where c is from a (vertical): 0 up, 1 down, 2 level
+        d = np.where(lo[Cc] >= hi[A] - 0.1, 0, np.where(hi[Cc] <= lo[A] + 0.1, 1, 2))
+        key = (tid[A] * V + tid[Cc]) * 3 + d
+        off = ~np.eye(len(nb), dtype=bool)
+        acc += np.bincount(key[off], minlength=V * V * 3) * middle_weight(degree, toks[b])
+    out = Counter()
+    names = ("up", "down", "level")
+    for k in np.flatnonzero(acc):
+        a, rest = divmod(int(k), V * 3)
+        c, d = divmod(rest, 3)
+        out[(vocab[a], vocab[c], names[d])] = float(acc[k])
+    return out
+
+
+def model_paths(f: Path):
+    try:
+        items = model_parts(f, _CTX["ldmap"], _CTX["classes"])
+    except Exception:
+        return None
+    toks = [_CTX["token"].get(it[0], "other0x0h0") for it in items]
+    adj: dict[int, set] = {}
+    for i, j in neighbour_pairs(items):
+        adj.setdefault(i, set()).add(j)
+    return f.stem, paths(items, toks, adj, _CTX["degree"])
+
+
+def _init_paths(degree):
+    _init()
+    _CTX["degree"] = degree
+
+
+def add_paths() -> None:
+    """Second stage: every model's paths, weighted by the token degrees of
+    the training models (the sampler computes the same weights)."""
+    rows = pickle.load(open(OUT, "rb"))
+    degree = token_degree([r for r in rows if not r["held_out"]])
+    by_model = {r["model"]: r for r in rows}
+    files = [f for f in sorted(OMR.glob("*.mpd")) + sorted(OMR.glob("*.ldr")) if f.stem in by_model]
+    with Pool(max(1, (os.cpu_count() or 2) - 1), initializer=_init_paths, initargs=(degree,),
+              maxtasksperchild=50) as pool:
+        for k, got in enumerate(pool.imap_unordered(model_paths, files, chunksize=2)):
+            if got:
+                by_model[got[0]]["paths"] = got[1]
+            if k % 200 == 0:
+                print(f"  paths {k}/{len(files)}", flush=True)
+    pickle.dump(rows, open(OUT, "wb"))
+    print(f"paths: {sum('paths' in r for r in rows)} models -> {OUT}")
+
+
 def main() -> None:
     files = sorted(OMR.glob("*.mpd")) + sorted(OMR.glob("*.ldr"))
-    with Pool(max(1, (os.cpu_count() or 2) - 1), initializer=_init) as pool:
-        rows = [r for r in pool.imap_unordered(features, files, chunksize=4) if r]
+    rows = []
+    with Pool(max(1, (os.cpu_count() or 2) - 1), initializer=_init, maxtasksperchild=50) as pool:
+        for k, r in enumerate(pool.imap_unordered(features, files, chunksize=2)):
+            if r:
+                rows.append(r)
+            if k % 200 == 0:
+                print(f"  {k}/{len(files)}", flush=True)
     assign_kinds(rows)
     OUT.parent.mkdir(parents=True, exist_ok=True)
     pickle.dump(rows, open(OUT, "wb"))
@@ -156,4 +233,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    add_paths() if sys.argv[1:] == ["paths"] else main()

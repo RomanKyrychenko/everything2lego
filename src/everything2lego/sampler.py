@@ -3,42 +3,51 @@ construction follows the statistics of real sets.
 
 The target is a grid (y plates up, x and z studs) of each cell's shape
 (`bits`: 4x4x4 samples of the object in it, as one 64-bit mask; a cell a
-sloped surface cuts is part full, on the side it is), its colour, which cells show, and optionally what kind of object it is
-(building, road_vehicle, creature, ...).  A state is a set of
-non-overlapping parts, each a real part in one of four yaws, with the
-shape the parts database measured from its geometry (how full each cell of
-its box is; data/vocabulary.json).  Its energy is
+sloped surface cuts is part full, on the side it is), its colour, which
+cells show, and optionally what kind of object it is (building,
+road_vehicle, creature, ...).  A state is a set of non-overlapping parts,
+each a real part in one of four yaws, with the shape the parts database
+measured from its geometry (data/vocabulary.json).
 
-    E = w_cov  * sum over cells |part fill - target fill|
-      + w_col  * colour error of the cells that show (Lab, per cell)
-      + N_ref * (w_loc  * mean over touching pairs of -log P(B, where | A)
-               + w_glob * KL(pattern mix || official models of its kind and shape)
-               + w_dens * (log(pairs / N_ref))^2 / (2 sd^2))
-      + w_sup  * parts no stud holds (a stud of the part below in a hole
-                 of this one, or of this one in a hole of the part above)
-      + w_side * side studs and holes facing out of the object (a set
-                 puts something on every side stud; here nothing can be)
+As in neural style transfer, the energy is a content loss plus a style
+loss (plus what makes it a build at all):
 
-N_ref is the number of (directed) touching pairs a real set of the
-target's volume has — the reference models' pairs per occupied cell times
-the cells the target fills — not the build's own count: summed over its own
-pairs, a build of fewer, bigger parts would score better for having fewer
-pairs, however untypical each.  Weighed so, only how typical the pairs and
-their mix are counts, and part sizes answer to the KL (tokens carry sizes)
-and to the last term: how many pairs a cell has — few big parts or many
-small ones — likely as the reference models' spread of it (log-normal).
+    E = w_cov  * sum over cells of the share of samples wrong          } content:
+      + w_sil  * outline pixels wrong in the three axis views, per     }  the form
+                 cell face                                             }
+      + w_col  * colour error of the cells that show (Lab, per cell)   }
+      + style * N_ref * (w_loc   * mean over touching pairs of -log P(B, where | A)   } style:
+                       + w_glob  * KL(pair patterns || reference models)               }  real
+                       + w_glob2 * KL(path patterns || reference models)               }  sets
+                       + w_dens  * (log(pairs / N_ref))^2 / (2 sd^2))                  }
+      + w_sup  * parts no stud holds (a stud of the part below in a
+                 hole of this one, or of this one in a hole of the part above)
+      + w_side * side studs and holes facing out of the object (a set puts
+                 something on every side stud; here nothing can be)
 
-— fidelity (a slope is the part for a sloped surface because it fills the
-cells such a surface cuts where the surface does; a round brick is not a
-wall that a cell boundary happens to cut), local plausibility (each part's
-neighbours are what real sets put there), global typicality (the mix of
-patterns is real sets', not the same few repeated: style.RunningKL) and
-real connections.  The statistics come from the official models of the
-target's kind nearest it in shape (tools/partsdb/features.py), smoothed
-from exact tokens (kind + size) to kinds to uniform; which parts may be
-used at all, and how readily, from how often sets of that kind use them
-(the vocabulary's per-kind share and lift) — so a house is not built of
-wheel arches.
+Content.  The volume term fits each cell's samples, so a slope is the part
+for a sloped surface (it fills the cells such a surface cuts where the
+surface does) and a round brick is not a wall a cell boundary happens to
+cut.  The outline term sees the form as it is seen: a piece sticking out
+of the object changes the outline in two views, though its few samples of
+volume barely change the volume term.
+
+Style.  Matched at two scales, as style transfer matches feature
+correlations at more than one layer: pairs of parts that touch (token A,
+token B, where B is: up / down / level; a token is a part's kind and size),
+and paths of two through a shared neighbour (what sits around a part's
+neighbours: a two-step random walk, each path weighted by its middle
+part type's typical degree; style.middle_weight, features.paths).  Both from the official models
+of the target's kind nearest it in shape, smoothed from exact tokens to
+kinds to uniform.  N_ref is the number of touching pairs a real set of the
+target's volume has (the references' pairs per occupied cell times the
+cells the target fills) — not the build's own count, or fewer, bigger parts
+would win for having fewer pairs, however untypical each; the last term
+asks for real sets' pairs per cell (not few big parts, not many small
+ones), log-normal as the references spread.  `style` trades style against
+content.  Which parts may be used at all, and how readily, comes from how
+often sets of the target's kind use them (the vocabulary's per-kind share
+and lift) — so a house is not built of wheel arches.
 
 A move re-tiles a small window: the parts meeting it are removed and its
 cells re-filled part by part, each drawn from P(part, yaw | the parts
@@ -71,7 +80,7 @@ import numpy as np
 from .bricks import Part
 from .colors import _palette_lab, nearest_where, palette
 from .pack import Placement
-from .style import Reference, RunningKL, kind_of
+from .style import Reference, RunningKL, kind_of, middle_weight, token_degree
 
 _ROT = {0: (1, 0, 0, 1), 90: (0, 1, -1, 0), 180: (-1, 0, 0, -1), 270: (0, -1, 1, 0)}
 # (x' from x, x' from z, z' from x, z' from z): io_ldraw's yaw matrices on the x-z plane
@@ -147,6 +156,7 @@ class Orient:
     bottom: frozenset            # (x, z) offsets with a hole underneath
     sides: tuple = ()            # (y, x, z, dx, dz): a stud or hole in that cell facing (dx, dz)
     halo: np.ndarray = None      # (m, 3): offsets of the cells next to its cells (26-neighbourhood), not its own
+    pix: tuple = ()              # its outline along x, y, z: (sy, sz), (sx, sz), (sy, sx) sample pixels, box-local
 
 
 def _halo(cells: np.ndarray, size) -> np.ndarray:
@@ -197,8 +207,10 @@ def _orients(bits: np.ndarray, top: list, bottom: list, sides: list = ()) -> tup
         if not len(cells):
             continue
         cb = wbits[tuple(cells.T)]
+        fr = _rotate(fine, rot)
+        pix = (np.argwhere(fr.any(axis=1)), np.argwhere(fr.any(axis=0)), np.argwhere(fr.any(axis=2)))
         out.append(Orient(rot, (h, W, D), cells, cb, popcount(cb) / SUB ** 3,
-                          tuple(int(v) for v in cells[0]), wt, wb, ws, _halo(cells, (h, W, D))))
+                          tuple(int(v) for v in cells[0]), wt, wb, ws, _halo(cells, (h, W, D)), pix))
     return tuple(out)
 
 
@@ -271,7 +283,9 @@ class Stats:
 
     def __init__(self, models: list[dict], lam=(0.8, 0.17, 0.03)):
         self.ref = Reference.from_models(models)
+        self.ref2 = Reference.from_models(models, key="paths")
         self.density, self.density_sd = pair_density(models)
+        self.degree: dict[str, float] = {}                # set by sample(): over all the models
         self.lam = lam
         self.pair = self.ref.counts                       # (a, b, d) -> weight
         self.a_tot: Counter = Counter()
@@ -286,6 +300,10 @@ class Stats:
             self.spread[(kind_of(a), kind_of(b), d)] += 1
         self.vocab = max(1, len(self.pair))
         self._cache: dict = {}
+
+    def middle_w(self, token: str) -> float:
+        """A path's weight through a part of this token (style.middle_weight)."""
+        return middle_weight(self.degree, token)
 
     def nll(self, a: str, b: str, d: str) -> float:
         """-log P(B=b, where=d | A=a), smoothed exact -> kind -> uniform."""
@@ -362,7 +380,12 @@ class Item:
 
 @dataclass
 class Weights:
+    # content: the form
     cov: float = 4.0
+    sil: float = 4.0          # per cell face of outline wrong
+    # style: the statistics of real sets, as a whole times `style`
+    style: float = 1.0
+    glob2: float = 1.0        # path patterns (the second scale)
     col: float = 0.04
     loc: float = 1.0
     glob: float = 1.0
@@ -387,6 +410,14 @@ class State:
         self.n_ref = stats.density * float(target.fill.sum())  # pairs a real set this size has
         self.lab = _palette_lab()
         self.tlab = np.where(target.colour[..., None] >= 0, self.lab[np.maximum(target.colour, 0)], np.nan)
+        # the outline: per view (along x, y, z) the target's and how many parts cover each pixel
+        fine = unpack(target.bits)
+        self.tsil = (fine.any(axis=1), fine.any(axis=0), fine.any(axis=2))
+        self.csil = tuple(np.zeros(t.shape, np.int32) for t in self.tsil)
+        self.sil = int(sum(t.sum() for t in self.tsil))      # outline pixels wrong, everything empty
+        # paths of two through a shared neighbour
+        self.adj: dict[int, dict[int, str]] = {}
+        self.kl2 = RunningKL(stats.ref2)
 
     # -- geometry -----------------------------------------------------------
     def neighbours(self, i: int) -> dict[int, str]:
@@ -440,6 +471,59 @@ class State:
                 self.kl.add((a, b, dd), sign)
                 self.loc += sign * self.s.nll(a, b, dd)
 
+    def _pix(self, o: Orient, oy: int, ox: int, oz: int):
+        """Its outline pixels in the three views, as indices into them."""
+        sy, sx, sz = SUB * oy, SUB * ox, SUB * oz
+        px, py, pz = o.pix
+        return ((px[:, 0] + sy, px[:, 1] + sz), (py[:, 0] + sx, py[:, 1] + sz), (pz[:, 0] + sy, pz[:, 1] + sx))
+
+    def sil_delta(self, o: Orient, oy: int, ox: int, oz: int) -> int:
+        """Change in outline pixels wrong from adding it."""
+        d = 0
+        for c, t, ix in zip(self.csil, self.tsil, self._pix(o, oy, ox, oz)):
+            new = c[ix] == 0
+            d += int((~t[ix][new]).sum()) - int(t[ix][new].sum())
+        return d
+
+    def _sil(self, o: Orient, oy: int, ox: int, oz: int, sign: int) -> None:
+        for c, t, ix in zip(self.csil, self.tsil, self._pix(o, oy, ox, oz)):
+            if sign > 0:
+                new = c[ix] == 0
+                self.sil += int((~t[ix][new]).sum()) - int(t[ix][new].sum())
+                c[ix] += 1
+            else:
+                c[ix] -= 1
+                gone = c[ix] == 0
+                self.sil += int(t[ix][gone].sum()) - int((~t[ix][gone]).sum())
+
+    @staticmethod
+    def where(a: Item, b: Item) -> str:
+        """Where b is from a, from the two boxes (features.vertical)."""
+        return "up" if b.y >= a.y + a.h else "down" if b.y + b.h <= a.y else "level"
+
+    def _paths(self, i: int, nb: dict[int, str], sign: int) -> None:
+        """Add or remove the paths a - b - c that i is in: as the middle
+        (every two of its neighbours), and as an end (through each
+        neighbour b, to b's other neighbours).  Each weighs b's
+        middle_weight; adjacency without i on the far side."""
+        it = self.items[i]
+        mw = self.s.middle_w
+        ids = list(nb)
+        w = sign * mw(it.vp.token)
+        for a in ids:
+            A = self.items[a]
+            for c in ids:
+                if a != c:
+                    C = self.items[c]
+                    self.kl2.add((A.vp.token, C.vp.token, self.where(A, C)), w)
+        for b in ids:
+            wb = sign * mw(self.items[b].vp.token)
+            for c in self.adj[b]:
+                if c != i:
+                    C = self.items[c]
+                    self.kl2.add((it.vp.token, C.vp.token, self.where(it, C)), wb)
+                    self.kl2.add((C.vp.token, it.vp.token, self.where(C, it)), wb)
+
     def colour_cost(self, ys, xs, zs, o, colour: int) -> float:
         vis = self.t.visible[ys, xs, zs]
         if not vis.any():
@@ -469,10 +553,17 @@ class State:
     def energy(self) -> float:
         w = self.w
         n = self.kl.n
-        typical = (w.loc * self.loc / n + w.glob * self.kl.value()
-                   + w.dens * math.log(n / self.n_ref) ** 2 / (2 * self.s.density_sd ** 2)) if n > 0 else 0.0
-        return (w.cov * self.fid + w.col * self.col + self.n_ref * typical
-                + w.sup * len(self.unsup) + w.side * self.bare)
+        style = (w.loc * self.loc / n + w.glob * self.kl.value() + w.glob2 * self.kl2.value()
+                 + w.dens * math.log(n / self.n_ref) ** 2 / (2 * self.s.density_sd ** 2)) if n > 0 else 0.0
+        return (w.cov * self.fid + w.sil * self.sil / SUB ** 2 + w.col * self.col
+                + w.style * self.n_ref * style + w.sup * len(self.unsup) + w.side * self.bare)
+
+    def content_loss(self) -> float:
+        w = self.w
+        return w.cov * self.fid + w.sil * self.sil / SUB ** 2 + w.col * self.col
+
+    def style_loss(self) -> float:
+        return self.energy() - self.content_loss() - self.w.sup * len(self.unsup) - self.w.side * self.bare
 
     # -- edits ----------------------------------------------------------------
     def add(self, it: Item) -> int:
@@ -485,15 +576,25 @@ class State:
         self.cur[ys, xs, zs] = it.ori.bits
         self.bare += self.bare_sides(it.ori, it.y, it.x, it.z)
         self.col += self.colour_cost(ys, xs, zs, it.ori.o, it.colour)
+        self._sil(it.ori, it.y, it.x, it.z, +1)
         nb = self.neighbours(i)
         self._pairs(i, nb, +1)
+        self._paths(i, nb, +1)
+        flip = {"up": "down", "down": "up", "level": "level"}
+        self.adj[i] = dict(nb)
+        for j, d in nb.items():
+            self.adj[j][i] = flip[d]
         self._refresh_support([i] + list(nb))
         return i
 
     def remove(self, i: int) -> Item:
         it = self.items[i]
-        nb = self.neighbours(i)
+        nb = self.adj.pop(i)
+        for j in nb:
+            del self.adj[j][i]
+        self._paths(i, nb, -1)
         self._pairs(i, nb, -1)
+        self._sil(it.ori, it.y, it.x, it.z, -1)
         ys, xs, zs = it.cells()
         self.owner[ys, xs, zs] = -1
         self.cur[ys, xs, zs] = 0
@@ -596,7 +697,9 @@ class Filler:
         resid = popcount(self.bits ^ T).sum(axis=1) / SUB ** 3
         # the detailed score (neighbours, colour, support) only for the
         # likeliest few by prior and fit
-        pre = np.where(ok, self.logprior - self.st.w.cov * resid, -np.inf)
+        # style and content weighed as in the energy, so a typical part that
+        # fits a little worse is proposed when style counts for more
+        pre = np.where(ok, self.st.w.style * self.logprior - self.st.w.cov * resid, -np.inf)
         if ok.sum() > self.top_k:
             ok &= pre >= np.partition(pre, -self.top_k)[-self.top_k]
         out = []
@@ -669,8 +772,9 @@ class Filler:
                 vp, o = self.opts[k]
                 ys, xs, zs = o.cells[:, 0] + oy, o.cells[:, 1] + ox, o.cells[:, 2] + oz
                 colour = self.colour_for(ys, xs, zs, vp)
-                stat = self.stat_score(k, oy, ox, oz)
-                fit = -w.cov * resid - w.col * st.colour_cost(ys, xs, zs, o.o, colour)
+                stat = w.style * self.stat_score(k, oy, ox, oz)
+                fit = (-w.cov * resid - w.sil * st.sil_delta(o, oy, ox, oz) / SUB ** 2
+                       - w.col * st.colour_cost(ys, xs, zs, o.o, colour))
                 if not self.held(o, oy, ox, oz):
                     fit -= w.sup
                 fit -= w.sup * self.capped(o, oy, ox, oz) + w.side * st.bare_sides(o, oy, ox, oz)
@@ -741,7 +845,7 @@ def merge(state: State, filler: Filler, rnd: random.Random):
     if not a.vp.box:
         return None
     boxes = _boxes(filler.vocab)
-    for j, where in state.neighbours(i).items():
+    for j, where in list(state.adj[i].items()):
         if where != "level":
             continue
         b = state.items[j]
@@ -783,6 +887,7 @@ def sample(target: Target, models: list[dict], *, iters: int = 20000, seed: int 
     from . import native
     refs = nearest_models(models, target.shape_descriptor(), k_models, target.kind)
     stats = Stats(refs)
+    stats.degree = token_degree(models)
     weights = weights or Weights()
     vocab = select_vocabulary(target.kind, n_special)
     if engine == "native" or (engine == "auto" and native.available()):
@@ -828,7 +933,9 @@ def sample(target: Target, models: list[dict], *, iters: int = 20000, seed: int 
             history.append(e)
     used = Counter(v.category for v in (i.vp for i in st.items.values()))
     info = {"energy": e, "accepted": accepted / max(1, iters), "parts": len(st.items), "t_start": t_start,
-            "kl": st.kl.value(), "local_per_pair": st.loc / max(1, st.kl.n), "fidelity": st.fid,
+            "kl": st.kl.value(), "kl_paths": st.kl2.value(), "local_per_pair": st.loc / max(1, st.kl.n),
+            "fidelity": st.fid, "outline": st.sil / SUB ** 2,
+            "content_loss": st.content_loss(), "style_loss": st.style_loss(),
             "bad_cells": st.bad_cells(), "unsupported": len(st.unsup), "bare_side_connectors": st.bare, "history": history,
             "vocabulary": len(vocab), "categories": dict(used),
             "references": [r["model"] for r in refs[:10]], "engine": "python", "n_ref": st.n_ref}
