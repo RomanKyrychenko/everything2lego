@@ -24,8 +24,9 @@ examples/synth_house/                   # locally-rendered turntable of a mesh
 .vscode/
 .env
 .env.*
-# Claude Code session state
-.claude/
+# Claude Code session state (project skills are versioned)
+.claude/*
+!.claude/skills/
 
 # Model weights + caches (published externally).
 *.ckpt
