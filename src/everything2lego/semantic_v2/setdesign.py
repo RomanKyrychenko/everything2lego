@@ -1216,20 +1216,30 @@ def _colour_walls_from_photo(walls: list[WallSpec], solid: np.ndarray, facade, f
     if K is None or facade.rgb is None or not walls:
         return
     photo = _blurred_photo(facade, fit, K)
-    samples: list[np.ndarray] = []
-    unseen: list[WallSpec] = []
+    views = []
     for w in walls:
         cells = _wall_face_cells(w, solid)
         if len(cells) == 0:
+            views.append((w, 0.0, np.zeros((0, 3), np.uint8)))
             continue
         seen, rgb = seen_rgb(cells, facade, fit, K, photo=photo)
-        if seen.mean() >= seen_share and len(rgb) >= 6:
+        views.append((w, float(seen.mean()), rgb))
+    # The photo shows the building, so it shows some of its walls: those
+    # seen over `seen_share` of their face — or, when regularising the
+    # walls moved them off the depths the photo measured, the walls seen
+    # most (at least half the best wall's share).
+    best = max((v for _, v, rgb in views if len(rgb) >= 6), default=0.0)
+    if best == 0.0:
+        return
+    bar = min(seen_share, 0.5 * best)
+    samples: list[np.ndarray] = []
+    unseen: list[WallSpec] = []
+    for w, share, rgb in views:
+        if share >= bar and len(rgb) >= 6:
             w.colour = dominant_colour(rgb)
             samples.append(rgb)
         else:
             unseen.append(w)
-    if not samples:
-        return
     body = dominant_colour(np.vstack(samples))
     for w in unseen:
         w.colour = body

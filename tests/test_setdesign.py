@@ -269,3 +269,30 @@ def test_regularise_walls_straightens_a_leaning_wall_under_a_straight_roof():
     assert len(fronts) == 1 and 14 <= fronts.pop() <= 16          # straight, at its middle
     assert out[0:30, 3:25, 5:14].all()                             # down to the ground, no holes
     assert (out[:, 27:30, 8:12] == solid[:, 27:30, 8:12]).all()    # the tower is untouched
+
+
+def test_walls_take_the_photo_material_even_when_no_wall_is_seen_well(monkeypatch):
+    """Regularised walls sit off the depths the photo measured, so no wall
+    clears the absolute seen share; the walls seen most still decide the
+    material, and the walls the photo misses take it."""
+    import everything2lego.facade as F
+    import everything2lego.semantic_v2.setdesign as SD
+    from everything2lego.colors import by_code_index
+    black = np.array([[20, 20, 22]] * 50, np.uint8)
+    seen_share = {0: 0.26, 1: 0.05, 2: 0.0}
+    walls = [WallSpec(frame=WallFrame(True, 0, z, 0, 10, 3 * COURSE), colour=by_code_index(72))
+             for z in range(3)]
+    monkeypatch.setattr(F, "camera_intrinsics", lambda f: (1.0, 1.0, 0.0, 0.0))
+    monkeypatch.setattr(F, "_blurred_photo", lambda *a, **k: None)
+    monkeypatch.setattr(SD, "_wall_face_cells", lambda w, solid: np.zeros((40, 3)) + w.frame.other)
+
+    def seen_rgb(cells, *a, **k):
+        share = seen_share[int(cells[0, 0])]
+        seen = np.arange(len(cells)) < share * len(cells)
+        return seen, black[: int(seen.sum())]
+    monkeypatch.setattr(F, "seen_rgb", seen_rgb)
+
+    class Fac:
+        rgb = np.zeros((2, 2, 3), np.uint8)
+    SD._colour_walls_from_photo(walls, np.zeros((1, 1, 1), bool), Fac(), None)
+    assert all(w.colour == by_code_index(0) for w in walls)      # all black, none left grey
