@@ -242,3 +242,30 @@ def test_ground_walls_close_a_ragged_foot_but_not_an_opening():
     assert added == 2
     assert w.mask[0].all()
     assert not w.mask[1, :7].any()
+
+
+def test_regularise_walls_straightens_a_leaning_wall_under_a_straight_roof():
+    """The generator leaned the front wall 4 studs over the house's length
+    and left its foot ragged; the roof above is straight.  The walls come
+    back as the box the roof sits on — one straight front at its middle,
+    down to the ground — and a tower beside the roof keeps its shape."""
+    from everything2lego.semantic_v2.setdesign import pair_pitches, regularise_walls
+    H, X, Z = 60, 30, 24
+    solid = np.zeros((H, X, Z), bool)
+    for x in range(2, 26):
+        front = 14 + (4 * (x - 2)) // 23                   # 14 at one end, 18 at the other
+        solid[3:30, x, 4:front] = True                     # foot 3 plates up: ragged
+    for y in range(30, 42):                                # a straight gable roof, ridge along x
+        d = (y - 30) // 3
+        solid[y, 1:27, 3 + d:20 - d] = True
+    solid[0:55, 27:30, 8:12] = True                        # a tower beside the house
+    roof_cells = np.argwhere(solid[30:42].any(axis=0) & ~solid[42:].any(axis=0))
+    a = _face("z", +1, 3.0, 11.0, (1, 27), 30, 42, roof_cells)
+    b = _face("z", -1, 20.0, 11.0, (1, 27), 30, 42, roof_cells)
+    g = pair_pitches([a, b])
+    out, changed = regularise_walls(solid, g, ground_y=0)
+    assert changed > 0
+    fronts = {int(np.flatnonzero(out[15, x]).max()) for x in range(3, 25)}
+    assert len(fronts) == 1 and 14 <= fronts.pop() <= 16          # straight, at its middle
+    assert out[0:30, 3:25, 5:14].all()                             # down to the ground, no holes
+    assert (out[:, 27:30, 8:12] == solid[:, 27:30, 8:12]).all()    # the tower is untouched

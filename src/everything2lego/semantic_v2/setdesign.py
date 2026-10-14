@@ -1319,6 +1319,14 @@ def regularise_roofs(solid: np.ndarray, gables: list[GableSpec], *,
         e1 = min(e1_raw, hi_wall + 2.0)
         if not e0 < e1:
             continue
+        # and the ends on the gable walls, a stud of overhang past each:
+        # per[i] is the plan at r0 + i, so a column of it runs along the ridge
+        cols_with = [np.flatnonzero(col) for col in per.T if col.any()]
+        end_lo, end_hi = r0, r1 - 1
+        if cols_with:
+            end_lo = r0 + int(np.median([c.min() for c in cols_with]))
+            end_hi = r0 + int(np.median([c.max() for c in cols_with]))
+            r0, r1 = max(r0, end_lo - 1), min(r1, end_hi + 2)
         s_lo, s_hi = g.step(lo_face), g.step(hi_face)
         hstep = g.step(a)                                # as the recipe steps a hipped end
 
@@ -1354,7 +1362,9 @@ def regularise_roofs(solid: np.ndarray, gables: list[GableSpec], *,
             if top[x, z] > roof_top + keep_above:
                 continue                                 # a tower, a chimney: its own mass
             across = z if a.axis == "z" else x
-            if across + 0.5 < lo_wall or across + 0.5 > hi_wall + 1:
+            along = x if a.axis == "z" else z
+            if across + 0.5 < lo_wall or across + 0.5 > hi_wall + 1 \
+                    or along < end_lo or along > end_hi:
                 out[slab:y0, x, z] = False               # nothing stands out past the walls
             if prism[x, z] < y0:
                 if top[x, z] >= slab:
@@ -1365,6 +1375,100 @@ def regularise_roofs(solid: np.ndarray, gables: list[GableSpec], *,
             out[y0:prism[x, z] + 1, x, z] = True
             out[prism[x, z] + 1:, x, z] = False
     return out, int((out != solid).sum())
+
+
+def regularise_walls(solid: np.ndarray, gables: list[GableSpec], *, ground_y: int = 0,
+                     keep_above: int = 3 * COURSE) -> tuple[np.ndarray, int]:
+    """Under each paired gable, rebuild the walls as the box the roof sits
+    on: two straight walls along the ridge, a gable end at each end, from
+    the building's foot up to the roof.  A generated house often leans a
+    wall a few degrees off its roof; on the stud grid that wall becomes a
+    staircase of short walls with holes between them, and the structure
+    pass props what hangs over the holes with grey columns.  A set's walls
+    are straight planes under straight eaves.
+
+    Each wall line is where the walls typically are — the median of the
+    outline over the walls' whole height (as `regularise_roofs` reads the
+    eaves' seat), so a leaning wall comes out at its middle.  Only the
+    roof's own columns are rebuilt (an annex, a porch outside it, a
+    crossing gable's walls are not this box), and a column rising more
+    than `keep_above` over the roof — a tower — keeps its shape.  A
+    building whose foot is within FOOT_COURSES of the ground stands on
+    the base: a ragged foot (plants, a matte that bit into a dark wall) is
+    the reconstruction's, not the building's.  Returns the new solid and
+    the cells changed."""
+    from .massing import FOOT_COURSES, height_map
+    out = solid.copy()
+    H, X, Z = solid.shape
+    top = height_map(solid)
+    for g in gables:
+        a, b = g.a, g.b
+        if b is None:
+            continue
+        y0 = g.y_bottom
+        own = np.zeros((X, Z), dtype=bool)
+        for f in (a, b):
+            if f.cells is not None and len(f.cells):
+                own[f.cells[:, 0], f.cells[:, 1]] = True
+        if not own.any() or y0 < COURSE:
+            continue
+        # this roof's columns are the ones its faces cover — not a tower or
+        # a neighbouring wing beside it (in a house of several roofs those
+        # stand within a stud or two of every face)
+        roof_top = y0 + g.n_rows * COURSE
+        cols = own & (top <= roof_top + keep_above)
+        # (across, along-ridge) coordinates of the plan
+        plan = (lambda m: m) if a.axis == "z" else (lambda m: m.T)   # rows: along-ridge r, cols: across
+        mins_a, maxs_a, mins_r, maxs_r, feet = [], [], [], [], []
+        for y in range(0, y0 - COURSE + 1, COURSE):
+            layer = plan(solid[y:y + COURSE].any(axis=0) & cols)
+            if not layer.any():
+                continue
+            for row in layer:                            # each position along the ridge
+                idx = np.flatnonzero(row)
+                if len(idx):
+                    mins_a.append(idx.min()); maxs_a.append(idx.max())
+            for col in layer.T:                          # each position across
+                idx = np.flatnonzero(col)
+                if len(idx):
+                    mins_r.append(idx.min()); maxs_r.append(idx.max())
+        if not mins_a or not mins_r:
+            continue
+        lo_a, hi_a = int(np.median(mins_a)), int(np.median(maxs_a))
+        lo_r, hi_r = int(np.median(mins_r)), int(np.median(maxs_r))
+        if hi_a - lo_a < 2 or hi_r - lo_r < 2:
+            continue
+        box = np.zeros((X, Z), dtype=bool)
+        if a.axis == "z":
+            box[lo_r:hi_r + 1, lo_a:hi_a + 1] = True
+        else:
+            box[lo_a:hi_a + 1, lo_r:hi_r + 1] = True
+        # the foot: where the building under this roof starts, typically
+        bottoms = [int(np.flatnonzero(solid[:y0, x, z]).min())
+                   for x, z in np.argwhere(box & cols) if solid[:y0, x, z].any()]
+        if not bottoms:
+            continue
+        foot = int(np.median(bottoms))
+        if foot - ground_y <= FOOT_COURSES * COURSE:
+            foot = ground_y
+        for x, z in np.argwhere(cols):
+            out[foot:y0, x, z] = box[x, z]
+    return out, int((out != solid).sum())
+
+
+def _colour_new_cells(solid: np.ndarray, palette_idx: np.ndarray) -> np.ndarray:
+    """Cells of the solid with no colour (filled by a carve or a
+    regularisation) take the colour of the nearest coloured cell — the
+    surface they replaced."""
+    from scipy.ndimage import distance_transform_edt
+    known = palette_idx >= 0
+    if not known.any() or not (solid & ~known).any():
+        return palette_idx
+    _, (iy, ix, iz) = distance_transform_edt(~known, return_indices=True)
+    palette_idx = palette_idx.copy()
+    fill = solid & ~known
+    palette_idx[fill] = palette_idx[iy[fill], ix[fill], iz[fill]]
+    return palette_idx
 
 
 def ground_walls(walls: list[WallSpec], *, ground_y: int, max_gap: Optional[int] = None) -> int:
@@ -1425,13 +1529,7 @@ def _plan_from_massing(regions: list[Region], target: MeshTarget, occ: np.ndarra
         # cells the carve filled (a front brought forward) or exposed (the
         # inside of a cut tower) carry no colour: they take the colour of
         # the nearest coloured cell — the surface they replaced
-        from scipy.ndimage import distance_transform_edt
-        known = palette_idx >= 0
-        if known.any() and (solid & ~known).any():
-            _, (iy, ix, iz) = distance_transform_edt(~known, return_indices=True)
-            palette_idx = palette_idx.copy()
-            fill = solid & ~known
-            palette_idx[fill] = palette_idx[iy[fill], ix[fill], iz[fill]]
+        palette_idx = _colour_new_cells(solid, palette_idx)
         # and where the photo sees the model, the photo's own colours
         from ..facade import photo_colours
         palette_idx, _ = photo_colours(solid, palette_idx, facade, facade_fit)
@@ -1472,8 +1570,13 @@ def _plan_from_massing(regions: list[Region], target: MeshTarget, occ: np.ndarra
     pitches = merge_pitches(pitches)
     prism_gables = [g for g in absorb_hips(pair_pitches(pitches)) if g.b is not None]
     if prism_gables:
+        # the walls under each roof as the box it sits on, then the roof
+        # seated on those walls
+        solid, walls_changed = regularise_walls(solid, prism_gables, ground_y=ground_y)
         solid, changed = regularise_roofs(solid, prism_gables)
-        if changed:
+        if walls_changed:
+            palette_idx = _colour_new_cells(solid, palette_idx)
+        if changed or walls_changed:
             pitches, decks, skin = pitches_and_decks(solid, palette_idx, ground_y=ground_y)
             pitches = merge_pitches(pitches)
     walls = walls_from_solid(solid, palette_idx, target, ground_y=ground_y, exclude=skin,

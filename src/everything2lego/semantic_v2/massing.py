@@ -637,6 +637,7 @@ def piers_from_solid(solid: np.ndarray, palette_idx: np.ndarray, *, ground_y: in
     them.  A pier starts on the ground or on a floor; a patch that would
     hang in a room is not built.  Vertically adjacent patches with the
     same footprint become one spec so the bricks bond up the stack."""
+    from scipy.ndimage import binary_closing, binary_fill_holes
     H, X, Z = solid.shape
     n_courses = max(0, (H - ground_y + 1) // COURSE)
     specs: list[PierSpec] = []
@@ -646,13 +647,19 @@ def piers_from_solid(solid: np.ndarray, palette_idx: np.ndarray, *, ground_y: in
         block = solid[y0:y0 + COURSE]
         if block.shape[0] == 0:
             break
-        sl = (block.sum(axis=0) >= min(2, block.shape[0])) & ~exclude[y0:y0 + COURSE].any(axis=0)
+        owned = exclude[y0:y0 + COURSE].any(axis=0)
+        sl = (block.sum(axis=0) >= min(2, block.shape[0])) & ~owned
+        # what the walls of this course enclose is a room (a doorway's gap
+        # bridged first)
+        enclosed = binary_fill_holes(binary_closing(owned, iterations=2)) & ~owned
         nxt: dict[tuple, PierSpec] = {}
         for cells in _components(sl):
-            # Higher up, a big unowned patch is a room (left hollow, the
-            # walls and floors carry it); at ground level it is a plinth,
-            # a flight of steps, a terrace base — built solid like a set does.
-            if len(cells) > PIER_MAX_CELLS and c >= PLINTH_COURSES:
+            # A big unowned patch is a room — left hollow, the walls and
+            # floors carry it — unless it is at ground level outside the
+            # walls: a plinth, a flight of steps, a terrace base, built
+            # solid like a set does.
+            if len(cells) > PIER_MAX_CELLS and (
+                    c >= PLINTH_COURSES or enclosed[cells[:, 0], cells[:, 1]].mean() > 0.5):
                 continue
             key = tuple(map(tuple, cells))
             if key in open_specs:

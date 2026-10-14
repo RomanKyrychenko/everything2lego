@@ -36,7 +36,7 @@ class PipelineConfig:
     detector: DetectorConfig = field(default_factory=DetectorConfig)
     builder: BuilderConfig = field(default_factory=BuilderConfig)
     interior: InteriorConfig = field(default_factory=InteriorConfig)
-    fill_interior: bool = True
+    fill_interior: bool = True       # outside set mode only (a set is hollow)
     # Drop region placements that overlap earlier ones (refilling what they
     # alone covered) and hold up floating parts with 1x1 pegs and columns.
     validate_structure: bool = True
@@ -244,7 +244,11 @@ class SemanticLegoPipeline:
         run_builders(remaining)
 
         interior: list[Placement] = []
-        if self.config.fill_interior:
+        # A set is hollow: in set mode the recipes are the whole structure
+        # (base plate, walls, floors, roof; a sculpture's shell and what
+        # its courses stand on), and the inside stays open as in a store
+        # set.  Filling it only adds hidden bricks that stand on nothing.
+        if self.config.fill_interior and not self.config.set_mode:
             interior = self.interior_filler.fill(target, surface, exclude=owned)
             counts["interior:InteriorVolumeFiller"] = len(interior)
 
