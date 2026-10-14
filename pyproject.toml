@@ -58,3 +58,6 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 everything2lego = ["viewer/*", "data/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]   # not vendor/ (third-party code with its own test scripts)

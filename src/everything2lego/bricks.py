@@ -32,6 +32,8 @@ class Part:
     origin: tuple[float, float, float] = (0.0, 0.0, 0.0)
                            # LDU, the part's own frame: where its footprint's centre
                            # (x, z) and its body's top (y) are from its LDraw origin
+    yaw: int = 0           # the quarter turn from this catalogue's convention (footprint w
+                           # along x, low side at slope_dir) to how LDraw draws the part
 
     @property
     def w(self) -> int:
@@ -60,6 +62,15 @@ class Part:
         return [(w, d), (d, w)]
 
 
+@lru_cache(maxsize=1)
+def _frames() -> dict[str, dict]:
+    """Each catalogue part's measured LDraw frame (data/part_frames.json;
+    tools/partsdb/export.py frames, which reads the catalogue itself, so a
+    missing file means no corrections)."""
+    f = files("everything2lego.data").joinpath("part_frames.json")
+    return json.loads(f.read_text())["parts"] if f.is_file() else {}
+
+
 def _make_part(p: dict) -> Part:
     return Part(
         ldraw=p["ldraw"],
@@ -70,6 +81,8 @@ def _make_part(p: dict) -> Part:
         name=p["name"],
         slope_dir=p.get("slope_dir"),
         plain=p.get("plain", True),
+        origin=tuple(_frames().get(p["ldraw"], {}).get("origin", (0.0, 0.0, 0.0))),
+        yaw=_frames().get(p["ldraw"], {}).get("yaw", 0),
     )
 
 

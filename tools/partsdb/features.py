@@ -212,8 +212,17 @@ def add_paths() -> None:
                 by_model[got[0]]["paths"] = got[1]
             if k % 200 == 0:
                 print(f"  paths {k}/{len(files)}", flush=True)
-    pickle.dump(rows, open(OUT, "wb"))
+    save(rows)
     print(f"paths: {sum('paths' in r for r in rows)} models -> {OUT}")
+
+
+def save(rows: list[dict]) -> None:
+    """Write through a temporary file: an interrupted write (Ctrl-C, the
+    external disk gone) must not leave a broken file that took 40 minutes."""
+    tmp = OUT.with_suffix(".tmp")
+    with open(tmp, "wb") as fh:
+        pickle.dump(rows, fh)
+    os.replace(tmp, OUT)
 
 
 def main() -> None:
@@ -227,7 +236,7 @@ def main() -> None:
                 print(f"  {k}/{len(files)}", flush=True)
     assign_kinds(rows)
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    pickle.dump(rows, open(OUT, "wb"))
+    save(rows)
     kinds = Counter(r["kind"] for r in rows)
     print(f"features: {len(rows)} models -> {OUT}; kinds {dict(kinds)}")
 

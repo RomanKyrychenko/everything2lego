@@ -6,8 +6,10 @@ the low side +x -> -z -> -x -> +z.  The packer, the LDraw writer, the
 instruction renderer, the viewer export and the soft trainer all use
 `pack.slope_world_low` / `pack._slope_rotation`, so a change of convention
 is made in those two functions and nowhere else.  This test pins the
-convention so no writer can drift from it unnoticed; it does not verify
-the convention against the LDraw part files themselves.
+convention so no writer can drift from it unnoticed.  The LDraw writer
+maps it onto each part's own LDraw frame (`Part.yaw`, `Part.origin`,
+measured from the part files: data/part_frames.json);
+tests/test_ldraw_origin.py checks that against the parts' geometry.
 """
 
 import numpy as np
@@ -37,7 +39,10 @@ def test_ldraw_line_rotates_the_part_the_same_way():
                                                           1 if rot % 180 == 0 else 2, rot))
              for rot in (0, 90, 180, 270)}
     matrices = {rot: np.array(l.split()[5:14], dtype=float).reshape(3, 3) for rot, l in lines.items()}
-    assert np.allclose(matrices[0], np.eye(3))
-    assert np.allclose(matrices[90] @ matrices[90], matrices[180])
-    assert np.allclose(matrices[90] @ matrices[270], np.eye(3))
+    # rotation 0 is the part's own LDraw frame turned to the convention; the
+    # placement's rotation turns it further, the same way for every part
+    turn = {rot: m @ matrices[0].T for rot, m in matrices.items()}
+    assert np.allclose(matrices[0], np.array(io_ldraw._ROT[s.yaw]).reshape(3, 3))
+    assert np.allclose(turn[90] @ turn[90], turn[180])
+    assert np.allclose(turn[90] @ turn[270], np.eye(3))
     assert all(l.endswith("3040.dat") for l in lines.values())

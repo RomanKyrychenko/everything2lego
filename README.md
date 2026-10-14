@@ -37,7 +37,14 @@ because PyTorch's Hunyuan/TripoSR builds are still Intel-only for some ops.
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/python -m everything2lego.native build   # the sampler's Rust core (needs cargo); optional
 ```
+
+On Apple Silicon use a native arm64 Python for everything but the neural
+backends: the mesh → LEGO pipeline, the parts tools and the tests run about
+a third faster than under Rosetta.  Keep an x86_64 venv only for
+`.[neural]`.  `native build` builds the Rust core for whichever Python runs
+it (both can live side by side).
 
 That installs the core mesh → LEGO pipeline plus `pytest`.  Nothing in it
 needs a GPU or PyTorch, so it works on a plain CI runner; the tests that

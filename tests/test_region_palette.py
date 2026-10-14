@@ -5,6 +5,7 @@ snapped so the lock is attainable."""
 from types import SimpleNamespace as NS
 
 import numpy as np
+import pytest
 
 from everything2lego.semantic_v2 import (SoftAssembly, _build_region_cell_masks,
                                          _snap_target_to_region_palette)
@@ -86,6 +87,7 @@ def test_overlapping_boxes_are_owned_by_nearest_plane():
     snapped = _snap_target_to_region_palette(pi, masks)
     assert (snapped[:, :3, :] == 3).all() and (snapped[:, 3:6, :] == 5).all()
     # The lock in the assembly agrees with the ownership.
+    pytest.importorskip("torch", reason="SoftAssembly needs torch (pip install -e '.[neural]')")
     sa = SoftAssembly.from_placements((Y, X, Z), [], 12, per_region_palette=masks)
     logits = sa.color_logits.detach()
     assert logits[0, 2, 0, 3] > -1e9 and logits[0, 2, 0, 5] < -1e9   # owned by A: only 3

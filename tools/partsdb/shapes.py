@@ -13,7 +13,7 @@ the hollow underside every brick has.  A part qualifies when its body (the
 studs aside) sits on the grid: footprint a whole number of studs, height a
 whole number of plates.
 
-`bits` is each cell's shape at 4x4x4 samples (pack()); `occ` its share.
+`bits` is each cell's shape at 4x4x4 samples (sampler.pack); `occ` its share.
 Cells are indexed [y from the bottom, x, z] in the part's own frame,
 x and z from the box's minimum corner; `origin_x/z` is the box's centre in
 the part frame (LDU), which is where a placement puts the footprint's
@@ -40,11 +40,13 @@ sys.path.insert(0, str(HERE.parent / "set_study"))
 from build import DB  # noqa: E402
 from ldraw_read import _find, _matrix  # noqa: E402
 
+sys.path.insert(0, str(HERE.parents[1] / "src"))
+from everything2lego.sampler import SUB, pack  # noqa: E402  (one bit order for parts and targets)
+
 CATEGORIES = ("Bricks", "Plates", "Tiles", "Bricks Sloped", "Bricks Curved", "Bricks Round and Cones",
               "Tiles Round and Curved", "Plates Round Curved and Dishes", "Bricks Wedged", "Plates Wedged",
               "Bricks Special", "Plates Special", "Tiles Special")
 MIN_SETS = 30
-SUB = 4                       # samples per cell along each axis
 TOL = 1.0                     # LDU a body may miss the grid by
 
 
@@ -97,16 +99,6 @@ def _silhouette(pts2: np.ndarray, lo, hi) -> np.ndarray:
     # the outer envelope: a hollow (an open stud, a tube seen end-on) is
     # filled; an opening reaching the edge (an arch) is not a hole
     return binary_fill_holes(np.array(img, dtype=bool).T)      # [u, v]
-
-
-def pack(fine: np.ndarray, size) -> np.ndarray:
-    """Each cell's SUB^3 samples as one 64-bit mask: bit sy*16 + sx*4 + sz
-    (sy from the cell's bottom).  Two shapes' mismatch in a cell is the
-    popcount of their masks' XOR."""
-    h, w, d = size
-    b = fine.reshape(h, SUB, w, SUB, d, SUB).transpose(0, 2, 4, 1, 3, 5).reshape(h, w, d, SUB ** 3)
-    weights = np.left_shift(np.uint64(1), np.arange(SUB ** 3, dtype=np.uint64))
-    return (b.astype(np.uint64) * weights).sum(axis=-1, dtype=np.uint64)
 
 
 def _snap(v: float, step: float, off: float = 0.0):

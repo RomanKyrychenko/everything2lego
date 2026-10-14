@@ -99,36 +99,51 @@ def _lib_path() -> Optional[Path]:
 
 
 def build() -> Path:
-    """cargo build the library for this Python's architecture."""
-    # rustup's cargo first: it can hold the standard library of another
-    # architecture (`rustup target add`); a system cargo usually cannot
+    """cargo build the library for this Python's architecture, with the
+    first cargo that can: rustup's (it holds other architectures' standard
+    libraries once `rustup target add`-ed), then the one on PATH (a system
+    cargo builds for its own machine)."""
     rustup = Path.home() / ".cargo" / "bin" / "cargo"
-    cargo = str(rustup) if rustup.exists() else (shutil.which("cargo") or "cargo")
-    cmd = [cargo, "build", "--release", "--manifest-path", str(CRATE / "Cargo.toml")]
+    cargos = [str(c) for c in (rustup if rustup.exists() else None, shutil.which("cargo")) if c]
     t = _triple()
-    if t:
-        cmd += ["--target", t]
-    subprocess.run(cmd, check=True)
+    for cargo in dict.fromkeys(cargos):
+        cmd = [cargo, "build", "--release", "--manifest-path", str(CRATE / "Cargo.toml")]
+        if subprocess.run(cmd + (["--target", t] if t else [])).returncode == 0:
+            break
+    else:
+        raise RuntimeError(f"no cargo could build for {t or 'this machine'}: tried {', '.join(cargos) or 'none'}")
     library.cache_clear()
     p = _lib_path()
     if p is None or library() is None:
-        raise RuntimeError(f"built, but {p} does not load into this Python ({platform.machine()})")
+        raise RuntimeError(f"built, but {p} can't be used: {why_not()}")
     return p
+
+
+def why_not() -> Optional[str]:
+    """Why the native library can't be used, or None when it can."""
+    p = _lib_path()
+    if p is None or not p.exists():
+        return "not built"
+    src = CRATE / "src" / "lib.rs"
+    if not os.environ.get("E2L_NATIVE_LIB") and src.exists() and src.stat().st_mtime > p.stat().st_mtime:
+        return f"{p.name} is older than {src.name}: rebuild it"   # it would run the old walk
+    try:
+        lib = C.CDLL(str(p))
+    except OSError:
+        return f"{p.name} does not load into this Python ({platform.machine()})"
+    lib.e2l_abi.restype = C.c_int32
+    if lib.e2l_abi() != ABI:
+        return f"{p.name} has interface {lib.e2l_abi()}, this module {ABI}: rebuild it"
+    return None
 
 
 @lru_cache(maxsize=1)
 def library():
-    """The native library, or None when it is not built."""
-    p = _lib_path()
-    if p is None or not p.exists():
+    """The native library, or None when it can't be used (why_not says why)."""
+    if why_not() is not None:
         return None
-    try:
-        lib = C.CDLL(str(p))
-    except OSError:                                      # built for another architecture
-        return None
+    lib = C.CDLL(str(_lib_path()))
     lib.e2l_abi.restype = C.c_int32
-    if lib.e2l_abi() != ABI:
-        return None
     lib.e2l_sample.argtypes = [_P(Problem)]
     lib.e2l_sample.restype = C.c_int32
     return lib

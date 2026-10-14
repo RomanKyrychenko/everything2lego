@@ -69,6 +69,7 @@ from __future__ import annotations
 import json
 import math
 import random
+import warnings
 from collections import Counter
 from dataclasses import dataclass
 from functools import lru_cache
@@ -79,11 +80,12 @@ import numpy as np
 
 from .bricks import Part
 from .colors import _palette_lab, nearest_where, palette
+from .io_ldraw import _ROT as _LDRAW_ROT
 from .pack import Placement
 from .style import Reference, RunningKL, kind_of, middle_weight, token_degree
 
-_ROT = {0: (1, 0, 0, 1), 90: (0, 1, -1, 0), 180: (-1, 0, 0, -1), 270: (0, -1, 1, 0)}
 # (x' from x, x' from z, z' from x, z' from z): io_ldraw's yaw matrices on the x-z plane
+_ROT = {r: (m[0], m[2], m[6], m[8]) for r, m in _LDRAW_ROT.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +239,12 @@ def vocabulary() -> tuple[VPart, ...]:
     return tuple(out)
 
 
+@lru_cache(maxsize=1)
+def known_kinds() -> frozenset:
+    """The kinds of object the vocabulary has statistics for."""
+    return frozenset(k for v in vocabulary() for k in v.kinds)
+
+
 def select_vocabulary(kind: Optional[str], n: int = 160) -> tuple[VPart, ...]:
     """The parts a build of this kind of object draws from: the plain
     bricks, plates and tiles, and the `n` parts sets of that kind use most
@@ -268,6 +276,9 @@ class Target:
             self.bits = np.where(self.want, FULL, np.uint64(0))
         self.bits = np.where(self.want, self.bits, np.uint64(0)).astype(np.uint64)
         self.fill = popcount(self.bits) / SUB ** 3      # how full each cell should be
+        known = known_kinds()
+        if self.kind is not None and self.kind not in known:
+            raise ValueError(f"unknown kind {self.kind!r}; one of {', '.join(sorted(known))}")
 
     def shape_descriptor(self) -> np.ndarray:
         ys, xs, zs = np.nonzero(self.want)
@@ -890,6 +901,9 @@ def sample(target: Target, models: list[dict], *, iters: int = 20000, seed: int 
     stats.degree = token_degree(models)
     weights = weights or Weights()
     vocab = select_vocabulary(target.kind, n_special)
+    if engine == "auto" and not native.available():
+        warnings.warn(f"native sampler: {native.why_not()} (python -m everything2lego.native build); "
+                      "running the Python walk, about a hundred times slower", stacklevel=2)
     if engine == "native" or (engine == "auto" and native.available()):
         got, info, history = native.run(
             target, stats, vocab, target.kind, weights, iters=iters, warmup=warmup, seed=seed,

@@ -5,8 +5,12 @@ src/everything2lego/data/ (the pipeline must not need the external disk):
   part_usage.json     how often real sets use each catalogue part, overall and
                       per role (roof, wall, floor, ...), and what each part
                       is joined to and how often against chance
+  part_frames.json    each catalogue part's LDraw frame: where its footprint
+                      centre and body top are from its origin, and the quarter
+                      turn from the catalogue's convention (shapes.shape)
 
     python tools/partsdb/export.py
+    python tools/partsdb/export.py frames      # part_frames.json only
 """
 from __future__ import annotations
 
@@ -106,5 +110,66 @@ def main() -> None:
         print("no colour records:", ", ".join(missing))
 
 
+def _catalogue_yaw(part, s) -> int | None:
+    """The quarter turn from the catalogue's frame to the part's LDraw
+    frame: the one that lays the measured part on the catalogue footprint
+    (w along x) with its sloped side, the emptier one, where `slope_dir`
+    says the low side is (+x, or +x+z for a corner).  None: no turn does."""
+    import numpy as np
+    from everything2lego.sampler import _rotate, unpack
+    fine = unpack(np.array(s["bits"], dtype=np.uint64))
+    want = {"x": 0, "z": 0}
+    for sign, ax in __import__("re").findall(r"([+-])([xz])", part.slope_dir or ""):
+        want[ax] = 1 if sign == "+" else -1
+    for q in (0, 90, 180, 270):
+        # the turn a placement at rotation 0 gets: catalogue frame = LDraw frame turned by q
+        f = _rotate(fine, q)
+        W, D = f.shape[1] // 4, f.shape[2] // 4
+        if (W, D) != tuple(part.footprint):
+            continue
+        ok = True
+        for axis, sgn in (("x", want["x"]), ("z", want["z"])):
+            if sgn:
+                a = 1 if axis == "x" else 2
+                n = f.shape[a]
+                lo = f.take(range(n // 2), axis=a).sum()
+                hi = f.take(range(n - n // 2, n), axis=a).sum()
+                ok &= (hi < lo) if sgn > 0 else (lo < hi)
+        if ok:
+            return q
+    return None
+
+
+def frames() -> None:
+    """Each catalogue part's frame, measured from its LDraw geometry
+    (shapes.shape), so aliases (3040 -> 3040b) and parts the database
+    leaves out are covered too: where its footprint centre and body top
+    are from its LDraw origin, and the quarter turn from the catalogue's
+    convention (w along x, low side at slope_dir) to how LDraw draws it.
+    A part whose body is not on the grid keeps (0, 0, 0) and no turn."""
+    from everything2lego.bricks import full_catalog
+    from shapes import shape
+    out, skipped, unturned = {}, [], []
+    for p in full_catalog():
+        s = shape((p.ldraw[:-4], p.ldraw))
+        if s is None:
+            skipped.append(p.ldraw)
+            continue
+        yaw = _catalogue_yaw(p, s)
+        if yaw is None:
+            unturned.append(p.ldraw)
+            yaw = 0
+        o = [s["origin_x"], s["origin_y"], s["origin_z"]]
+        if yaw or any(abs(v) > 1e-6 for v in o):
+            out[p.ldraw] = {"origin": o, "yaw": yaw}
+    (DATA / "part_frames.json").write_text(json.dumps(
+        {"_source": "tools/partsdb/export.py frames (LDraw geometry, shapes.shape)", "parts": out}, indent=0))
+    print(f"frames: {len(out)} catalogue parts off-centre or turned; "
+          f"{sum(1 for v in out.values() if v['yaw'])} turned")
+    print(f"  not on the grid (kept as they are): {', '.join(skipped)}")
+    if unturned:
+        print(f"  no turn matches footprint and slope_dir (kept unturned): {', '.join(unturned)}")
+
+
 if __name__ == "__main__":
-    main()
+    frames() if sys.argv[1:] == ["frames"] else main()

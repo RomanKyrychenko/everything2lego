@@ -121,3 +121,10 @@ def test_long_walk_keeps_its_energy():
     _, info = sampler.sample(target, _models(), iters=5000, seed=3, k_models=1, warmup=50,
                              n_special=60, engine="native")
     assert info["energy"] == pytest.approx(info["energy_recomputed"], rel=1e-6)
+
+
+def test_unknown_kind_is_refused():
+    want = np.ones((2, 2, 2), dtype=bool)
+    with pytest.raises(ValueError, match="unknown kind 'car'"):
+        sampler.Target(want, np.full(want.shape, 4), want.copy(), kind="car")
+    sampler.Target(want, np.full(want.shape, 4), want.copy(), kind="road_vehicle")

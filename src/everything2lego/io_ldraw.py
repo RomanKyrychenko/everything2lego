@@ -43,7 +43,7 @@ def placement_to_line(p: Placement) -> str:
     z = (2 * p.z_stud + p.d_world - 1) * (LDU_PER_STUD // 2)
     y = -(p.y_plate + p.part.height_units) * LDU_PER_PLATE
 
-    m = _ROT[p.rotation_deg]
+    m = _ROT[(p.rotation_deg + p.part.yaw) % 360]
     ox, oy, oz = p.part.origin
     if ox or oy or oz:                     # the origin is off the footprint's centre / body's top
         x -= m[0] * ox + m[2] * oz
