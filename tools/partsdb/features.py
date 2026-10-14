@@ -1,0 +1,159 @@
+"""Per-model neighbourhood features of the official LDraw models, for the
+statistics a generator matches: every part as a token (kind + size), every
+pair of touching parts as a pattern (token A, token B, where B is: up,
+down or level), and the kind of model (building, vehicle, figure, other)
+read from what its parts are used for in official models.
+
+    python tools/partsdb/features.py      # -> $LEGO_DATA/analysis/features.pkl
+
+Tokens are coarse on purpose: exact parts at exact offsets are too sparse
+to compare models by (most of a real model's exact patterns occur nowhere
+else); kind + size patterns are dense enough to have a distribution.
+"""
+from __future__ import annotations
+
+import os
+import pickle
+import re
+import sqlite3
+import sys
+from collections import Counter
+from multiprocessing import Pool
+from pathlib import Path
+
+import pandas as pd
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent / "set_study"))
+from build import DATA, DB, OMR, _ld_to_part  # noqa: E402
+from neighbours import held_out, model_parts, neighbour_pairs, part_classes  # noqa: E402
+
+OUT = DATA / "analysis" / "features.pkl"
+
+KIND = {"Plates": "plate", "Plates Special": "plateS", "Bricks": "brick", "Bricks Special": "brickS",
+        "Tiles": "tile", "Tiles Special": "tileS", "Bricks Curved": "curve", "Tiles Round and Curved": "tileR",
+        "Plates Round Curved and Dishes": "plateR", "Bricks Round and Cones": "brickR",
+        "Windows and Doors": "window", "Panels": "panel", "Plates Wedged": "wedgeP",
+        "Bricks Wedged": "wedgeB", "Hinges, Arms and Turntables": "hinge", "Plants & Trees": "plant",
+        "Bars, Ladders and Fences": "bar", "Wheels and Tyres": "wheel", "Technic Beams": "tbeam",
+        "Technic Bricks": "tbrick", "Technic Pins": "tpin", "Technic Axles": "taxle",
+        "Technic Connectors": "tconn"}
+BUILDING = {"roof", "wall", "window", "door", "floor", "chimney", "stairs", "tower", "fence", "base"}
+VEHICLE = {"wheel", "vehicle_body", "cockpit", "wing"}
+FIGURE = {"figure"}
+
+
+def token(category: str, name: str, w: float, d: float, h: float) -> str:
+    """kind + footprint + height: 'plate1x2h1', 'slope45-2x2h3', 'brick1x1h3'."""
+    kind = KIND.get(category, "other")
+    if category == "Bricks Sloped":
+        m = re.search(r"(\d+)°", name or "")
+        inv = "inv" if "Inverted" in (name or "") else ""
+        kind = f"slope{inv}{m.group(1) if m else ''}"
+    a, b = sorted((int(round(w)), int(round(d))), reverse=True)
+    a, b = min(a, 8), min(b, 8)                         # 8+ studs is "large"
+    return f"{kind}{a}x{b}h{min(int(round(h)), 9)}"
+
+
+def vertical(A, B) -> str:
+    """Where B is relative to A: on top, underneath, or level (beside)."""
+    if B[2][1] >= A[3][1] - 0.1:
+        return "up"
+    if B[3][1] <= A[2][1] + 0.1:
+        return "down"
+    return "level"
+
+
+def shape_descriptor(extent, volume: float):
+    """A model's overall shape, comparable between an official model and a
+    target: log width, depth (studs; width >= depth), log height (studs, a
+    stud is 2.5 plates), and how full its bounding box is."""
+    import numpy as np
+    w, d = sorted((float(extent[0]), float(extent[2])), reverse=True)
+    h = float(extent[1]) / 2.5
+    fill = volume / max(1e-6, w * d * h * 2.5)
+    return np.array([np.log(w), np.log(d), np.log(max(h, 0.4)), min(1.0, fill)])
+
+
+_CTX: dict = {}
+
+
+def _init():
+    con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+    _CTX["ldmap"] = _ld_to_part(con)
+    _CTX["classes"] = part_classes(con)
+    g = pd.read_sql("""SELECT p.part_num, p.category, p.name, g.w_studs, g.d_studs, g.h_plates
+                       FROM part p JOIN (SELECT part_num, w_studs, d_studs, h_plates FROM geometry
+                                         GROUP BY part_num) g ON g.part_num = p.part_num""", con)
+    _CTX["token"] = {pn: token(c, n, w or 0, d or 0, h or 0) for pn, c, n, w, d, h in g.values}
+    roles = pd.read_sql("SELECT part_num, role, share FROM part_role", con)
+    _CTX["roles"] = {pn: dict(zip(gr.role, gr.share)) for pn, gr in roles.groupby("part_num")}
+
+
+def role_mass(part_nums: list[str]) -> Counter:
+    """The model's parts' role shares (official models' uses), summed per
+    kind of model: building, vehicle, figure, other."""
+    s = Counter()
+    for pn in part_nums:
+        for r, sh in _CTX["roles"].get(pn, {}).items():
+            s["building" if r in BUILDING else "vehicle" if r in VEHICLE else
+              "figure" if r in FIGURE else "other"] += sh
+    return s
+
+
+def assign_kinds(rows: list[dict], min_lift: float = 1.2) -> None:
+    """Each model's kind: the one whose share of its role mass most exceeds
+    that kind's share over all models (lift), when it does by `min_lift`;
+    else "other".  Common roles (every model has some vehicle-ish parts)
+    don't decide by being common."""
+    tot = Counter()
+    for r in rows:
+        n = sum(r["roles"].values()) or 1
+        for k, v in r["roles"].items():
+            tot[k] += v / n
+    base = {k: v / len(rows) for k, v in tot.items()}
+    for r in rows:
+        n = sum(r["roles"].values())
+        if not n:
+            r["kind"] = "other"
+            continue
+        lifts = {k: (v / n) / base[k] for k, v in r["roles"].items() if base.get(k)}
+        k, lift = max(lifts.items(), key=lambda kv: kv[1])
+        r["kind"] = k if lift >= min_lift else "other"
+
+
+def features(f: Path):
+    try:
+        items = model_parts(f, _CTX["ldmap"], _CTX["classes"])
+    except Exception:
+        return None
+    if len(items) < 20:
+        return None
+    toks = [_CTX["token"].get(it[0], "other0x0h0") for it in items]
+    import numpy as np
+    lo = np.min([it[2] for it in items], axis=0)
+    hi = np.max([it[3] for it in items], axis=0)
+    ext = np.maximum(hi - lo, 1e-3)                      # studs, plates, studs
+    vol = sum(float(np.prod(np.maximum(it[3] - it[2], 0))) for it in items)
+    pats = Counter()
+    for i, j in neighbour_pairs(items):
+        pats[(toks[i], toks[j], vertical(items[i], items[j]))] += 1
+    return {"model": f.stem, "held_out": held_out(f.stem), "roles": role_mass([it[0] for it in items]),
+            "n_parts": len(items), "tokens": Counter(toks), "patterns": pats,
+            "shape": shape_descriptor(ext, vol)}
+
+
+def main() -> None:
+    files = sorted(OMR.glob("*.mpd")) + sorted(OMR.glob("*.ldr"))
+    with Pool(max(1, (os.cpu_count() or 2) - 1), initializer=_init) as pool:
+        rows = [r for r in pool.imap_unordered(features, files, chunksize=4) if r]
+    assign_kinds(rows)
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+    pickle.dump(rows, open(OUT, "wb"))
+    kinds = Counter(r["kind"] for r in rows)
+    print(f"features: {len(rows)} models -> {OUT}; kinds {dict(kinds)}")
+
+
+if __name__ == "__main__":
+    main()
