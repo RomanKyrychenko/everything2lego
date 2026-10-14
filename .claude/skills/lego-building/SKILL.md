@@ -21,6 +21,35 @@ rather than inventing rules.
 | Which colours each catalogue part is made in | `src/everything2lego/data/part_colours.json` | `tools/set_study/part_colours.py` |
 | The 120 most used parts, by kind of set | `top_parts.md` (next to this file) | |
 
+## The parts database: ask it first
+
+`/Volumes/PRO-G40/lego_data/parts.sqlite` (built and documented in
+`tools/partsdb/`) holds everything known about every part:
+
+- colours with set counts and years
+- size
+- every connector and the side it faces
+- usage by kind of set
+- which parts share sets (lift)
+- which parts are physically joined in the official models, how
+  (stacked, SNOT, inverted) and with which offset
+- what real-world role a part plays (roof, window, wheel…)
+
+```bash
+python tools/partsdb/query.py 3037        # part card
+python tools/partsdb/query.py 3039 3037   # how two parts join, seen vs expected
+```
+
+From Python (`tools/partsdb/query.py`):
+
+- `PartsDB().for_role("roof")`
+- `.connected_to(pn)`
+- `.together(pn)`
+- `.never_connected(a, b)`
+- `.colours(pn)`
+
+Decide part choices from these numbers, not from intuition.
+
 ## Look up a set
 
 - **Render an OMR model:** `python tools/render_build.py "/Volumes/PRO-G40/lego_data/omr/files/5766-1.mpd" out.png`.
