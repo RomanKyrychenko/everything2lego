@@ -1889,8 +1889,9 @@ def prune_unsupported(plan: SetPlan, grid_shape: tuple[int, int, int], *, rounds
 
 def build_set(plan: SetPlan, claimed: np.ndarray, target: Optional[MeshTarget] = None
               ) -> tuple[list[Placement], dict[str, int]]:
-    """Bases, then walls, then roofs, each marking the shared `claimed`
-    mask so the later ones build around the earlier."""
+    """Bases and the base plate, then walls, then roofs, each marking the
+    shared `claimed` mask so the later ones build around (and on) the
+    earlier."""
     out: list[Placement] = []
     counts: dict[str, int] = {}
 
@@ -1909,6 +1910,17 @@ def build_set(plan: SetPlan, claimed: np.ndarray, target: Optional[MeshTarget] =
             claim(ps)
             out.extend(ps)
             counts["foundation:BaseRecipe"] = counts.get("foundation:BaseRecipe", 0) + len(ps)
+    # The base plate before anything stands on it: the walls, piers and
+    # steps then build from its top (they skip the cells it claimed), so
+    # everything on the ground is one assembly through it, as on a set's
+    # baseplate.
+    from .massing import build_floor
+    for fl in plan.floors:
+        if fl.base:
+            ps = build_floor(fl, claimed, claimed.shape)
+            claim(ps)
+            out.extend(ps)
+            counts["floor:FloorRecipe"] = counts.get("floor:FloorRecipe", 0) + len(ps)
     for w in plan.walls:
         ps = build_wall(w, claimed)
         claim(ps)
@@ -1922,8 +1934,9 @@ def build_set(plan: SetPlan, claimed: np.ndarray, target: Optional[MeshTarget] =
             out.extend(ps)
             counts["pier:PierRecipe"] = counts.get("pier:PierRecipe", 0) + len(ps)
     if plan.floors:
-        from .massing import build_floor
         for fl in plan.floors:
+            if fl.base:
+                continue                                     # built first
             ps = build_floor(fl, claimed, claimed.shape)
             claim(ps)
             out.extend(ps)

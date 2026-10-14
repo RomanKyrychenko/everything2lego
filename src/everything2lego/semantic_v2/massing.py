@@ -815,6 +815,8 @@ def floors_and_spines(solid: np.ndarray, walls: list[WallSpec], gables: list, *,
     for c in range(FLOOR_EVERY, n_courses, FLOOR_EVERY):
         if not any(abs(c - f) <= 2 for f in floor_courses):
             floor_courses.add(c)
+    if walls:
+        floor_courses.add(0)              # a set always stands on its base plate
     # A flat top (a flat roof, a terrace, a tread of the steps) is the top
     # floor of its block: same sheet, same spines under it.
     deck_cells: dict[int, np.ndarray] = {}
@@ -895,15 +897,21 @@ def floors_and_spines(solid: np.ndarray, walls: list[WallSpec], gables: list, *,
         if y0 + COURSE > H:
             break
         if c == 0:
-            # the base plate is the building's footprint: a
-            # reconstruction's foot is ragged (plants, shadow, a matte bite),
-            # so the plan of the foot courses together, its inside filled
-            from scipy.ndimage import binary_fill_holes
+            # the base plate: one rectangle under everything that stands
+            # on the ground, as a set stands on its baseplate — a porch, a
+            # lamp post, a wing whose foot the reconstruction left apart
+            # are all one assembly through it.  Its extent is the plan of
+            # the foot courses together (a reconstruction's foot is ragged:
+            # plants, shadow, a matte bite).
             foot = np.zeros((X, Z), dtype=bool)
             for k in range(0, FOOT_COURSES + 1):
                 if ground_y + (k + 1) * COURSE <= H:
                     foot |= plan_at(k)
-            sl = binary_fill_holes(foot) & ~roofed(y0, c)
+            sl = np.zeros((X, Z), dtype=bool)
+            if foot.any():
+                xs, zs = np.nonzero(foot)
+                sl[xs.min():xs.max() + 1, zs.min():zs.max() + 1] = True
+            sl &= ~roofed(y0, c)
         else:
             sl = plan_at(c) & ~roofed(y0, c)
         # Walls that start right above this course stand on it, roof or
@@ -932,7 +940,7 @@ def floors_and_spines(solid: np.ndarray, walls: list[WallSpec], gables: list, *,
                 ledge[:] = False
             sl &= under | ledge
         tops = deck_cells.get(c)
-        storey = c in floor_courses and (tops is None or c in {
+        storey = c in floor_courses and (c == 0 or tops is None or c in {
             (g.y_bottom - ground_y) // COURSE - 1 for g in gables} | {
             (w.frame.y0 - ground_y) // COURSE - 1 for w in walls} | set(
             range(FLOOR_EVERY, n_courses, FLOOR_EVERY)))
@@ -963,7 +971,9 @@ def floors_and_spines(solid: np.ndarray, walls: list[WallSpec], gables: list, *,
             # Spines run along z (floor plates then run along x across
             # them) at every SPINE_EVERY-th x inside the room, from the
             # course above the last floor there up to this one.
-            xs = range(int(cells[:, 0].min()) + SPINE_EVERY // 2, int(cells[:, 0].max()), SPINE_EVERY)
+            # (the base plate lies on the ground: nothing under it to carry)
+            xs = range(int(cells[:, 0].min()) + SPINE_EVERY // 2, int(cells[:, 0].max()), SPINE_EVERY) \
+                if c > 0 else range(0)
             for x in xs:
                 zs = np.flatnonzero(inside[x])
                 if len(zs) < 3:

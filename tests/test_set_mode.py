@@ -132,3 +132,25 @@ def test_set_mode_uses_only_parts_lego_makes_in_their_colours(result):
     bad = {(p.part.ldraw, pal[p.color_idx].name) for p in result.placements
            if not made_in(p.part, pal[p.color_idx].code)}
     assert not bad, bad
+
+
+def test_a_house_and_a_shed_beside_it_stand_on_one_base_plate(tmp_path):
+    """Two blocks the ground alone joins come out as one assembly: the
+    base plate under both is built first and everything stands on it."""
+    V, F, C = [], [], []
+
+    def add(v, f, colour):
+        off = sum(len(x) for x in V)
+        V.append(v); F.append(f + off); C.append(np.tile(colour, (len(f), 1)))
+
+    add(*_box(0, 45, 0, 200, 90, 120), WHITE)                # the house, on the ground
+    add(*_box(230, 20, 0, 40, 40, 40), WHITE)                # a shed 110 mm away
+    path = str(tmp_path / "two.glb")
+    trimesh.Trimesh(np.vstack(V), np.vstack(F), face_colors=np.vstack(C), process=False).export(path)
+    res = SemanticLegoPipeline(PipelineConfig(max_studs=24, set_mode=True)).run(path)
+    rep = check(res.placements)
+    assert rep.components == 1 and not rep.floating
+    c = res.per_region_counts
+    # the shed is kept, not dropped as an island or tied on with bridges
+    assert c.get("structure:dropped_islands", 0) == 0 and c.get("structure:bridges", 0) == 0
+    assert max(p.x_stud + p.w_world for p in res.placements) > 20
