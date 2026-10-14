@@ -561,6 +561,64 @@ def _gable_footprint(g: GableSpec) -> tuple[int, int, int, int]:
     return (lo, hi, r0, r1) if g.a.axis == "x" else (r0, r1, lo, hi)
 
 
+def _prism_top(g: GableSpec, X: int, Z: int) -> np.ndarray:
+    """(X, Z) top plate of the stepped prism a paired gable's recipe lays
+    (row i one course up, `step` studs in from each eave), -1 outside."""
+    a, b = g.a, g.b
+    lo_face, hi_face = (a, b) if a.sign > 0 else (b, a)
+    e0, e1 = lo_face.eave, hi_face.eave
+    out = np.full((X, Z), -1, dtype=int)
+    r0 = max(0, min(a.span[0], b.span[0]))
+    r1 = min(max(a.span[1], b.span[1]), X if a.axis == "z" else Z)
+    s_lo, s_hi = g.step(lo_face), g.step(hi_face)
+    for t in range(max(0, int(np.floor(e0))), int(np.ceil(e1))):
+        d_lo, d_hi = t - np.floor(e0), np.ceil(e1) - 1 - t
+        if d_lo < 0 or d_hi < 0 or t >= (Z if a.axis == "z" else X):
+            continue
+        n = int(min(g.n_rows, d_lo // s_lo + 1, d_hi // s_hi + 1))
+        if a.axis == "z":
+            out[r0:r1, t] = g.y_bottom + n * COURSE - 1
+        else:
+            out[t, r0:r1] = g.y_bottom + n * COURSE - 1
+    return out
+
+
+def one_roof_per_block(gables: list[GableSpec], solid: np.ndarray, *,
+                       share: float = 0.75) -> list[GableSpec]:
+    """A block has one roof.  The height map of a squarish block with a
+    terraced or hipped top reads as two paired roofs at right angles over
+    the same footprint; each would lay its slope rows through the other's.
+    Where two paired gables of crossed axes at about the same height
+    overlap over `share` of BOTH their footprints, the one whose prism fits
+    the model's surface better stays.  (A cross gable — a T or L — overlaps
+    each wing only in part, and keeps both.)"""
+    from .massing import height_map
+    paired = [g for g in gables if g.b is not None]
+    if len(paired) < 2:
+        return gables
+    H, X, Z = solid.shape
+    top = height_map(solid)
+    prisms = {id(g): _prism_top(g, X, Z) for g in paired}
+
+    def misfit(g: GableSpec) -> float:
+        m = prisms[id(g)] >= 0
+        return float(np.mean(np.abs(top[m] - prisms[id(g)][m]))) if m.any() else 1e9
+
+    dropped: set[int] = set()
+    for i, g in enumerate(paired):
+        for h in paired[i + 1:]:
+            if id(g) in dropped or id(h) in dropped or g.a.axis == h.a.axis:
+                continue
+            if abs(g.y_bottom - h.y_bottom) > 2 * COURSE:
+                continue
+            mg, mh = prisms[id(g)] >= 0, prisms[id(h)] >= 0
+            both = (mg & mh).sum()
+            if both < share * mg.sum() or both < share * mh.sum():
+                continue
+            dropped.add(id(h) if misfit(g) <= misfit(h) else id(g))
+    return [g for g in gables if id(g) not in dropped]
+
+
 def absorb_hips(gables: list[GableSpec]) -> list[GableSpec]:
     """A hip roof reads off the height map as two roofs: faces pitched
     along x and faces pitched along z over one footprint.  Where an x-roof
@@ -1663,7 +1721,8 @@ def _plan_from_massing(regions: list[Region], target: MeshTarget, occ: np.ndarra
     # rebuilt as the prism before the walls are read off the solid.
     pitches, decks, skin = pitches_and_decks(solid, palette_idx, ground_y=ground_y)
     pitches = merge_pitches(pitches)
-    prism_gables = [g for g in absorb_hips(pair_pitches(pitches)) if g.b is not None]
+    prism_gables = [g for g in one_roof_per_block(absorb_hips(pair_pitches(pitches)), solid)
+                    if g.b is not None]
     if prism_gables:
         # the walls under each roof as the box it sits on, then the roof
         # seated on those walls
@@ -1703,7 +1762,7 @@ def _plan_from_massing(regions: list[Region], target: MeshTarget, occ: np.ndarra
         for p in pitches:
             p.colour = roof_colour
     seat_pitches_on_walls(pitches, walls, ground_y=ground_y)
-    gables = absorb_hips(pair_pitches(pitches, wall_colour=wall_colour))
+    gables = one_roof_per_block(absorb_hips(pair_pitches(pitches, wall_colour=wall_colour)), solid)
     clip_walls_under_roofs(walls, gables)
     walls = [w for w in walls if w.frame.height >= COURSE]
     walls.sort(key=lambda w: (-(w.frame.height), -(w.frame.length)))

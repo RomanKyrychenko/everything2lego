@@ -296,3 +296,23 @@ def test_walls_take_the_photo_material_even_when_no_wall_is_seen_well(monkeypatc
         rgb = np.zeros((2, 2, 3), np.uint8)
     SD._colour_walls_from_photo(walls, np.zeros((1, 1, 1), bool), Fac(), None)
     assert all(w.colour == by_code_index(0) for w in walls)      # all black, none left grey
+
+
+def test_one_roof_per_block_but_a_cross_gable_keeps_both():
+    from everything2lego.semantic_v2.setdesign import one_roof_per_block, pair_pitches
+    H, X, Z = 60, 30, 30
+    solid = np.zeros((H, X, Z), bool)
+    solid[0:30, 4:24, 4:24] = True
+    for y in range(30, 45):                                # a ridge along x over the block
+        d = (y - 30) // 3
+        solid[y, 4:24, 4 + d:24 - d] = True
+    along_x = pair_pitches([_face("z", +1, 4.0, 14.0, (4, 24), 30, 45),
+                            _face("z", -1, 24.0, 14.0, (4, 24), 30, 45)])
+    along_z = pair_pitches([_face("x", +1, 4.0, 14.0, (4, 24), 30, 45),
+                            _face("x", -1, 24.0, 14.0, (4, 24), 30, 45)])
+    kept = one_roof_per_block(along_x + along_z, solid)
+    assert kept == along_x                                 # the reading the surface fits
+    # a T: the crossing wing covers only part of the main roof
+    wing = pair_pitches([_face("x", +1, 10.0, 14.0, (20, 30), 30, 45),
+                         _face("x", -1, 18.0, 14.0, (20, 30), 30, 45)])
+    assert len(one_roof_per_block(along_x + wing, solid)) == 2
