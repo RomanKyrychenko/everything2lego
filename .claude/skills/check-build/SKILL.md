@@ -56,6 +56,29 @@ Read `render.png` and the photo side by side, then go through:
    The building has a base plate. Hidden support stays hidden: grey inside
    is fine, grey on the outside is not.
 
+## Reference: how real sets do it
+
+When a recipe has to decide how something is built (walls, roof, base,
+porch, openings), check a real set before you invent a rule. Official
+instructions are linked from
+`https://www.lego.com/en-us/service/building-instructions/<set number>`.
+Fetch that page with `curl -A "Mozilla/5.0"`, then grep it for
+`product.bi.core.pdf/<id>.pdf`. Each link is one booklet. Save booklets to
+`/Volumes/PRO-G40/lego_instructions/` and read pages with the Read tool
+(`pages: "112-115"`).
+
+Already downloaded: 31139 Cozy House, 3-in-1, booklets `31139_6456165`
+(144 pp), `…167` (96 pp) and `…169` (116 pp).
+
+What these sets show:
+
+- The walls are a hollow shell one stud thick on a base plate. The inside
+  is open floor.
+- The roof is plates, usually hinged to the pitch, with tiles or shingles
+  and a one-stud eave overhang.
+- Chimneys, porches and window boxes are small sub-assemblies attached to
+  the shell.
+
 ## 3. Report and fix
 
 - Say what is wrong in the picture, which item above it breaks, and the
