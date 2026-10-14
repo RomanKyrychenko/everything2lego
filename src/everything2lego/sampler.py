@@ -1,38 +1,52 @@
 """A universal LEGO generator: sample a build of a target shape whose local
 construction follows the statistics of real sets.
 
-The target is a grid (y plates up, x and z studs) of the cells to fill,
-their colours, and which of them show.  A state is a set of non-overlapping
-parts.  Its energy is
+The target is a grid (y plates up, x and z studs) of each cell's shape
+(`bits`: 4x4x4 samples of the object in it, as one 64-bit mask; a cell a
+sloped surface cuts is part full, on the side it is), its colour, which cells show, and optionally what kind of object it is
+(building, road_vehicle, creature, ...).  A state is a set of
+non-overlapping parts, each a real part in one of four yaws, with the
+shape the parts database measured from its geometry (how full each cell of
+its box is; data/vocabulary.json).  Its energy is
 
-    E = w_cov  * cells wrongly filled or left empty
+    E = w_cov  * sum over cells |part fill - target fill|
       + w_col  * colour error of the cells that show (Lab, per cell)
       + w_loc  * sum over touching pairs of -log P(B, where | A)
-      + w_glob * pairs * KL(pattern mix || official models of similar shape)
-      + w_sup  * parts held by no stud above or below
+      + w_glob * pairs * KL(pattern mix || official models of its kind and shape)
+      + w_sup  * parts no stud holds (a stud of the part below in a hole
+                 of this one, or of this one in a hole of the part above)
+      + w_side * side studs and holes facing out of the object (a set
+                 puts something on every side stud; here nothing can be)
 
-— fidelity, local plausibility (each part's neighbours are what real sets
-put there) and global typicality (the mix of patterns is real sets', not
-the same few repeated: style.RunningKL).  Both statistics come from the
-official models nearest the target in shape (tools/partsdb/features.py),
-smoothed from exact tokens (kind + size) to kinds to uniform.
+— fidelity (a slope is the part for a sloped surface because it fills the
+cells such a surface cuts where the surface does; a round brick is not a
+wall that a cell boundary happens to cut), local plausibility (each part's
+neighbours are what real sets put there), global typicality (the mix of
+patterns is real sets', not the same few repeated: style.RunningKL) and
+real connections.  The statistics come from the official models of the
+target's kind nearest it in shape (tools/partsdb/features.py), smoothed
+from exact tokens (kind + size) to kinds to uniform; which parts may be
+used at all, and how readily, from how often sets of that kind use them
+(the vocabulary's per-kind share and lift) — so a house is not built of
+wheel arches.
 
 A move re-tiles a small window: the parts meeting it are removed and its
-cells re-filled part by part, each drawn from the learned P(part | the
-parts already around it).  Metropolis acceptance at a temperature that
-anneals to `t_final` > 0 — a sample, not the single likeliest build, which
-would be monotonous.
+cells re-filled part by part, each drawn from P(part, yaw | the parts
+around it, the fit), or joins two parts into the one real part covering
+both.  Metropolis acceptance at a temperature that anneals to a small
+`t_final` > 0 — a sample, not the single likeliest build, which would be
+monotonous.
 
     from everything2lego.sampler import Target, sample
-    placements = sample(Target(want, colours, visible), refs, iters=20000)
+    placements, info = sample(Target(want, colours, visible, kind="building"), refs)
 """
 from __future__ import annotations
 
 import json
 import math
 import random
-from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from collections import Counter
+from dataclasses import dataclass
 from functools import lru_cache
 from importlib.resources import files
 from typing import Optional
@@ -44,39 +58,157 @@ from .colors import _palette_lab, nearest_where, palette
 from .pack import Placement
 from .style import Reference, RunningKL, kind_of
 
+_ROT = {0: (1, 0, 0, 1), 90: (0, 1, -1, 0), 180: (-1, 0, 0, -1), 270: (0, -1, 1, 0)}
+# (x' from x, x' from z, z' from x, z' from z): io_ldraw's yaw matrices on the x-z plane
+
 
 # ---------------------------------------------------------------------------
-# vocabulary: box parts from the parts database, as tokens the statistics know
+# vocabulary: real parts with their measured shapes, as tokens the statistics know
 # ---------------------------------------------------------------------------
+
+SUB = 4                                     # samples per cell edge: a cell's shape is a 64-bit mask
+FULL = np.uint64(0xFFFFFFFFFFFFFFFF)
+_M1, _M2, _M4 = np.uint64(0x5555555555555555), np.uint64(0x3333333333333333), np.uint64(0x0F0F0F0F0F0F0F0F)
+_H01 = np.uint64(0x0101010101010101)
+
+
+def popcount(x: np.ndarray) -> np.ndarray:
+    """Set bits per uint64 (SWAR)."""
+    x = np.asarray(x, dtype=np.uint64)
+    x = x - ((x >> np.uint64(1)) & _M1)
+    x = (x & _M2) + ((x >> np.uint64(2)) & _M2)
+    x = (x + (x >> np.uint64(4))) & _M4
+    return ((x * _H01) >> np.uint64(56)).astype(np.int64)
+
+
+def pack(fine: np.ndarray, size) -> np.ndarray:
+    """(h*4, w*4, d*4) samples -> (h, w, d) masks, bit sy*16 + sx*4 + sz
+    (as tools/partsdb/shapes.pack)."""
+    h, w, d = size
+    b = fine.reshape(h, SUB, w, SUB, d, SUB).transpose(0, 2, 4, 1, 3, 5).reshape(h, w, d, SUB ** 3)
+    weights = np.left_shift(np.uint64(1), np.arange(SUB ** 3, dtype=np.uint64))
+    return (b.astype(np.uint64) * weights).sum(axis=-1, dtype=np.uint64)
+
+
+def unpack(bits: np.ndarray) -> np.ndarray:
+    h, w, d = bits.shape
+    sh = np.arange(SUB ** 3, dtype=np.uint64)
+    b = ((bits[..., None] >> sh) & np.uint64(1)).astype(bool)
+    return b.reshape(h, w, d, SUB, SUB, SUB).transpose(0, 3, 1, 4, 2, 5).reshape(h * SUB, w * SUB, d * SUB)
+
+
+def _yaw(rot: int, ux, uz):
+    a, b, c, e = _ROT[rot]
+    return a * ux + b * uz, c * ux + e * uz
+
+
+def _rotate(fine: np.ndarray, rot: int) -> np.ndarray:
+    """A part's samples in yaw `rot`, turned about its box's centre as
+    io_ldraw turns the part."""
+    if rot == 0:
+        return fine
+    H, w, d = fine.shape
+    W, D = (w, d) if rot == 180 else (d, w)
+    I, K = np.meshgrid(np.arange(W), np.arange(D), indexing="ij")
+    vx, vz = I + 0.5 - W / 2, K + 0.5 - D / 2
+    a, b, c, e = _ROT[rot]
+    ux, uz = a * vx + c * vz, b * vx + e * vz           # the inverse turn
+    i = np.round(ux + w / 2 - 0.5).astype(int)
+    k = np.round(uz + d / 2 - 0.5).astype(int)
+    return fine[:, i, k]
+
+
+@dataclass(frozen=True, eq=False)
+class Orient:
+    """A part in one yaw, on the grid: its box (h, W, D) and its occupied
+    cells as offsets from the box's minimum corner, with their shapes."""
+    rot: int
+    size: tuple[int, int, int]
+    cells: np.ndarray            # (n, 3) int: y, x, z offsets of the cells it occupies at all
+    bits: np.ndarray             # (n,) uint64: each cell's shape
+    o: np.ndarray                # (n,) how full each is
+    first: tuple[int, int, int]  # its first occupied cell in (y, x, z) order
+    top: frozenset               # (x, z) offsets with a stud on top
+    bottom: frozenset            # (x, z) offsets with a hole underneath
+    sides: tuple = ()            # (y, x, z, dx, dz): a stud or hole in that cell facing (dx, dz)
+
+
+@dataclass(frozen=True, eq=False)
+class VPart:
+    part: Part
+    token: str
+    category: str
+    colours: frozenset
+    kinds: dict
+    n_sets: int
+    orients: tuple
+    box: Optional[str]           # "brick" / "plate" / "tile" for a plain full box, else None
+
+
+def _orients(bits: np.ndarray, top: list, bottom: list, sides: list = ()) -> tuple:
+    h, w, d = bits.shape
+    fine = unpack(bits)
+    out, seen = [], set()
+    for rot in _ROT:
+        W, D = (w, d) if rot in (0, 180) else (d, w)
+
+        def to_world(i, k):
+            vx, vz = _yaw(rot, i + 0.5 - w / 2, k + 0.5 - d / 2)
+            return int(round(vx + W / 2 - 0.5)), int(round(vz + D / 2 - 0.5))
+        wbits = pack(_rotate(fine, rot), (h, W, D))
+        wt = frozenset(to_world(i, k) for i, k in top)
+        wb = frozenset(to_world(i, k) for i, k in bottom)
+        face = {"+x": (1, 0), "-x": (-1, 0), "+z": (0, 1), "-z": (0, -1)}
+        ws = tuple((yi,) + to_world(i, k) + tuple(int(round(v)) for v in _yaw(rot, *face[f]))
+                   for _, i, yi, k, f in sides)
+        key = (wbits.tobytes(), wbits.shape, wt, wb, ws)
+        if key in seen:
+            continue                                    # a symmetric part: this yaw is another's
+        seen.add(key)
+        cells = np.argwhere(wbits != 0)
+        if not len(cells):
+            continue
+        cb = wbits[tuple(cells.T)]
+        out.append(Orient(rot, (h, W, D), cells, cb, popcount(cb) / SUB ** 3,
+                          tuple(int(v) for v in cells[0]), wt, wb, ws))
+    return tuple(out)
+
 
 @lru_cache(maxsize=1)
-def _vocab() -> tuple[tuple[Part, ...], dict[str, str], dict[str, frozenset[int]]]:
-    """Plain bricks, plates and tiles LEGO makes now, with their real
-    geometry, statistics token and colours (data/vocabulary.json, from the
-    parts database: tools/partsdb/vocabulary.py)."""
+def vocabulary() -> tuple[VPart, ...]:
+    """Every grid part LEGO makes now (data/vocabulary.json, from the parts
+    database: tools/partsdb/vocabulary.py)."""
     raw = json.loads(files("everything2lego.data").joinpath("vocabulary.json").read_text())
-    parts, tok, cols = [], {}, {}
+    out = []
     for r in raw["parts"]:
-        p = Part(ldraw=r["ldraw"], bl=r["part_num"], shape=r["shape"],
-                 footprint=tuple(r["footprint"]), height_units=r["height_units"], name=r["name"])
-        parts.append(p)
-        tok[p.ldraw] = r["token"]
-        cols[p.ldraw] = frozenset(int(c) for c in r["colours"])
-    return tuple(parts), tok, cols
+        w, d, h = r["size"]
+        occ = np.array(r["occ"], dtype=float)           # [y from the bottom][x][z]
+        bits = np.array([[[int(v) for v in row] for row in layer] for layer in r["bits"]], dtype=np.uint64)
+        part = Part(ldraw=r["ldraw"], bl=r["part_num"], shape=kind_of(r["token"]),
+                    footprint=(w, d), height_units=h, name=r["name"], origin=tuple(r["origin"]))
+        full = bool((occ >= 0.999).all()) and len(r["holes_bottom"]) == w * d and not r["sides"]
+        box = None
+        if full and r["category"] in ("Bricks", "Plates", "Tiles"):
+            box = {"Bricks": "brick", "Plates": "plate", "Tiles": "tile"}[r["category"]]
+            if box != "tile" and len(r["studs_top"]) != w * d:
+                box = None
+        out.append(VPart(part, r["token"], r["category"], frozenset(int(c) for c in r["colours"]),
+                         r["kinds"], r["n_sets"], _orients(bits, r["studs_top"], r["holes_bottom"], r["sides"]), box))
+    return tuple(out)
 
 
-def vocabulary() -> tuple[Part, ...]:
-    return _vocab()[0]
-
-
-def token_of(part: Part) -> str:
-    """The features.py token of a vocabulary part."""
-    return _vocab()[1][part.ldraw]
-
-
-def available(part: Part, code: int) -> bool:
-    """Whether LEGO currently makes `part` in LDraw colour `code`."""
-    return code in _vocab()[2][part.ldraw]
+def select_vocabulary(kind: Optional[str], n: int = 160) -> tuple[VPart, ...]:
+    """The parts a build of this kind of object draws from: the plain
+    bricks, plates and tiles, and the `n` parts sets of that kind use most
+    widely (share of its sets) — none its sets never use."""
+    vocab = vocabulary()
+    def reach(v: VPart) -> float:
+        if kind:
+            return v.kinds.get(kind, {}).get("set_share", 0.0)
+        return float(v.n_sets)
+    plain = [v for v in vocab if v.box]
+    rest = sorted((v for v in vocab if not v.box and reach(v) > 0), key=reach, reverse=True)[:n]
+    return tuple(plain + rest)
 
 
 # ---------------------------------------------------------------------------
@@ -85,9 +217,17 @@ def available(part: Part, code: int) -> bool:
 
 @dataclass
 class Target:
-    want: np.ndarray                  # (H, X, Z) bool: cells to fill
+    want: np.ndarray                  # (H, X, Z) bool: cells to build in
     colour: np.ndarray                # (H, X, Z) palette index (-1 unknown)
     visible: np.ndarray               # (H, X, Z) bool: cells that show
+    bits: Optional[np.ndarray] = None  # (H, X, Z) uint64: each cell's shape, 4x4x4 (default: want, full)
+    kind: Optional[str] = None        # building, road_vehicle, creature, ... (vocabulary.json kinds)
+
+    def __post_init__(self):
+        if self.bits is None:
+            self.bits = np.where(self.want, FULL, np.uint64(0))
+        self.bits = np.where(self.want, self.bits, np.uint64(0)).astype(np.uint64)
+        self.fill = popcount(self.bits) / SUB ** 3      # how full each cell should be
 
     def shape_descriptor(self) -> np.ndarray:
         ys, xs, zs = np.nonzero(self.want)
@@ -132,7 +272,13 @@ class Stats:
         return v
 
 
-def nearest_models(rows: list[dict], shape, k: int = 50) -> list[dict]:
+def nearest_models(rows: list[dict], shape, k: int = 50, kind: Optional[str] = None) -> list[dict]:
+    """The `k` models nearest in shape — among those of the same kind of
+    object, when there are enough of them."""
+    if kind:
+        same = [r for r in rows if r.get("object_kind") == kind]
+        if len(same) >= k // 2:
+            rows = same
     X = np.array([r["shape"] for r in rows])
     mu, sd = X.mean(0), X.std(0) + 1e-9
     d = (((X - mu) / sd - (np.asarray(shape) - mu) / sd) ** 2).sum(1)
@@ -145,20 +291,28 @@ def nearest_models(rows: list[dict], shape, k: int = 50) -> list[dict]:
 
 @dataclass
 class Item:
-    part: Part
+    vp: VPart
+    ori: Orient
     colour: int
     y: int
     x: int
     z: int
-    w: int                       # along x
-    d: int                       # along z
 
     @property
     def h(self) -> int:
-        return self.part.height_units
+        return self.ori.size[0]
 
-    def cells(self):
-        return (slice(self.y, self.y + self.h), slice(self.x, self.x + self.w), slice(self.z, self.z + self.d))
+    @property
+    def W(self) -> int:
+        return self.ori.size[1]
+
+    @property
+    def D(self) -> int:
+        return self.ori.size[2]
+
+    def cells(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        c = self.ori.cells
+        return c[:, 0] + self.y, c[:, 1] + self.x, c[:, 2] + self.z
 
 
 @dataclass
@@ -167,110 +321,134 @@ class Weights:
     col: float = 0.04
     loc: float = 1.0
     glob: float = 1.0
-    sup: float = 3.0
+    sup: float = 40.0         # a part no stud holds falls off: all but forbidden
+    side: float = 6.0         # a side stud or hole facing out of the object: SNOT with nothing on it
 
 
 class State:
     def __init__(self, target: Target, stats: Stats, weights: Weights):
         self.t, self.s, self.w = target, stats, weights
         self.owner = np.full(target.want.shape, -1, dtype=np.int32)
+        self.cur = np.zeros(target.want.shape, dtype=np.uint64)   # each cell's shape now
         self.items: dict[int, Item] = {}
         self.next_id = 0
         self.kl = RunningKL(stats.ref)
         self.loc = 0.0
         self.col = 0.0
         self.unsup: set[int] = set()
-        self.bad_cells = int(target.want.sum())            # wanted and empty, or filled and unwanted
+        self.bare = 0                                        # side connectors facing out
+        self.fid = float(target.fill.sum())                  # wrong samples / 64, everything empty
         self.lab = _palette_lab()
         self.tlab = np.where(target.colour[..., None] >= 0, self.lab[np.maximum(target.colour, 0)], np.nan)
 
     # -- geometry -----------------------------------------------------------
     def neighbours(self, i: int) -> dict[int, str]:
-        """{j: where j is relative to i} for parts touching i (above, below, beside)."""
+        """{j: where j is relative to i} for parts touching i's box (above,
+        below, beside; diagonals count, as the official models' patterns
+        were counted)."""
         it = self.items[i]
         H, X, Z = self.owner.shape
-        out: dict[int, str] = {}
-        x0, x1, z0, z1 = max(0, it.x - 1), min(X, it.x + it.w + 1), max(0, it.z - 1), min(Z, it.z + it.d + 1)
-        # above and below over the footprint and its ring (diagonals count,
-        # as the official models' patterns were counted)
+        x0, x1, z0, z1 = max(0, it.x - 1), min(X, it.x + it.W + 1), max(0, it.z - 1), min(Z, it.z + it.D + 1)
         found = set(self.owner[max(0, it.y - 1):min(H, it.y + it.h + 1), x0:x1, z0:z1].ravel().tolist())
         found.discard(-1)
         found.discard(i)
+        out: dict[int, str] = {}
         for j in found:
-            # where j is, from the two boxes — as the official models'
-            # patterns were classified (features.vertical), so the label
-            # is the same seen from either part
+            # from the two boxes, as features.vertical classifies — the same seen from either part
             b = self.items[j]
             out[j] = "up" if b.y >= it.y + it.h else "down" if b.y + b.h <= it.y else "level"
         return out
 
-    def _supported(self, i: int, nb: dict[int, str]) -> bool:
-        """Held by studs: a part directly over or under its footprint (or the ground)."""
+    def _supported(self, i: int) -> bool:
+        """Held by a stud: one of the part below in a hole of this one, or
+        one of this one in a hole of the part above (or it is on the ground)."""
         it = self.items[i]
         if it.y == 0:
             return True
         H = self.owner.shape[0]
-        below = self.owner[it.y - 1, it.x:it.x + it.w, it.z:it.z + it.d]
-        if (below >= 0).any():
-            return True
+        for (dx, dz) in it.ori.bottom:
+            j = int(self.owner[it.y - 1, it.x + dx, it.z + dz])
+            if j >= 0:
+                b = self.items[j]
+                if b.y + b.h == it.y and (it.x + dx - b.x, it.z + dz - b.z) in b.ori.top:
+                    return True
         if it.y + it.h < H:
-            return bool((self.owner[it.y + it.h, it.x:it.x + it.w, it.z:it.z + it.d] >= 0).any())
+            for (dx, dz) in it.ori.top:
+                j = int(self.owner[it.y + it.h, it.x + dx, it.z + dz])
+                if j >= 0:
+                    b = self.items[j]
+                    if b.y == it.y + it.h and (it.x + dx - b.x, it.z + dz - b.z) in b.ori.bottom:
+                        return True
         return False
 
     # -- energy bookkeeping ---------------------------------------------------
-    def _pairs(self, i: int, nb: dict[int, str], sign: int, done: set) -> None:
+    def _pairs(self, i: int, nb: dict[int, str], sign: int) -> None:
         """Add (sign=+1) or remove (-1) i's pairs with its neighbours, both directions."""
-        ti = token_of(self.items[i].part)
+        ti = self.items[i].vp.token
         flip = {"up": "down", "down": "up", "level": "level"}
         for j, d in nb.items():
-            if (min(i, j), max(i, j)) in done:
-                continue
-            done.add((min(i, j), max(i, j)))
-            tj = token_of(self.items[j].part)
+            tj = self.items[j].vp.token
             for a, b, dd in ((ti, tj, d), (tj, ti, flip[d])):
                 self.kl.add((a, b, dd), sign)
                 self.loc += sign * self.s.nll(a, b, dd)
 
-    def _colour_cost(self, it: Item) -> float:
-        sl = it.cells()
-        vis = self.t.visible[sl]
+    def colour_cost(self, ys, xs, zs, o, colour: int) -> float:
+        vis = self.t.visible[ys, xs, zs]
         if not vis.any():
             return 0.0
-        tl = self.tlab[sl][vis]
-        tl = tl[~np.isnan(tl).any(axis=1)]
-        if not len(tl):
+        tl = self.tlab[ys[vis], xs[vis], zs[vis]]
+        ok = ~np.isnan(tl).any(axis=1)
+        if not ok.any():
             return 0.0
-        return float(np.linalg.norm(tl - self.lab[it.colour], axis=1).sum())
+        return float((np.linalg.norm(tl[ok] - self.lab[colour], axis=1) * o[vis][ok]).sum())
+
+    def fid_delta(self, ys, xs, zs, bits) -> float:
+        """Change in wrong samples (per cell, /64) from filling these empty cells so."""
+        t = self.t.bits[ys, xs, zs]
+        return float((popcount(bits ^ t) - popcount(t)).sum()) / SUB ** 3
+
+    def bare_sides(self, o: Orient, oy: int, ox: int, oz: int) -> int:
+        """Its side studs and holes facing a cell outside the object."""
+        f = self.t.fill
+        H, X, Z = f.shape
+        n = 0
+        for (y, x, z, dx, dz) in o.sides:
+            X2, Z2 = ox + x + dx, oz + z + dz
+            if not (0 <= X2 < X and 0 <= Z2 < Z) or f[oy + y, X2, Z2] < 0.5:
+                n += 1
+        return n
 
     def energy(self) -> float:
         w = self.w
-        return (w.cov * self.bad_cells + w.col * self.col + w.loc * self.loc
-                + w.glob * self.kl.n * self.kl.value() + w.sup * len(self.unsup))
+        return (w.cov * self.fid + w.col * self.col + w.loc * self.loc
+                + w.glob * self.kl.n * self.kl.value() + w.sup * len(self.unsup) + w.side * self.bare)
 
     # -- edits ----------------------------------------------------------------
     def add(self, it: Item) -> int:
         i = self.next_id
         self.next_id += 1
         self.items[i] = it
-        sl = it.cells()
-        want = self.t.want[sl]
-        self.bad_cells += int((~want).sum()) - int(want.sum())
-        self.owner[sl] = i
-        self.col += self._colour_cost(it)
+        ys, xs, zs = it.cells()
+        self.fid += self.fid_delta(ys, xs, zs, it.ori.bits)
+        self.owner[ys, xs, zs] = i
+        self.cur[ys, xs, zs] = it.ori.bits
+        self.bare += self.bare_sides(it.ori, it.y, it.x, it.z)
+        self.col += self.colour_cost(ys, xs, zs, it.ori.o, it.colour)
         nb = self.neighbours(i)
-        self._pairs(i, nb, +1, set())
+        self._pairs(i, nb, +1)
         self._refresh_support([i] + list(nb))
         return i
 
     def remove(self, i: int) -> Item:
         it = self.items[i]
         nb = self.neighbours(i)
-        self._pairs(i, nb, -1, set())
-        sl = it.cells()
-        want = self.t.want[sl]
-        self.bad_cells -= int((~want).sum()) - int(want.sum())
-        self.owner[sl] = -1
-        self.col -= self._colour_cost(it)
+        self._pairs(i, nb, -1)
+        ys, xs, zs = it.cells()
+        self.owner[ys, xs, zs] = -1
+        self.cur[ys, xs, zs] = 0
+        self.bare -= self.bare_sides(it.ori, it.y, it.x, it.z)
+        self.fid -= self.fid_delta(ys, xs, zs, it.ori.bits)
+        self.col -= self.colour_cost(ys, xs, zs, it.ori.o, it.colour)
         del self.items[i]
         self.unsup.discard(i)
         self._refresh_support(list(nb))
@@ -279,17 +457,17 @@ class State:
     def _refresh_support(self, ids) -> None:
         for j in ids:
             if j in self.items:
-                if self._supported(j, None):
+                if self._supported(j):
                     self.unsup.discard(j)
                 else:
                     self.unsup.add(j)
 
+    def bad_cells(self) -> int:
+        return int((popcount(self.cur ^ self.t.bits) >= SUB ** 3 // 2).sum())
+
     def placements(self) -> list[Placement]:
-        out = []
-        for it in self.items.values():
-            rot = 0 if (it.w, it.d) == it.part.footprint else 90
-            out.append(Placement(it.part, it.colour, it.x, it.z, it.y, it.w, it.d, rot))
-        return out
+        return [Placement(it.vp.part, it.colour, it.x, it.z, it.y, it.W, it.D, it.ori.rot)
+                for it in self.items.values()]
 
 
 # ---------------------------------------------------------------------------
@@ -297,67 +475,160 @@ class State:
 # ---------------------------------------------------------------------------
 
 class Filler:
-    """Fills free wanted cells part by part, each drawn from P(part | the
-    parts around it), colour from the target."""
+    """Fills empty cells part by part, each part and yaw drawn from
+    P(part | the parts around it) times its fit to the target, colour
+    from the target's.  All the (part, yaw) fits at a cell are tested at
+    once against a window of the grid."""
 
-    def __init__(self, state: State, rnd: random.Random):
-        self.st, self.rnd = state, rnd
-        self.parts = vocabulary()
-        self.tok = {p.ldraw: token_of(p) for p in self.parts}
+    def __init__(self, state: State, rnd: random.Random, vocab: tuple[VPart, ...], kind: Optional[str],
+                 top_k: int = 12):
+        self.st, self.rnd, self.vocab, self.top_k = state, rnd, vocab, top_k
         a_tot = state.s.a_tot
         z = sum(a_tot.values()) or 1.0
-        self.prior = {p.ldraw: (a_tot.get(self.tok[p.ldraw], 0) + 1.0) / z for p in self.parts}
+        self.opts: list[tuple[VPart, Orient]] = [(v, o) for v in vocab for o in v.orients]
+        self.logprior = np.array([
+            math.log((a_tot.get(v.token, 0) + 1.0) / z)
+            + (math.log(max(1e-3, v.kinds.get(kind, {}).get("lift", 0.0) or 1e-3)) if kind else 0.0)
+            + 0.6 * math.log(float(o.o.sum()))                 # larger parts: fewer, as sets are
+            for v, o in self.opts])
+        # the window every option is tested in: origin (y, x - FX, z - FZ) for a cell (y, x, z)
+        self.FX = max(o.first[1] for _, o in self.opts)
+        self.FZ = max(o.first[2] for _, o in self.opts)
+        self.win = (max(o.size[0] for _, o in self.opts),
+                    max(o.size[1] for _, o in self.opts) + self.FX,
+                    max(o.size[2] for _, o in self.opts) + self.FZ)
+        WH, WX, WZ = self.win
+        n = max(len(o.cells) for _, o in self.opts)
+        sentinel = WH * WX * WZ
+        self.idx = np.full((len(self.opts), n), sentinel, dtype=np.int64)
+        self.bits = np.zeros((len(self.opts), n), dtype=np.uint64)
+        solid = np.zeros((len(self.opts), n), bool)
+        for k, (_, o) in enumerate(self.opts):
+            c = o.cells - np.array(o.first) + np.array([0, self.FX, self.FZ])
+            self.idx[k, :len(c)] = np.ravel_multi_index(c.T, self.win)
+            self.bits[k, :len(c)] = o.bits
+            solid[k, :len(c)] = o.o >= 0.5
+        self.solid = solid
 
-    def colour_for(self, sl, part: Part) -> int:
-        tc = self.st.t.colour[sl]
-        vals = tc[tc >= 0]
-        c = int(np.bincount(vals).argmax()) if len(vals) else 0
-        return nearest_where(c, lambda code: available(part, code))
+    def _window(self, y: int, x: int, z: int):
+        st = self.st
+        H, X, Z = st.owner.shape
+        WH, WX, WZ = self.win
+        y0, x0, z0 = y, x - self.FX, z - self.FZ
+        free = np.zeros(self.win, bool)
+        tb = np.zeros(self.win, dtype=np.uint64)
+        sy = slice(y0, min(H, y0 + WH))
+        sx = slice(max(0, x0), min(X, x0 + WX))
+        sz = slice(max(0, z0), min(Z, z0 + WZ))
+        dst = (slice(0, sy.stop - sy.start), slice(sx.start - x0, sx.stop - x0), slice(sz.start - z0, sz.stop - z0))
+        free[dst] = st.owner[sy, sx, sz] < 0
+        tb[dst] = st.t.bits[sy, sx, sz]
+        return np.append(free.ravel(), True), np.append(tb.ravel(), np.uint64(0)), (y0, x0, z0)
 
     def candidates(self, y: int, x: int, z: int):
-        st = self.st
-        H, X, Z = st.owner.shape
+        """(option index, box origin, residual) for every part and yaw whose
+        first cell can go at (y, x, z): its cells free and none solid where
+        the target is empty.  The residual is the fit error it leaves on the
+        cells it claims, its wrong samples (/64 per cell) — a part's claim is
+        final (a slope's half-empty cells take nothing else), so parts are
+        compared by what they leave wrong, not by how much they cover."""
+        free, tb, (y0, x0, z0) = self._window(y, x, z)
+        T = tb[self.idx]
+        ok = free[self.idx].all(axis=1) & ~(self.solid & (T == 0)).any(axis=1)
+        resid = popcount(self.bits ^ T).sum(axis=1) / SUB ** 3
+        # the detailed score (neighbours, colour, support) only for the
+        # likeliest few by prior and fit
+        pre = np.where(ok, self.logprior - self.st.w.cov * resid, -np.inf)
+        if ok.sum() > self.top_k:
+            ok &= pre >= np.partition(pre, -self.top_k)[-self.top_k]
         out = []
-        for p in self.parts:
-            for w, d in {(p.footprint[0], p.footprint[1]), (p.footprint[1], p.footprint[0])}:
-                if y + p.height_units > H or x + w > X or z + d > Z:
-                    continue
-                sl = (slice(y, y + p.height_units), slice(x, x + w), slice(z, z + d))
-                if (st.owner[sl] >= 0).any() or not st.t.want[sl].all():
-                    continue
-                out.append((p, w, d, sl))
+        for k in np.flatnonzero(ok):
+            o = self.opts[k][1]
+            out.append((int(k), (y - o.first[0], x - o.first[1], z - o.first[2]), float(resid[k])))
         return out
 
-    def score(self, p: Part, w: int, d: int, y: int, x: int, z: int) -> float:
-        """log P(p | neighbours already placed), up to a constant."""
+    def colour_for(self, ys, xs, zs, vp: VPart) -> int:
+        tc = self.st.t.colour[ys, xs, zs]
+        vals = tc[tc >= 0]
+        c = int(np.bincount(vals).argmax()) if len(vals) else 0
+        return nearest_where(c, lambda code: code in vp.colours)
+
+    def stat_score(self, k: int, oy: int, ox: int, oz: int) -> float:
+        """log P(part | the parts already above and below its box)."""
         st = self.st
-        tp = self.tok[p.ldraw]
-        s = math.log(self.prior[p.ldraw])
-        H, X, Z = st.owner.shape
+        vp, o = self.opts[k]
+        h, W, D = o.size
+        H = st.owner.shape[0]
+        s = float(self.logprior[k])
         seen = set()
-        for yy, d_ in ((y - 1, "down"), (y + p.height_units, "up")):
+        for yy, d_ in ((oy - 1, "down"), (oy + h, "up")):
             if 0 <= yy < H:
-                for j in set(st.owner[yy, x:x + w, z:z + d].ravel().tolist()):
+                for j in set(st.owner[yy, ox:ox + W, oz:oz + D].ravel().tolist()):
                     if j >= 0 and j not in seen:
                         seen.add(j)
-                        s -= st.s.nll(tp, token_of(st.items[j].part), d_)
+                        s -= st.s.nll(vp.token, st.items[j].vp.token, d_)
         return s
 
+    def held(self, o: Orient, oy: int, ox: int, oz: int) -> bool:
+        """Whether a stud of a part already below would sit in one of its holes."""
+        if oy == 0:
+            return True
+        st = self.st
+        for (dx, dz) in o.bottom:
+            j = int(st.owner[oy - 1, ox + dx, oz + dz])
+            if j >= 0:
+                b = st.items[j]
+                if b.y + b.h == oy and (ox + dx - b.x, oz + dz - b.z) in b.ori.top:
+                    return True
+        return False
+
+    def capped(self, o: Orient, oy: int, ox: int, oz: int) -> float:
+        """The share of its top with more to build above but no stud there
+        (a tile inside a wall): what goes on it would hang on nothing."""
+        t = self.st.t
+        h, W, D = o.size
+        if oy + h >= t.fill.shape[0]:
+            return 0.0
+        above = t.fill[oy + h, ox:ox + W, oz:oz + D] >= 0.5
+        if not above.any():
+            return 0.0
+        studs = np.zeros((W, D), bool)
+        for dx, dz in o.top:
+            studs[dx, dz] = True
+        return float((above & ~studs).sum()) / (W * D)
+
     def fill(self, cells: list[tuple[int, int, int]]) -> list[int]:
+        st, w = self.st, self.st.w
         added = []
-        cells = sorted(cells)                           # bottom-up: parts land on what's there
-        for (y, x, z) in cells:
-            if self.st.owner[y, x, z] >= 0:
+        for (y, x, z) in sorted(cells):                   # bottom-up: parts land on what's there
+            if st.owner[y, x, z] >= 0:
                 continue
             cands = self.candidates(y, x, z)
             if not cands:
                 continue
-            scores = [self.score(p, w, d, y, x, z) + 0.6 * math.log(w * d * p.height_units)
-                      for p, w, d, _ in cands]
+            scored = []
+            for k, (oy, ox, oz), resid in cands:
+                vp, o = self.opts[k]
+                ys, xs, zs = o.cells[:, 0] + oy, o.cells[:, 1] + ox, o.cells[:, 2] + oz
+                colour = self.colour_for(ys, xs, zs, vp)
+                stat = self.stat_score(k, oy, ox, oz)
+                fit = -w.cov * resid - w.col * st.colour_cost(ys, xs, zs, o.o, colour)
+                if not self.held(o, oy, ox, oz):
+                    fit -= w.sup
+                fit -= w.sup * self.capped(o, oy, ox, oz) + w.side * st.bare_sides(o, oy, ox, oz)
+                scored.append((stat, fit, k, (oy, ox, oz), colour))
+            best_stat = max(s[0] for s in scored)
+            scores = [s + f for s, f, *_ in scored]
+            if st.t.fill[y, x, z] < 0.5:                   # a barely-wanted cell may stay empty
+                scores.append(best_stat - w.cov * float(st.t.fill[y, x, z]))
+                scored.append(None)
             m = max(scores)
-            ws = [math.exp(s - m) for s in scores]
-            p, w, d, sl = self.rnd.choices(cands, weights=ws)[0]
-            added.append(self.st.add(Item(p, self.colour_for(sl, p), y, x, z, w, d)))
+            pick = self.rnd.choices(scored, weights=[math.exp(s - m) for s in scores])[0]
+            if pick is None:
+                continue
+            _, _, k, (oy, ox, oz), colour = pick
+            vp, o = self.opts[k]
+            added.append(st.add(Item(vp, o, colour, oy, ox, oz)))
         return added
 
 
@@ -371,68 +642,62 @@ def retile(state: State, filler: Filler, rnd: random.Random):
     # a small window — one course or plate, a few studs — so a move is local
     hy, hx, hz = rnd.choice((1, 3)), rnd.randint(1, 3), rnd.randint(1, 3)
     H, X, Z = state.owner.shape
-    win = state.owner[cy:min(H, cy + hy), max(0, cx - hx + 1):min(X, cx + hx), max(0, cz - hz + 1):min(Z, cz + hz)]
-    ids = [j for j in set(win.ravel().tolist()) if j >= 0]
-    removed = [(i, state.remove(i)) for i in ids]
-    cells = []
-    for _, it in removed:
-        sl = it.cells()
-        for y in range(sl[0].start, sl[0].stop):
-            for x in range(sl[1].start, sl[1].stop):
-                for z in range(sl[2].start, sl[2].stop):
-                    cells.append((y, x, z))
-    # wanted cells in the window left empty before also get a chance
-    for y in range(cy, min(H, cy + hy)):
-        for x in range(max(0, cx - hx + 1), min(X, cx + hx)):
-            for z in range(max(0, cz - hz + 1), min(Z, cz + hz)):
-                if t.want[y, x, z] and state.owner[y, x, z] < 0:
-                    cells.append((y, x, z))
-    added = filler.fill(cells)
+    sy, sx, sz = slice(cy, min(H, cy + hy)), slice(max(0, cx - hx + 1), min(X, cx + hx)), slice(max(0, cz - hz + 1), min(Z, cz + hz))
+    ids = [j for j in set(state.owner[sy, sx, sz].ravel().tolist()) if j >= 0]
+    removed = [state.remove(i) for i in ids]
+    cells = set()
+    for it in removed:
+        cyy, cxx, czz = it.cells()
+        cells.update(zip(cyy.tolist(), cxx.tolist(), czz.tolist()))
+    wy, wx, wz = np.nonzero(t.want[sy, sx, sz] & (state.owner[sy, sx, sz] < 0))
+    cells.update(zip((wy + sy.start).tolist(), (wx + sx.start).tolist(), (wz + sz.start).tolist()))
+    added = filler.fill(list(cells))
 
     def undo():
         for i in added:
             state.remove(i)
-        for _, it in removed:
+        for it in removed:
             state.add(it)
     return undo
 
 
-_BOX: dict = {}
-
-
-def _box_part(shape: str, h: int, w: int, d: int) -> Optional[Part]:
-    """The vocabulary part of this shape and height covering w x d."""
-    if not _BOX:
-        for p in vocabulary():
-            a, b = p.footprint
-            _BOX[(p.shape, p.height_units, a, b)] = p
-            _BOX[(p.shape, p.height_units, b, a)] = p
-    return _BOX.get((shape, h, w, d))
+@lru_cache(maxsize=8)
+def _boxes(vocab: tuple[VPart, ...]) -> dict:
+    """(kind, h, W, D) -> (part, yaw) for the plain box parts."""
+    out = {}
+    for v in vocab:
+        if v.box:
+            for o in v.orients:
+                out.setdefault((v.box,) + o.size, (v, o))
+    return out
 
 
 def merge(state: State, filler: Filler, rnd: random.Random):
-    """Join a random part with a neighbour of the same shape, height and
-    colour beside it into the one real part covering both, where there is
-    one.  Returns an undo function, or None when no merge exists."""
+    """Join a random plain part with a neighbour of the same kind, height
+    and colour beside it into the one real part covering both, where there
+    is one.  Returns an undo function, or None when no merge exists."""
     if not state.items:
         return None
     i = rnd.choice(list(state.items))
     a = state.items[i]
+    if not a.vp.box:
+        return None
+    boxes = _boxes(filler.vocab)
     for j, where in state.neighbours(i).items():
         if where != "level":
             continue
         b = state.items[j]
-        if (b.part.shape, b.h, b.colour, b.y) != (a.part.shape, a.h, a.colour, a.y):
+        if (b.vp.box, b.h, b.colour, b.y) != (a.vp.box, a.h, a.colour, a.y):
             continue
         x0, z0 = min(a.x, b.x), min(a.z, b.z)
-        x1, z1 = max(a.x + a.w, b.x + b.w), max(a.z + a.d, b.z + b.d)
-        if (x1 - x0) * (z1 - z0) != a.w * a.d + b.w * b.d:
+        x1, z1 = max(a.x + a.W, b.x + b.W), max(a.z + a.D, b.z + b.D)
+        if (x1 - x0) * (z1 - z0) != a.W * a.D + b.W * b.D:
             continue                                  # not a rectangle together
-        p = _box_part(a.part.shape, a.h, x1 - x0, z1 - z0)
-        if p is None or not available(p, palette()[a.colour].code):
+        got = boxes.get((a.vp.box, a.h, x1 - x0, z1 - z0))
+        if got is None or palette()[a.colour].code not in got[0].colours:
             continue
         ra, rb = state.remove(i), state.remove(j)
-        k = state.add(Item(p, a.colour, a.y, x0, z0, x1 - x0, z1 - z0))
+        k = state.add(Item(got[0], got[1], a.colour, a.y, x0, z0))
 
         def undo(k=k, ra=ra, rb=rb):
             state.remove(k)
@@ -448,15 +713,17 @@ def merge(state: State, filler: Filler, rnd: random.Random):
 
 def sample(target: Target, models: list[dict], *, iters: int = 20000, seed: int = 0,
            weights: Optional[Weights] = None, t_start_share: float = 0.05, t_final_share: float = 0.002,
-           k_models: int = 50, log_every: int = 2000, warmup: int = 200) -> tuple[list[Placement], dict]:
+           k_models: int = 50, n_special: int = 160, log_every: int = 2000,
+           warmup: int = 200) -> tuple[list[Placement], dict]:
     """The temperature comes from the data: the median energy change of
     `warmup` proposals (measured, then undone) is the scale; it anneals
     from `t_start_share` to `t_final_share` of it.  Monotony is the KL
     term's to prevent, so the walk may cool close to zero."""
     rnd = random.Random(seed)
-    refs = nearest_models(models, target.shape_descriptor(), k_models)
+    refs = nearest_models(models, target.shape_descriptor(), k_models, target.kind)
     st = State(target, Stats(refs), weights or Weights())
-    filler = Filler(st, rnd)
+    vocab = select_vocabulary(target.kind, n_special)
+    filler = Filler(st, rnd, vocab, target.kind)
     ys, xs, zs = np.nonzero(target.want)
     filler.fill(list(zip(ys.tolist(), xs.tolist(), zs.tolist())))
     e = st.energy()
@@ -484,8 +751,10 @@ def sample(target: Target, models: list[dict], *, iters: int = 20000, seed: int 
             undo()
         if log_every and (it + 1) % log_every == 0:
             history.append(e)
+    used = Counter(v.category for v in (i.vp for i in st.items.values()))
     info = {"energy": e, "accepted": accepted / max(1, iters), "parts": len(st.items), "t_start": t_start,
-            "kl": st.kl.value(), "local_per_pair": st.loc / max(1, st.kl.n),
-            "bad_cells": st.bad_cells, "unsupported": len(st.unsup), "history": history,
+            "kl": st.kl.value(), "local_per_pair": st.loc / max(1, st.kl.n), "fidelity": st.fid,
+            "bad_cells": st.bad_cells(), "unsupported": len(st.unsup), "bare_side_connectors": st.bare, "history": history,
+            "vocabulary": len(vocab), "categories": dict(used),
             "references": [r["model"] for r in refs[:10]]}
     return st.placements(), info

@@ -44,6 +44,11 @@ def placement_to_line(p: Placement) -> str:
     y = -(p.y_plate + p.part.height_units) * LDU_PER_PLATE
 
     m = _ROT[p.rotation_deg]
+    ox, oy, oz = p.part.origin
+    if ox or oy or oz:                     # the origin is off the footprint's centre / body's top
+        x -= m[0] * ox + m[2] * oz
+        z -= m[6] * ox + m[8] * oz
+        y -= oy
     matrix = " ".join(_fmt_num(v) for v in m)
     at = f"{_fmt_num(x)} {_fmt_num(y)} {_fmt_num(z)} {matrix}"
     line = f"1 {ldraw_color} {at} {p.part.ldraw}"

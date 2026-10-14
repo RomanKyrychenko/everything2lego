@@ -29,6 +29,9 @@ class Part:
     slope_dir: str | None = None  # for slopes: default low direction ("+x", "-x", "+z", "-z")
     plain: bool = True     # False: a decorative part (round, arch, side studs) that
                            # a styling pass may swap in by id but no packer may pick
+    origin: tuple[float, float, float] = (0.0, 0.0, 0.0)
+                           # LDU, the part's own frame: where its footprint's centre
+                           # (x, z) and its body's top (y) are from its LDraw origin
 
     @property
     def w(self) -> int:

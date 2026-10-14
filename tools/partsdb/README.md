@@ -31,6 +31,15 @@ python tools/partsdb/build.py --stage contacts   # one stage
 | `contacts` | `contact`, `part_omr` |
 | `roles` | `role` |
 
+Two more steps run on their own:
+
+```bash
+python tools/partsdb/shapes.py            # part_shape: each grid part's shape and connections, about 1 min
+python tools/partsdb/kinds.py             # set_kinds.csv: what each set builds (local LLM via ollama, about 2 h, resumable)
+python tools/partsdb/kinds.py affinity    # part_kind: what each part is for
+python tools/partsdb/vocabulary.py        # src/everything2lego/data/vocabulary.json for the sampler
+```
+
 ## Query
 
 ```bash
@@ -141,6 +150,52 @@ Words from the names of the official models' sub-models that a part sits
 in ("roof", "floor", "wheel", "tree"): what real-world thing it builds.
 The set's own title words are left out.
 
+### `part_shape`
+
+`part_num, ldraw, w, d, h, origin_x, origin_y, origin_z, x0, y0, z0, occ, bits, fill, studs_top, holes_bottom, sides, offgrid`
+
+The shape of every part whose body sits on the build grid (654 parts:
+bricks, plates, tiles, slopes, curves, rounds, wedges and specials). The
+footprint is a whole number of studs and the height a whole number of
+plates; studs on top are not counted.
+
+- **Box and origin:** `w` x `d` studs by `h` plates. `origin_*` is the
+  box's footprint centre and body top in the part's own frame (LDU).
+- **Shape:** `bits` gives each cell of the box (`[y from the bottom][x][z]`)
+  as 4x4x4 samples packed into a 64-bit mask. `occ` is each cell's filled
+  share.
+- **How the shape is measured:** it is the visual hull of the part's three
+  axis views. That is exact for slopes, curves, rounds, wedges and corners,
+  and ignores the hollow underside every brick has.
+- **Connections:**
+  - `studs_top` and `holes_bottom` list the cells with a stud on top or a
+    hole underneath.
+  - `sides` lists studs and holes on the part's sides, with the face they
+    point out of (`+x`, `-x`, `+z`, `-z`).
+  - `offgrid` counts connectors that sit off the cell grid, such as a
+    jumper's centred stud.
+
+### `part_kind`
+
+`part_num, kind, n_pieces, n_sets, share, set_share, lift`
+
+What each part is for. Every set with 30 or more parts, and every official
+model, is labelled by a local language model from its name and theme
+(`kinds.py`) with one of 13 kinds:
+
+- **Buildings and vehicles:** building, road_vehicle, train, aircraft,
+  watercraft, spacecraft.
+- **Figures and things:** robot, creature, character, plant, object.
+- **Other:** scene, and parts (loose-brick packs, left out of the table).
+
+The columns, per part and kind:
+
+- **`set_share`:** the share of that kind's sets that use the part.
+- **`share`:** the part's share of that kind's pieces.
+- **`lift`:** that share divided by the part's share of all pieces,
+  smoothed toward 1. A wheel arch has lift well above 1 for road vehicles
+  and well below 1 for buildings.
+
 ## Coverage
 
 - **Mapping:** LDraw files reach Rebrickable parts by the same number, the
@@ -154,6 +209,13 @@ The set's own title words are left out.
 - **Contacts:** only cover parts that appear in the OMR.
 
 ## Used by the pipeline
+
+`tools/partsdb/vocabulary.py` writes `src/everything2lego/data/vocabulary.json`,
+read by the statistics sampler (`everything2lego.sampler`). It holds every
+grid part in production with its shape masks, connections, statistics
+token, colours and per-kind use. The sampler draws a build's parts from the
+plain bricks, plates and tiles, plus the parts most widely used by sets of
+the object's kind.
 
 `tools/partsdb/export.py` writes `src/everything2lego/data/part_colours.json`
 and `part_usage.json`, read by `everything2lego.usage`:
