@@ -28,7 +28,7 @@ from functools import lru_cache
 from typing import Callable
 
 from . import stability
-from .bricks import Part, catalog
+from .bricks import made_in, Part, catalog
 from .pack import Placement
 
 _PLAIN = re.compile(r"^(Brick|Plate|Panel) \d+ x \d+(?: x \d+)?$")
@@ -66,8 +66,11 @@ def _is_plain(p: Placement) -> bool:
 
 
 def _make(height: int, color: int, x: int, z: int, y: int, w: int, d: int) -> Placement | None:
+    """A plain part of this size in `color`, or None when there is no such
+    part or LEGO doesn't make it in that colour."""
+    from .colors import palette
     part = plain_part(height, w, d)
-    if part is None:
+    if part is None or not made_in(part, palette()[color].code):
         return None
     rot = 0 if (w, d) == part.footprint else 90
     return Placement(part, color, x, z, y, w, d, rot)

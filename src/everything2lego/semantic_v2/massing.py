@@ -1089,6 +1089,12 @@ def sculpt_solid(solid: np.ndarray, claimed: np.ndarray, palette_idx: np.ndarray
                                                  (2, "3298.dat"), (1, "4286.dat"))}
     inv = part_by_ldraw("3665.dat")
     out: list[Placement] = []
+    from ..bricks import made_in
+    from ..colors import nearest_where, palette as _palette
+    pal = _palette()
+
+    def made_widths(table: dict, colour: int) -> dict:
+        return {k: p for k, p in table.items() if p is not None and made_in(p, pal[colour].code)}
 
     def plan_at(c: int) -> np.ndarray:
         y0 = ground_y + c * COURSE
@@ -1155,8 +1161,17 @@ def sculpt_solid(solid: np.ndarray, claimed: np.ndarray, palette_idx: np.ndarray
                         two = (0 <= x + 2 * ix < X and 0 <= z + 2 * iz < Z and above[x + 2 * ix, z + 2 * iz]
                                and not above[x + ix, z + iz])
                         table, depth = (slopes33, 3) if two else (slopes45, 2)
-                        w = next((k for k in sorted(table, reverse=True) if k <= n and table[k] is not None), 1)
-                        part = table.get(w) or slopes45[1]
+                        # only widths LEGO makes in this colour; when the
+                        # family isn't made in it at all, the slope takes
+                        # the nearest colour it is made in
+                        col = colour_at(y + 1, x, z)
+                        made = made_widths(table, col)
+                        if not made:
+                            one = table.get(1) or slopes45[1]
+                            col = nearest_where(col, lambda code: made_in(one, code))
+                            made = made_widths(table, col)
+                        w = next((k for k in sorted(made, reverse=True) if k <= n), 1)
+                        part = made.get(w) or table.get(w) or slopes45[1]
                         # footprint: w along the edge, depth inward from the edge cell
                         if along_x:
                             xs, zs = x, min(z, z + iz * (depth - 1))
@@ -1166,7 +1181,7 @@ def sculpt_solid(solid: np.ndarray, claimed: np.ndarray, palette_idx: np.ndarray
                             W, D = depth, w
                         if free(y, xs, zs, COURSE, W, D) and all(
                                 here[xs + a, zs + b] for a in range(W) for b in range(D)):
-                            put(part, colour_at(y + 1, x, z), xs, zs, y, W, D, _slope_rot_for_outward((dx, dz)))
+                            put(part, col, xs, zs, y, W, D, _slope_rot_for_outward((dx, dz)))
                             for a in range(W):
                                 for b in range(D):
                                     done[xs + a, zs + b] = True
@@ -1183,7 +1198,8 @@ def sculpt_solid(solid: np.ndarray, claimed: np.ndarray, palette_idx: np.ndarray
                     xs, zs = min(x, xi), min(z, zi)
                     W, D = (2, 1) if dx else (1, 2)
                     if free(y_up, xs, zs, COURSE, W, D):
-                        put(inv, colour_at(y_up + 1, x, z), xs, zs, y_up, W, D,
+                        col = nearest_where(colour_at(y_up + 1, x, z), lambda code: made_in(inv, code))
+                        put(inv, col, xs, zs, y_up, W, D,
                             _slope_rot_for_outward((dx, dz)))
         # Fill: the shell, plus what the course above needs under it.
         core = binary_erosion(here, iterations=shell) if shell > 0 else np.zeros_like(here)
@@ -1335,7 +1351,11 @@ def _tile_mask(mask: np.ndarray, y: int, colour: int, parts: list[tuple[int, int
     """Greedy largest-first cover of a boolean (X, Z) mask with plates;
     `mirror` scans from the far corner so a second layer's seams cross
     the first's; `long_axis` tries each part with its long side along
-    that axis first."""
+    that axis first.  Only parts LEGO makes in `colour` are used."""
+    from ..bricks import made_in
+    from ..colors import palette
+    code = palette()[colour].code
+    parts = [t for t in parts if made_in(t[2], code)]
     free = mask.copy()
     W, D = free.shape
     out: list[Placement] = []

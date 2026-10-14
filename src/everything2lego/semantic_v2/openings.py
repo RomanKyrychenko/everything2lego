@@ -42,6 +42,12 @@ class WallFrame:
     height: int
 
     def placement(self, part: Part, color_idx: int, u: int, y: int, width: int) -> Placement:
+        """The part at wall position `u`, course offset `y`; in `color_idx`,
+        or the nearest colour LEGO makes the part in when not that one (a
+        window frame comes in far fewer colours than a brick)."""
+        from ..bricks import made_in
+        from ..colors import nearest_where
+        color_idx = nearest_where(color_idx, lambda code: made_in(part, code))
         if self.axis_x:
             return Placement(part, color_idx, self.origin + u, self.other, self.y0 + y,
                              width, 1, 0)

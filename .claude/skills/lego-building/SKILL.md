@@ -186,17 +186,36 @@ Full table: `top_parts.md`.
 
 ## Colours
 
-- **Only use part and colour pairs that exist.**
-  `data/part_colours.json` lists, for each catalogue part, the LDraw colour
-  codes it has been made in since 2010, with how many sets used each.
-- Our house currently uses 17% of its pieces in pairs that don't exist,
-  such as Dark Tan 1×3 bricks and Sand Blue slopes.
-- These catalogue parts have no modern production and should be replaced:
+**Only use part and colour pairs that exist.** The pipeline enforces this.
+
+- **The data:** `data/part_colours.json` lists, for each catalogue part, the
+  LDraw colour codes it has been made in since 2010, with how many sets
+  used each. Rebrickable numbers some colours differently from LDraw, so
+  colours are matched by name.
+- **The palette** (`colors.palette()`) keeps only colours that the basic
+  bricks and plates (`bricks.CORE_PARTS`) are made in. Retired colours
+  drop out: old Brown, old Light Gray, Light Brown, Rust.
+- **`bricks.made_in(part, code)`** is the one lookup. Every packer filters
+  its parts with it:
+  - the wall, roof and slab packers
+  - `_tile_mask`, used by piers, floors, decks, the stand and sculpted
+    courses
+  - bonding merges
+  - openings, through `WallFrame.placement`
+- **Roof colour:** the roof needs its slope families and ridge tiles at
+  run sizes 1, 2 and 4. When the photo's material colour isn't made in
+  those, `dominant_colour(..., ok=)` picks the substitute from the photo
+  samples at full Lab weight, so a substitute keeps the tone. For example,
+  slate that snaps to Sand Blue becomes Dark Bluish Gray, not Dark Blue.
+- **Single parts** (sculpt slopes, inverted slopes, window frames) take the
+  nearest colour they are made in (`colors.nearest_where`).
+- **Still to replace in the catalogue:**
 
   | Part | Problem |
   |---|---|
-  | 30413 | |
-  | 30144 | |
-  | 2549 | |
-  | 3853 | also wrongly listed as 6 wide; it is 1×4×3 |
+  | 30413 | no modern production, so `made_in` already rules it out |
+  | 30144 | no modern production, so `made_in` already rules it out |
+  | 2549 | no modern production, so `made_in` already rules it out |
+  | 3853 | no modern production, so `made_in` already rules it out; also wrongly listed as 6 wide, it is 1×4×3 |
+  | 2875 | no modern production, so `made_in` already rules it out |
   | 3939 | slope 33 3×6, made only in transparent colours since 2010 |

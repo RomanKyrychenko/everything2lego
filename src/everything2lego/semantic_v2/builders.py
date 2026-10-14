@@ -316,6 +316,14 @@ class BuilderRegistry:
 # Internal — packing helpers used by concrete builders
 # ---------------------------------------------------------------------------
 
+def _made_in_colour(family: list[Part], color_idx: int) -> list[Part]:
+    """The parts of `family` LEGO makes in palette colour `color_idx`."""
+    from ..bricks import made_in
+    from ..colors import palette
+    code = palette()[color_idx].code
+    return [p for p in family if made_in(p, code)]
+
+
 def _pack_horizontal_slab(region: PlanarRegion, *,
                             target: MeshTarget,
                             part_family: list[Part],
@@ -349,6 +357,9 @@ def _pack_horizontal_slab(region: PlanarRegion, *,
     if not mask.any():
         return []
 
+    # Dominant palette colour for the region, and the parts made in it.
+    color_idx = _dominant_palette(region.colors)
+    part_family = _made_in_colour(part_family, color_idx)
     footprints = _distinct_footprints(part_family)
     packer = MILPPacker(parts=footprints,
                          diversity_weight=config.diversity_weight,
@@ -357,8 +368,6 @@ def _pack_horizontal_slab(region: PlanarRegion, *,
     # second layer's seams cross the first layer's.
     result = packer.pack(mask[::-1] if mirror else mask)
 
-    # Dominant palette colour for the region.
-    color_idx = _dominant_palette(region.colors)
     part_lookup = _lookup_parts_by_footprint(part_family)
     out: list[Placement] = []
     for pl in result.placements:
@@ -405,18 +414,19 @@ def _pack_vertical_wall(region: PlanarRegion, *,
     if not cells.any():
         return []
 
+    color_idx = _dominant_palette(region.colors)
+    part_family = _made_in_colour(part_family, color_idx)
     footprints = _distinct_footprints(part_family)
     packer = MILPPacker(parts=footprints,
                          diversity_weight=config.diversity_weight,
                          time_limit_s=config.milp_time_limit_s)
 
-    color_idx = _dominant_palette(region.colors)
     part_lookup = _lookup_parts_by_footprint(part_family)
 
     other_axis_ext = 1  # 1-stud thick wall for v1
     out: list[Placement] = []
     course_plates = 3
-    plate_family = [p for p in catalog() if p.shape == "plate"]
+    plate_family = _made_in_colour([p for p in catalog() if p.shape == "plate"], color_idx)
     plate_footprints = _distinct_footprints(plate_family)
     plate_packer = MILPPacker(parts=plate_footprints,
                               diversity_weight=config.diversity_weight,

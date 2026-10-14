@@ -33,7 +33,7 @@ from typing import Optional
 
 import numpy as np
 
-from ..bricks import Part
+from ..bricks import Part, made_in
 from ..pack import Placement
 from ..templates.base import part_by_ldraw
 from .mesh_target import MeshTarget
@@ -64,6 +64,41 @@ def _parts(table) -> list[tuple[int, Part]]:
         if p is not None:
             out.append((length, p))
     return out
+
+
+def _in_colour(table: list[tuple[int, Part]], colour: int) -> list[tuple[int, Part]]:
+    """The entries of a part table LEGO makes in palette colour `colour`."""
+    from ..colors import palette
+    code = palette()[colour].code
+    return [(L, p) for L, p in table if made_in(p, code)]
+
+
+def _colour_with(colour: int, *tables: list[tuple[int, Part]],
+                 lengths: tuple[int, ...] = (1, 2, 4)) -> int:
+    """`colour`, or the nearest palette colour in which each table's parts
+    of these lengths are made.  The 1-long part finishes any run; the 2-
+    and 4-long ones are what a run is mostly made of — a family that comes
+    in a colour only as 1-long parts would build the run from hundreds of
+    them, so a designer picks the nearest colour it really comes in."""
+    from ..colors import nearest_where
+    need = [p for t in tables for L, p in t if L in lengths]
+    return nearest_where(colour, lambda code: all(made_in(p, code) for p in need))
+
+
+def _settle_colours(plan: "SetPlan") -> "SetPlan":
+    """Make every roof's colours ones its parts are made in: each face the
+    nearest colour its slope family comes in, the hips, fill and ridge
+    (g.colour) one the slopes and the ridge tiles both come in.  Walls,
+    floors and the rest are plain bricks and plates, which every palette
+    colour comes in."""
+    slopes = {1: _parts(_SLOPES_45), 2: _parts(_SLOPES_33)}
+    tiles = _parts(_TILES)
+    for g in plan.gables:
+        faces = [g.a] + ([g.b] if g.b is not None else [])
+        g.colour = _colour_with(g.colour, *(slopes[g.step(f)] for f in faces), tiles)
+        for f in faces:
+            f.colour = _colour_with(f.colour, slopes[g.step(f)])
+    return plan
 
 
 def _dominant_colour(colors: np.ndarray) -> int:
@@ -309,8 +344,8 @@ def build_wall(spec: WallSpec, claimed: Optional[np.ndarray] = None) -> list[Pla
     """Bonded brick courses over the spec's mask, around the openings;
     cells already claimed (a slab, another wall's corner) are skipped."""
     f = spec.frame
-    bricks = dict(_parts(_BRICKS))
-    plates = dict(_parts(_PLATES))
+    bricks = dict(_in_colour(_parts(_BRICKS), spec.colour))
+    plates = dict(_in_colour(_parts(_PLATES), spec.colour))
     if not bricks:
         return list(spec.openings)
     out: list[Placement] = list(spec.openings)
@@ -720,6 +755,11 @@ def build_gable(g: GableSpec, claimed: Optional[np.ndarray] = None,
     if not slopes[2]:
         slopes[2] = slopes[1]
     bricks, plates, tiles = _parts(_BRICKS), _parts(_PLATES), _parts(_TILES)
+    # Each run packs only with parts LEGO makes in the run's colour; the
+    # family (45° or 33°, its depth and step) is the roof's geometry and
+    # doesn't depend on colour.
+    gable_bricks = _in_colour(bricks, g.gable_colour)
+    bricks, tiles = _in_colour(bricks, g.colour), _in_colour(tiles, g.colour)
     out: list[Placement] = []
     a, b = g.a, g.b
     axis = a.axis
@@ -865,7 +905,7 @@ def build_gable(g: GableSpec, claimed: Optional[np.ndarray] = None,
         fps = []
         for face in faces:
             step = g.step(face)
-            table = slopes[step]
+            table = _in_colour(slopes[step], face.colour)
             lo_p, hi_p = footprint(face, row)
             depth = hi_p - lo_p
             rot = _slope_rotation(axis, face.sign)
@@ -890,7 +930,7 @@ def build_gable(g: GableSpec, claimed: Optional[np.ndarray] = None,
             continue
         # Hipped ends: slopes across the gap facing out along the ridge,
         # then a fill band inside them (as under the long faces).
-        hip_table = slopes[hstep]
+        hip_table = _in_colour(slopes[hstep], g.colour)
         row_supports = set(supports)
         for hipped, r_edge, sign in ((g.hip_lo, rs0, +1), (g.hip_hi, rs1 - hdepth, -1)):
             if not hipped:
@@ -906,14 +946,14 @@ def build_gable(g: GableSpec, claimed: Optional[np.ndarray] = None,
                     else range(max(rs0, r_edge - hstep - 2), r_edge))
             row_supports.update(band)
             row_supports.discard(end_a if sign > 0 else end_b)
-        if bricks:
+        if gable_bricks:
             for r in sorted(row_supports):
                 if not (rs0 <= r < rs1):
                     continue
                 # The two gable ends are faces of the model (the surface
                 # above them is the roof's ridge, not something covering
                 # them); only the cross-walls between may be hidden.
-                lay_along_pitch(y, r, lo, hi, bricks, g.gable_colour,
+                lay_along_pitch(y, r, lo, hi, gable_bricks, g.gable_colour,
                                 may_hide=r not in (end_a, end_b))
         # Brick fill along the inner edge of each face, step+2 studs wide,
         # laid ACROSS the pitch (one 1xN brick per ridge position): the
@@ -1077,9 +1117,9 @@ def plan_set(regions: list[Region], target: MeshTarget, *,
     rows = np.flatnonzero(occ.any(axis=(1, 2)))
     ground_y = int(rows.min()) if len(rows) else 0
     if source == "massing":
-        return _plan_from_massing(regions, target, occ, ground_y,
+        return _settle_colours(_plan_from_massing(regions, target, occ, ground_y,
                                   detect_openings=detect_openings, opening_delta_e=opening_delta_e,
-                                  facade=facade, stand=stand, stand_colour=stand_colour)
+                                  facade=facade, stand=stand, stand_colour=stand_colour))
     walls: list[WallSpec] = []
     pitches: list[PitchSpec] = []
     bases: list[BaseSpec] = []
@@ -1134,7 +1174,7 @@ def plan_set(regions: list[Region], target: MeshTarget, *,
         inside = owned[idx[:, 1], idx[:, 0], idx[:, 2]].mean()
         if inside >= 0.6:
             consumed.add(id(reg))
-    return plan
+    return _settle_colours(plan)
 
 
 def _wall_face_cells(w: WallSpec, solid: np.ndarray) -> np.ndarray:
@@ -1215,7 +1255,15 @@ def _seen_roof_colour(pitches: list[PitchSpec], solid: np.ndarray, facade, fit) 
     if not cells:
         return None
     _, rgb = seen_rgb(np.vstack(cells), facade, fit, K, tol_studs=1.5)
-    return dominant_colour(rgb) if len(rgb) >= 6 else None
+    return dominant_colour(rgb, ok=_roof_buildable) if len(rgb) >= 6 else None
+
+
+def _roof_buildable(code: int) -> bool:
+    """Whether a roof can be built in LDraw colour `code`: both slope
+    families and the ridge tiles come in it at the run sizes (1, 2, 4)."""
+    need = [p for t in (_parts(_SLOPES_45), _parts(_SLOPES_33), _parts(_TILES))
+            for L, p in t if L in (1, 2, 4)]
+    return all(made_in(p, code) for p in need)
 
 
 # A facade registration is used only when the model, seen through the

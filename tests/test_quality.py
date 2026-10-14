@@ -31,8 +31,8 @@ def test_tiles_cannot_connect_bricks_above():
 
 
 def test_export_color_ids_refer_to_the_same_colors():
-    expected = {"Pink": (13, 23), "Medium Azure": (322, 156),
-                "Very Light Bluish Gray": (151, 99), "Light Gray": (7, 9)}
+    expected = {"Dark Tan": (28, 69), "Medium Azure": (322, 156),
+                "Sand Green": (378, 48), "Reddish Brown": (70, 88)}
     for name, identifiers in expected.items():
         entry = palette()[color(name)]
         assert (entry.code, entry.bl) == identifiers

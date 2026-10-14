@@ -122,3 +122,13 @@ def slopes_colour_other(result):
     counts = Counter(p.color_idx for p in result.surface_placements
                      if p.part.shape == "brick" and p.color_idx != roof)
     return counts.most_common(1)[0][0]
+
+
+def test_set_mode_uses_only_parts_lego_makes_in_their_colours(result):
+    """A store set can be bought: every part comes in the colour it has."""
+    from everything2lego.bricks import made_in
+    from everything2lego.colors import palette
+    pal = palette()
+    bad = {(p.part.ldraw, pal[p.color_idx].name) for p in result.placements
+           if not made_in(p.part, pal[p.color_idx].code)}
+    assert not bad, bad

@@ -51,7 +51,7 @@ def test_remap_to_house_keeps_empty_cells_and_shapes():
 def test_reduce_palette_merges_to_k_dominant_colors_deterministically():
     grid = np.full((1, 10, 10), index_of(15), dtype=np.int16)   # mostly white
     grid[0, :, :4] = index_of(4)                                 # red band
-    grid[0, 0, 0] = index_of(151)                                # a very light grey speck
+    grid[0, 0, 0] = index_of(71)                                 # a light grey speck
     grid[0, 9, 9] = index_of(320)                                # a dark red speck
     grid[0, 5, 5] = -1
     out = colors.reduce_palette(grid, 2)

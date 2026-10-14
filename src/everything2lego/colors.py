@@ -20,12 +20,18 @@ class LegoColor:
 
 
 def _buildable(c: dict) -> bool:
-    """Only colours a set is made of take part in nearest-colour matching:
+    """Only colours a set can be made of take part in nearest-colour matching:
     the catalogue placeholder 9999 "[No Color/Any Color]" (whose swatch is
     near-black and used to win every black object) and the pearl/chrome
     finishes (rare, and never what a photo's grey means) are left out."""
     name = c["name"]
-    return c["code"] != 9999 and not any(k in name for k in ("Pearl", "Chrome", "Metallic", "Trans"))
+    if c["code"] == 9999 or any(k in name for k in ("Pearl", "Chrome", "Metallic", "Trans")):
+        return False
+    # and only colours LEGO still makes the basic bricks and plates in:
+    # retired colours (old Brown, old Light Gray, Light Brown, Rust...)
+    # can't be bought, so a set can't be made of them
+    from .bricks import CORE_PARTS, made_in
+    return all(made_in(p, c["code"]) for p in CORE_PARTS)
 
 
 @lru_cache(maxsize=1)
@@ -74,6 +80,20 @@ def snap_rgb_to_palette(rgb: np.ndarray) -> np.ndarray:
     d = ((lab[:, None, :] - pal[None, :, :]) ** 2).sum(axis=-1)
     idx = np.argmin(d, axis=1)
     return idx.reshape(orig_shape)
+
+
+def nearest_where(idx: int, ok) -> int:
+    """Palette index `idx` if `ok(code)` holds for it, else the perceptually
+    nearest palette colour for which it does (`idx` when none does)."""
+    pal = palette()
+    if ok(pal[idx].code):
+        return idx
+    lab = _palette_lab()
+    cand = [i for i, c in enumerate(pal) if ok(c.code)]
+    if not cand:
+        return idx
+    d = ((lab[cand] - lab[idx]) ** 2).sum(axis=1)
+    return cand[int(np.argmin(d))]
 
 
 def by_code(code: int) -> LegoColor:
@@ -203,7 +223,7 @@ def reduce_palette(palette_idx: np.ndarray, k: int) -> np.ndarray:
     return out
 
 
-def dominant_colour(rgb: np.ndarray, *, neutral_chroma: float = 6.0) -> int:
+def dominant_colour(rgb: np.ndarray, *, neutral_chroma: float = 6.0, ok=None) -> int:
     """The palette colour of the dominant MATERIAL in a set of (N, 3)
     uint8 photo colours.  A material keeps its hue in sun and shade while
     its lightness and saturation swing with the light, so samples are
@@ -212,7 +232,12 @@ def dominant_colour(rgb: np.ndarray, *, neutral_chroma: float = 6.0) -> int:
     is snapped to the palette with lightness at half weight.  Snapping
     first and voting after splits one material (sunlit and shaded brick)
     between palette entries and lets a minority (a stone base, window
-    glass, trims) win the vote."""
+    glass, trims) win the vote.
+
+    `ok(code)` restricts the answer to colours the part that will carry it
+    is made in.  When the material's own colour isn't one, the nearest that
+    is wins by full Lab distance: a substitute must keep the material's
+    tone (a slate roof stays mid-dark), not just its hue."""
     rgb = np.asarray(rgb, np.uint8).reshape(-1, 3)
     if len(rgb) == 0:
         return 0
@@ -224,4 +249,10 @@ def dominant_colour(rgb: np.ndarray, *, neutral_chroma: float = 6.0) -> int:
     centre = lab[family == best].mean(axis=0)
     w = np.array([0.5, 1.0, 1.0], np.float32)
     pal = _palette_lab()
-    return int(np.argmin((((pal - centre) * w) ** 2).sum(axis=1)))
+    best_idx = int(np.argmin((((pal - centre) * w) ** 2).sum(axis=1)))
+    if ok is None or ok(palette()[best_idx].code):
+        return best_idx
+    cand = [i for i, c in enumerate(palette()) if ok(c.code)]
+    if not cand:
+        return best_idx
+    return cand[int(np.argmin(((pal[cand] - centre) ** 2).sum(axis=1)))]

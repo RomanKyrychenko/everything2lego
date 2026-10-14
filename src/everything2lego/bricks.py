@@ -165,6 +165,27 @@ def parts_by_height(height_units: int, *, exclude_tiles: bool = True) -> tuple[P
     )
 
 
+@lru_cache(maxsize=1)
+def _production() -> dict[str, frozenset[int]]:
+    raw = json.loads(files("everything2lego.data").joinpath("part_colours.json").read_text())
+    return {k: frozenset(int(c) for c in v) for k, v in raw["parts"].items()}
+
+
+def made_in(part: "Part | str", code: int) -> bool:
+    """Whether LEGO makes `part` in LDraw colour `code`: it came in at least
+    two sets since 2010 (data/part_colours.json, from Rebrickable's
+    inventories; tools/set_study/part_colours.py).  A catalogue part with no
+    production record is made in nothing; a part outside the table (a
+    decoration a styling pass names by id) is not judged."""
+    cols = _production().get(part if isinstance(part, str) else part.ldraw)
+    return cols is None or code in cols
+
+
+# The parts every colour of a set's palette must come in: a wall, a floor,
+# a sculpted course can always be finished in 1x1 and 1x2 bricks and plates.
+CORE_PARTS = ("3005.dat", "3004.dat", "3024.dat", "3023.dat")
+
+
 def largest_first(parts: tuple[Part, ...]) -> tuple[Part, ...]:
     """Sort parts by descending stud area, so a greedy fill picks the biggest first."""
     return tuple(sorted(parts, key=lambda p: (-p.w * p.d, -max(p.w, p.d))))

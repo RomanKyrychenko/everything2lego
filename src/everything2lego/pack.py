@@ -1484,7 +1484,7 @@ def apply_architectural_style(placements: list[Placement], *,
                                shingles: bool = True,
                                quoins: bool = True,
                                foundation_code: int = 72,   # Dark Bluish Gray
-                               cornice_code: int = 6,        # Brown
+                               cornice_code: int = 70,       # Reddish Brown
                                ridge_code: int = 15,         # White
                                shingle_a_code: int = 72,     # Dark Bluish Gray
                                shingle_b_code: int = 0,      # Black
