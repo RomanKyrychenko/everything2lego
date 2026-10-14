@@ -25,14 +25,18 @@ REPO = HERE.parents[1]
 sys.path.insert(0, str(REPO / "tools" / "partsdb"))
 sys.path.insert(0, str(REPO / "tools" / "set_study"))
 sys.path.insert(0, str(REPO / "src"))
+sys.path.insert(0, str(HERE))
+import common as C  # noqa: E402
 import features as F  # noqa: E402
-from neighbours import held_out, model_parts  # noqa: E402
+from neighbours import held_out  # noqa: E402
 
-from everything2lego.proposals import features as context, n_inputs  # noqa: E402
+from everything2lego.proposals import features as context, n_inputs, static_context  # noqa: E402
+from everything2lego.sampler import SUB, popcount  # noqa: E402
 from everything2lego.sampler import known_kinds, vocabulary  # noqa: E402
 from everything2lego.style import kind_of  # noqa: E402
 
 DS = F.DATA / "analysis" / "proposal_ds.npz"
+NEG = F.DATA / "analysis" / "proposal_neg.npz"
 OUT = REPO / "src/everything2lego/data/proposal_net.npz"
 KINDS_CSV = F.DATA / "analysis" / "set_kinds.csv"
 MAX_PER_MODEL = 400
@@ -48,41 +52,40 @@ def _object_kinds() -> dict[str, str]:
     return dict(zip(k.id, k.kind))
 
 
-def model_samples(args):
-    """(X, y) of one model: its parts in fill order, at most MAX_PER_MODEL."""
-    f, obj = args
-    try:
-        items = model_parts(f, F._CTX["ldmap"], F._CTX["classes"])
-    except Exception:
-        return None
-    if len(items) < 20:
-        return None
-    toks = [F._CTX["token"].get(it[0], "other0x0h0") for it in items]
-    i0 = np.array([np.floor(it[2] + 0.25) for it in items], int)[:, [1, 0, 2]]       # (y, x, z)
-    i1 = np.array([np.maximum(np.ceil(it[3] - 0.25), np.floor(it[2] + 0.25) + 1) for it in items], int)[:, [1, 0, 2]]
-    base = i0.min(0)
-    i0, i1 = i0 - base, i1 - base
-    shape = tuple(i1.max(0))
-    if np.prod(shape) > MAX_CELLS:
-        return None
-    target = np.zeros(shape, bool)
-    for a, b in zip(i0, i1):
-        target[a[0]:b[0], a[1]:b[1], a[2]:b[2]] = True
-    placed = np.full(shape, -1, np.int64)
+def replay(fill: np.ndarray, toks: list, i0: np.ndarray, i1: np.ndarray, obj, keep=None):
+    """(X, y) of a build, its parts replayed in fill order: each part's
+    context when it was placed, and its token.  `keep`: the ranks to take."""
+    static = static_context(fill)
+    placed = np.full(fill.shape, -1, np.int64)
     kind_idx = {k: i for i, k in enumerate(KINDS)}
     tok_idx = {t: i for i, t in enumerate(TOKENS)}
     order = np.lexsort((i0[:, 2], i0[:, 1], i0[:, 0]))
-    rnd = np.random.default_rng(abs(hash(f.stem)) % 2 ** 32)
-    keep = set(rnd.choice(len(order), min(len(order), MAX_PER_MODEL), replace=False).tolist())
     oi = OBJECTS.index(obj) if obj in OBJECTS else -1
     X, Y = [], []
     for r, i in enumerate(order):
         a, b = i0[i], i1[i]
-        if r in keep:
-            X.append(context(target, placed, int(a[0]), int(a[1]), int(a[2]), oi, len(KINDS), len(OBJECTS)))
+        if keep is None or r in keep:
+            X.append(context(fill, placed, static, int(a[0]), int(a[1]), int(a[2]), oi, len(KINDS), len(OBJECTS)))
             Y.append(tok_idx.get(toks[i], len(TOKENS)))
         placed[a[0]:b[0], a[1]:b[1], a[2]:b[2]] = kind_idx.get(kind_of(toks[i]), len(KINDS))
-    return f.stem, np.array(X, np.float16), np.array(Y, np.int16)
+    return np.array(X, np.float16), np.array(Y, np.int16)
+
+
+def model_samples(args):
+    """(name, X, y) of one official model: its parts in fill order, at most
+    MAX_PER_MODEL, against its real shape (common.model)."""
+    f, obj = args
+    try:
+        got = C.model(f.stem)
+    except Exception:
+        return None
+    if got is None or len(got[0]) < 20 or got[4].size > MAX_CELLS:
+        return None
+    _, toks, i0, i1, bits = got
+    rnd = np.random.default_rng(abs(hash(f.stem)) % 2 ** 32)
+    keep = set(rnd.choice(len(toks), min(len(toks), MAX_PER_MODEL), replace=False).tolist())
+    X, Y = replay(popcount(bits) / SUB ** 3, toks, i0, i1, obj, keep)
+    return f.stem, X, Y
 
 
 def dataset() -> None:
@@ -105,7 +108,12 @@ def dataset() -> None:
           f"{(Y < len(TOKENS)).mean():.1%} in the vocabulary -> {DS}")
 
 
-def train(hidden: int = 128, epochs: int = 6, batch: int = 512, lr: float = 1e-3, seed: int = 0) -> None:
+def train(hidden: int = 128, epochs: int = 6, batch: int = 512, lr: float = 1e-3, seed: int = 0,
+          lam: float = 0.5) -> None:
+    """Maximum likelihood on the official placements, plus — when
+    negatives.py has run — unlikelihood on the sampler's over-used choices:
+    -w log(1 - p(token | context)), w how much more our builds use it."""
+    neg = np.load(NEG) if NEG.exists() else None
     d = np.load(DS)
     X, Y, V = d["X"].astype(np.float32), d["Y"].astype(np.int64), d["val"]
     C = len(TOKENS) + 1
@@ -145,6 +153,17 @@ def train(hidden: int = 128, epochs: int = 6, batch: int = 512, lr: float = 1e-3
             g = np.exp(lp)
             g[np.arange(len(y)), y] -= 1
             g /= len(y)
+            if neg is not None:                            # and push the over-used choices down
+                jn = rnd.integers(0, len(neg["Y"]), batch)
+                xq, yq, wq = neg["X"][jn].astype(np.float32), neg["Y"][jn].astype(np.int64), neg["W"][jn]
+                hq, lq = forward(xq)
+                pq = np.exp(lq)
+                py = pq[np.arange(len(yq)), yq]
+                gq = -pq * (wq * py / np.maximum(1e-6, 1 - py))[:, None]
+                gq[np.arange(len(yq)), yq] += wq * py / np.maximum(1e-6, 1 - py)
+                gq *= lam / len(yq)
+                h, g = np.concatenate([h, hq]), np.concatenate([g, gq])
+                xn = np.concatenate([xn, (xq - mu) / sd])
             grads = {"W2": h.T @ g, "b2": g.sum(0)}
             dh = (g @ P["W2"].T) * (h > 0)
             grads["W1"], grads["b1"] = xn.T @ dh, dh.sum(0)

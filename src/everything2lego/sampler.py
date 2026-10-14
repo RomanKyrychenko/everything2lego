@@ -19,7 +19,8 @@ loss (plus what makes it a build at all):
       + style * N_ref * (w_loc   * mean over touching pairs of -log P(B, where | A)   } style:
                        + w_glob  * KL(pair patterns || reference models)               }  real
                        + w_glob2 * KL(path patterns || reference models)               }  sets
-                       + w_dens  * (log(pairs / N_ref))^2 / (2 sd^2))                  }
+                       + w_dens  * (log(pairs / N_ref))^2 / (2 sd^2)
+                       + w_cnt   * (log(parts / P_ref))^2 / (2 sd_p^2))                  }
       + w_sup  * parts no stud holds (a stud of the part below in a
                  hole of this one, or of this one in a hole of the part above)
       + w_side * side studs and holes facing out of the object (a set puts
@@ -42,9 +43,11 @@ of the target's kind nearest it in shape, smoothed from exact tokens to
 kinds to uniform.  N_ref is the number of touching pairs a real set of the
 target's volume has (the references' pairs per occupied cell times the
 cells the target fills) — not the build's own count, or fewer, bigger parts
-would win for having fewer pairs, however untypical each; the last term
-asks for real sets' pairs per cell (not few big parts, not many small
-ones), log-normal as the references spread.  `style` trades style against
+would win for having fewer pairs, however untypical each; the last two
+terms ask for real sets' pairs per cell and parts per cell (P_ref: the
+references' parts per occupied cell times the cells the target fills —
+not too few big parts, not too many small ones), log-normal as the
+references spread.  `style` trades style against
 content.  Which parts may be used at all, and how readily, comes from how
 often sets of the target's kind use them (the vocabulary's per-kind share
 and lift) — so a house is not built of wheel arches.
@@ -162,7 +165,8 @@ class Orient:
     first: tuple[int, int, int]  # its first occupied cell in (y, x, z) order
     top: frozenset               # (x, z) offsets with a stud on top
     bottom: frozenset            # (x, z) offsets with a hole underneath
-    sides: tuple = ()            # (y, x, z, dx, dz): a stud or hole in that cell facing (dx, dz)
+    sides: tuple = ()            # (hx, hy, hz, dx, dz, kind): a side connector at that point of the face
+                                 # facing (dx, dz) — half studs / half plates from the box's corner
     halo: np.ndarray = None      # (m, 3): offsets of the cells next to its cells (26-neighbourhood), not its own
     pix: tuple = ()              # its outline along x, y, z: (sy, sz), (sx, sz), (sy, sx) sample pixels, box-local
 
@@ -191,6 +195,47 @@ class VPart:
     box: Optional[str]           # "brick" / "plate" / "tile" for a plain full box, else None
 
 
+# side connector kinds, and which fit which (a pin in a pin hole, a wheel's
+# hole on a holder's bar, ...)
+CONNECTORS = {k: i for i, k in enumerate((
+    "stud:M", "antistud:F", "pin:M", "pinhole:F", "axle:M", "axlehole:F", "bar:M", "barhole:F",
+    "clip:F", "finger:M", "finger:F", "generic:M", "generic:F"))}
+FITS = np.zeros((len(CONNECTORS), len(CONNECTORS)), bool)
+for _a, _b in (("stud:M", "antistud:F"), ("pin:M", "pinhole:F"), ("axle:M", "axlehole:F"), ("axle:M", "pinhole:F"),
+               ("bar:M", "barhole:F"), ("bar:M", "clip:F"), ("bar:M", "pinhole:F"), ("finger:M", "finger:F"),
+               ("generic:M", "generic:F")):
+    FITS[CONNECTORS[_a], CONNECTORS[_b]] = FITS[CONNECTORS[_b], CONNECTORS[_a]] = True
+
+
+def side_cells(o: "Orient", oy: int, ox: int, oz: int, sd: tuple) -> list[tuple[int, int, int]]:
+    """The cells a side connector faces: just outside its face, one or (on a
+    cell boundary) two along it."""
+    hx, hy, hz, dx, dz, _ = sd
+    h, W, D = o.size
+    y = oy + min(hy // 2, h - 1)
+    if dx:
+        x = ox + (W if dx > 0 else -1)
+        zs = {hz // 2, (hz - 1) // 2} if hz % 2 == 0 else {hz // 2}
+        return [(y, x, oz + z) for z in sorted(zs) if 0 <= z < D]
+    z = oz + (D if dz > 0 else -1)
+    xs = {hx // 2, (hx - 1) // 2} if hx % 2 == 0 else {hx // 2}
+    return [(y, ox + x, z) for x in sorted(xs) if 0 <= x < W]
+
+
+def sides_join(a: "Orient", ay: int, ax: int, az: int, b: "Orient", by: int, bx: int, bz: int) -> bool:
+    """Whether a side connector of a meets one of b: facing each other at
+    the same point (height within half a plate), and of kinds that fit."""
+    for (hx, hy, hz, dx, dz, k) in a.sides:
+        if k < 0:
+            continue
+        px, py, pz = 2 * ax + hx, 2 * ay + hy, 2 * az + hz
+        for (gx, gy, gz, ex, ez, kb) in b.sides:
+            if (kb >= 0 and FITS[k, kb] and ex == -dx and ez == -dz and 2 * bx + gx == px
+                    and 2 * bz + gz == pz and abs(2 * by + gy - py) <= 1):
+                return True
+    return False
+
+
 def _orients(bits: np.ndarray, top: list, bottom: list, sides: list = ()) -> tuple:
     h, w, d = bits.shape
     fine = unpack(bits)
@@ -205,8 +250,16 @@ def _orients(bits: np.ndarray, top: list, bottom: list, sides: list = ()) -> tup
         wt = frozenset(to_world(i, k) for i, k in top)
         wb = frozenset(to_world(i, k) for i, k in bottom)
         face = {"+x": (1, 0), "-x": (-1, 0), "+z": (0, 1), "-z": (0, -1)}
-        ws = tuple((yi,) + to_world(i, k) + tuple(int(round(v)) for v in _yaw(rot, *face[f]))
-                   for _, i, yi, k, f in sides)
+        ws = []
+        for kind, f, t, hy in sides:
+            fx, fz = face[f]
+            # the point on the face, half studs, turned about the box's centre
+            px, pz = ((w + fx * w, t) if fx else (t, d + fz * d))
+            vx, vz = _yaw(rot, px - w, pz - d)
+            dx, dz = _yaw(rot, fx, fz)
+            ws.append((int(round(vx + W)), int(hy), int(round(vz + D)), int(round(dx)), int(round(dz)),
+                       CONNECTORS.get(kind, -1)))
+        ws = tuple(ws)
         key = (wbits.tobytes(), wbits.shape, wt, wb, ws)
         if key in seen:
             continue                                    # a symmetric part: this yaw is another's
@@ -233,7 +286,8 @@ def vocabulary() -> tuple[VPart, ...]:
         occ = np.array(r["occ"], dtype=float)           # [y from the bottom][x][z]
         bits = np.array([[[int(v) for v in row] for row in layer] for layer in r["bits"]], dtype=np.uint64)
         part = Part(ldraw=r["ldraw"], bl=r["part_num"], shape=kind_of(r["token"]),
-                    footprint=(w, d), height_units=h, name=r["name"], origin=tuple(r["origin"]))
+                    footprint=(w, d), height_units=h, name=r["name"], origin=tuple(r["origin"]),
+                    companion=r.get("companion"))
         full = bool((occ >= 0.999).all()) and len(r["holes_bottom"]) == w * d and not r["sides"]
         box = None
         if full and r["category"] in ("Bricks", "Plates", "Tiles"):
@@ -302,6 +356,8 @@ class Stats:
         self.ref = Reference.from_models(models)
         self.ref2 = Reference.from_models(models, key="paths")
         self.density, self.density_sd = pair_density(models)
+        self.part_density, self.part_density_sd = pair_density(models, default=0.3,
+                                                               per=lambda m: m.get("n_parts", 0))
         self.degree: dict[str, float] = {}                # set by sample(): over all the models
         self.lam = lam
         self.pair = self.ref.counts                       # (a, b, d) -> weight
@@ -336,16 +392,17 @@ class Stats:
         return v
 
 
-def pair_density(models: list[dict], default: float = 1.0, default_sd: float = 0.5) -> tuple[float, float]:
-    """Directed touching pairs per occupied cell (stud x stud x plate) in
-    these models (features rows: patterns, shape): the median, and the
-    spread of its log over them."""
+def pair_density(models: list[dict], default: float = 1.0, default_sd: float = 0.5,
+                 per=lambda m: sum(m["patterns"].values())) -> tuple[float, float]:
+    """Directed touching pairs (or `per`: anything counted per model) per
+    occupied cell (stud x stud x plate) in these models (features rows:
+    patterns, shape): the median, and the spread of its log over them."""
     d = []
     for m in models:
         w, dd, h, fill = float(np.exp(m["shape"][0])), float(np.exp(m["shape"][1])), float(np.exp(m["shape"][2])), float(m["shape"][3])
         vol = fill * w * dd * h * 2.5
-        if vol > 0 and m["patterns"]:
-            d.append(sum(m["patterns"].values()) / vol)
+        if vol > 0 and m["patterns"] and per(m):
+            d.append(per(m) / vol)
     if not d:
         return default, default_sd
     sd = float(np.std(np.log(d))) if len(d) > 2 else default_sd
@@ -409,13 +466,18 @@ class Weights:
     sup: float = 40.0         # a part no stud holds falls off: all but forbidden
     side: float = 6.0         # a side stud or hole facing out of the object: SNOT with nothing on it
     dens: float = 1.0         # pairs per cell as real sets have them (not too few big, too many small parts)
+    cnt: float = 1.0          # parts per cell as real sets have them
 
     @classmethod
-    def learned(cls) -> "Weights":
-        """The style weights fitted to the official models
-        (data/energy_weights.json; tools/learn/fit_energy.py), the rest as above."""
+    def learned(cls, kind: Optional[str] = None) -> "Weights":
+        """The weights fitted to the official models (data/energy_weights.json;
+        tools/learn/fit_energy.py): those of the object's kind when fitted
+        for it, else the pooled ones; the rest as above."""
         f = files("everything2lego.data").joinpath("energy_weights.json")
-        return cls(**json.loads(f.read_text())["weights"]) if f.is_file() else cls()
+        if not f.is_file():
+            return cls()
+        d = json.loads(f.read_text())
+        return cls(**d.get("by_kind", {}).get(kind, d["weights"]))
 
 
 class State:
@@ -435,6 +497,7 @@ class State:
         self.bare = 0                                        # side connectors facing out
         self.fid = float(target.fill.sum())                  # wrong samples / 64, everything empty
         self.n_ref = stats.density * float(target.fill.sum())  # pairs a real set this size has
+        self.p_ref = stats.part_density * float(target.fill.sum())  # and parts
         self.lab = _palette_lab()
         self.tlab = np.where(target.colour[..., None] >= 0, self.lab[np.maximum(target.colour, 0)], np.nan)
         # the outline: per view (along x, y, z) the target's and how many parts cover each pixel
@@ -485,6 +548,19 @@ class State:
                     b = self.items[j]
                     if b.y == it.y + it.h and (it.x + dx - b.x, it.z + dz - b.z) in b.ori.bottom:
                         return True
+        return self._side_held(it.ori, it.y, it.x, it.z, i)
+
+    def _side_held(self, o: Orient, oy: int, ox: int, oz: int, me: int = -1) -> bool:
+        """Held at a side: a pin, stud, bar or axle of it meets one of a part beside it."""
+        H, X, Z = self.owner.shape
+        for sd in o.sides:
+            for (y, x, z) in side_cells(o, oy, ox, oz, sd):
+                if 0 <= y < H and 0 <= x < X and 0 <= z < Z:
+                    j = int(self.owner[y, x, z])
+                    if j >= 0 and j != me:
+                        b = self.items[j]
+                        if sides_join(o, oy, ox, oz, b.ori, b.y, b.x, b.z):
+                            return True
         return False
 
     # -- energy bookkeeping ---------------------------------------------------
@@ -571,9 +647,9 @@ class State:
         f = self.t.fill
         H, X, Z = f.shape
         n = 0
-        for (y, x, z, dx, dz) in o.sides:
-            X2, Z2 = ox + x + dx, oz + z + dz
-            if not (0 <= X2 < X and 0 <= Z2 < Z) or f[oy + y, X2, Z2] < 0.5:
+        for sd in o.sides:
+            cells = side_cells(o, oy, ox, oz, sd)
+            if not any(0 <= y < H and 0 <= x < X and 0 <= z < Z and f[y, x, z] >= 0.5 for y, x, z in cells):
                 n += 1
         return n
 
@@ -581,7 +657,8 @@ class State:
         w = self.w
         n = self.kl.n
         style = (w.loc * self.loc / n + w.glob * self.kl.value() + w.glob2 * self.kl2.value()
-                 + w.dens * math.log(n / self.n_ref) ** 2 / (2 * self.s.density_sd ** 2)) if n > 0 else 0.0
+                 + w.dens * math.log(n / self.n_ref) ** 2 / (2 * self.s.density_sd ** 2)
+                 + w.cnt * _dens(len(self.items), self.p_ref, self.s.part_density_sd)) if n > 0 else 0.0
         return (w.cov * self.fid + w.sil * self.sil / SUB ** 2 + w.col * self.col
                 + w.style * self.n_ref * style + w.sup * len(self.unsup) + w.side * self.bare)
 
@@ -700,7 +777,7 @@ class Filler:
             # proposes the token, the part within it goes by how widely sets of this
             # kind (or all sets) use it
             self.opt_out, self.opt_lpart, self.obj = net_tables(self.net, vocab, kind)
-            self.target01 = state.t.fill >= 0.5
+            self.static = proposals.static_context(state.t.fill)
         self.prior = self.logprior
         # the window every option is tested in: origin (y, x - FX, z - FZ) for a cell (y, x, z)
         self.FX = max(o.first[1] for _, o in self.opts)
@@ -769,7 +846,8 @@ class Filler:
     def cell_prior(self, y: int, x: int, z: int) -> np.ndarray:
         """Per option, log P(it | the cell's context) from the network."""
         net = self.net
-        ctx = proposals.features(self.target01, self.st.kindgrid, y, x, z, self.obj, len(net.kinds), len(net.objects))
+        ctx = proposals.features(self.st.t.fill, self.st.kindgrid, self.static, y, x, z, self.obj,
+                                 len(net.kinds), len(net.objects))
         return net.logprobs(ctx[None])[0][self.opt_out] + self.opt_lpart
 
     def stat_score(self, k: int, oy: int, ox: int, oz: int) -> float:
@@ -802,7 +880,7 @@ class Filler:
                 b = st.items[j]
                 if b.y + b.h == oy and (ox + dx - b.x, oz + dz - b.z) in b.ori.top:
                     return True
-        return False
+        return st._side_held(o, oy, ox, oz)
 
     def capped(self, o: Orient, oy: int, ox: int, oz: int) -> float:
         """The share of its top with more to build above but no stud there
@@ -960,7 +1038,7 @@ def sample(target: Target, models: list[dict], *, iters: int = 20000, seed: int 
     refs = nearest_models(models, target.shape_descriptor(), k_models, target.kind)
     stats = Stats(refs)
     stats.degree = token_degree(models)
-    weights = weights or Weights.learned()
+    weights = weights or Weights.learned(target.kind)
     vocab = select_vocabulary(target.kind, n_special)
     if engine == "auto" and not native.available():
         warnings.warn(f"native sampler: {native.why_not()} (python -m everything2lego.native build); "
@@ -973,8 +1051,10 @@ def sample(target: Target, models: list[dict], *, iters: int = 20000, seed: int 
         placements = [Placement(v.part, c, x, z, y, o.size[1], o.size[2], o.rot) for v, o, c, y, x, z in got]
         used = Counter(v.category for v, *_ in got)
         n_ref = stats.density * float(target.fill.sum())
+        p_ref = stats.part_density * float(target.fill.sum())
         info.update({"history": history, "vocabulary": len(vocab), "categories": dict(used), "n_ref": n_ref,
                      "dens": _dens(info["pairs"], n_ref, stats.density_sd),
+                     "cnt": _dens(info["parts"], p_ref, stats.part_density_sd),
                      "references": [r["model"] for r in refs[:10]], "engine": "native"})
         return placements, info
     rnd = random.Random(seed)
@@ -1015,5 +1095,6 @@ def sample(target: Target, models: list[dict], *, iters: int = 20000, seed: int 
             "bad_cells": st.bad_cells(), "unsupported": len(st.unsup), "bare_side_connectors": st.bare, "history": history,
             "vocabulary": len(vocab), "categories": dict(used),
             "references": [r["model"] for r in refs[:10]], "engine": "python", "n_ref": st.n_ref,
-            "pairs": st.kl.n, "dens": _dens(st.kl.n, st.n_ref, stats.density_sd)}
+            "pairs": st.kl.n, "dens": _dens(st.kl.n, st.n_ref, stats.density_sd),
+            "cnt": _dens(len(st.items), st.p_ref, stats.part_density_sd)}
     return st.placements(), info

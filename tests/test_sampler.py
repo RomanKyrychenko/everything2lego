@@ -128,3 +128,21 @@ def test_unknown_kind_is_refused():
     with pytest.raises(ValueError, match="unknown kind 'car'"):
         sampler.Target(want, np.full(want.shape, 4), want.copy(), kind="car")
     sampler.Target(want, np.full(want.shape, 4), want.copy(), kind="road_vehicle")
+
+
+def test_a_wheel_on_a_holder_is_held_at_its_side():
+    """A wheel's hub hole on a holder's bar joins them (sampler.sides_join):
+    the faces touch, the points line up, a bar fits a pin hole."""
+    holder = _vp("4488.dat").orients[0]
+    hx, hy, hz, dx, dz, _ = holder.sides[0]
+    assert (dx, dz) == (1, 0)                          # its bar points +x
+    wheel = next(v for v in sampler.vocabulary() if v.part.companion == "3641.dat" and
+                 any(o.size[1] % 2 == 0 for o in v.orients))
+    o = next(o for o in wheel.orients for s in o.sides
+             if (s[3], s[4]) == (-1, 0) and sampler.FITS[s[5], sampler.CONNECTORS["bar:M"]])
+    s = next(s for s in o.sides if (s[3], s[4]) == (-1, 0))
+    W = holder.size[1]
+    by = (hy - s[1]) // 2                              # heights within half a plate
+    bz = (hz - s[2]) // 2
+    assert sampler.sides_join(holder, 0, 0, 0, o, by, W, bz)
+    assert not sampler.sides_join(holder, 0, 0, 0, o, by, W + 1, bz)   # a stud apart: not joined

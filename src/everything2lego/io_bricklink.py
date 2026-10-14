@@ -33,6 +33,9 @@ def write_wanted_list(placements: Iterable[Placement], out_path: str | Path,
         if glass is not None and p.glass is not None:      # a window's glass is its own part
             key = (glass.removesuffix(".dat"), colour_by_code(p.glass).bl)
             counts[key] = counts.get(key, 0) + 1
+        if p.part.companion:                                # a wheel's tyre is its own part (black)
+            key = (p.part.companion.removesuffix(".dat"), colour_by_code(0).bl)
+            counts[key] = counts.get(key, 0) + 1
 
     lines = ["<INVENTORY>"]
     for (part_id, color_id), qty in sorted(counts.items()):

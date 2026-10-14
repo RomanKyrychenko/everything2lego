@@ -52,6 +52,8 @@ def placement_to_line(p: Placement) -> str:
     matrix = " ".join(_fmt_num(v) for v in m)
     at = f"{_fmt_num(x)} {_fmt_num(y)} {_fmt_num(z)} {matrix}"
     line = f"1 {ldraw_color} {at} {p.part.ldraw}"
+    if p.part.companion:                   # a wheel's tyre: black, as tyres are
+        line += f"\n1 0 {at} {p.part.companion}"
     glass = GLASS.get(p.part.ldraw)
     if glass is not None and p.glass is not None:
         # the frame's glass, clipped in with the frame's own transform

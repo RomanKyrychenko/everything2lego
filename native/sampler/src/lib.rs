@@ -56,9 +56,11 @@ pub struct Problem {
     pub bot_start: *const i32,
     pub bot_xz: *const i32,
     pub side_start: *const i32,
-    pub side_v: *const i32, // n_sides*5: y, x, z, dx, dz
+    pub side_v: *const i32, // n_sides*6: hx, hy, hz (half studs / plates from the box corner), dx, dz, kind
     pub halo_start: *const i32, // n_opt+1
     pub halo_yxz: *const i32,   // n_halo*3: the cells next to its cells (26-neighbourhood), not its own
+    pub n_conn: i32,
+    pub fits: *const u8, // n_conn*n_conn: which side connector kinds join
     // weights and schedule
     pub w_cov: f64,
     pub w_col: f64,
@@ -69,6 +71,9 @@ pub struct Problem {
     pub n_ref: f64, // pairs a real set of the target's volume has
     pub w_dens: f64,
     pub dens_sd: f64, // spread of log(pairs per cell) over the reference models
+    pub p_ref: f64,   // parts a real set of the target's volume has
+    pub w_cnt: f64,
+    pub cnt_sd: f64,
     pub w_sil: f64,
     pub style: f64,
     pub w_glob2: f64,
@@ -103,6 +108,8 @@ pub struct Problem {
     pub opt_out: *const i32,   // n_opt: the network output of its token
     pub opt_lpart: *const f64, // n_opt: log P(part | token)
     pub opt_kind: *const i32,  // n_opt: its kind index, for the context
+    pub net_static: i32,       // the wider view's features per cell (proposals.static_context)
+    pub static_: *const f32,   // H*X*Z*net_static
     pub t_start_share: f64,
     pub t_final_share: f64,
     pub iters: i64,
@@ -184,7 +191,7 @@ struct Opt {
     cells: Vec<(i32, i32, i32, u64, f64)>,
     top: Vec<(i32, i32)>,
     bottom: Vec<(i32, i32)>,
-    sides: Vec<(i32, i32, i32, i32, i32)>,
+    sides: Vec<(i32, i32, i32, i32, i32, i32)>,
     halo: Vec<(i32, i32, i32)>,
     pix: [Vec<(i32, i32)>; 3],
     top_mask: Vec<bool>, // W*D
@@ -228,6 +235,9 @@ struct Data {
     n_ref: f64,
     w_dens: f64,
     dens_sd: f64,
+    p_ref: f64,
+    w_cnt: f64,
+    cnt_sd: f64,
     w_sil: f64,
     style: f64,
     w_glob2: f64,
@@ -235,6 +245,8 @@ struct Data {
     middle_w: Vec<f64>,
     tsil: [Vec<bool>; 3],
     scols: [i32; 3], // columns of each view (rows are implied)
+    n_conn: usize,
+    fits: Vec<u8>,
     net: Option<Net>,
     top_k: usize,
 }
@@ -270,7 +282,7 @@ impl Data {
         let bs = v(p.bot_start, n_opt + 1);
         let bxz = v(p.bot_xz, bs[n_opt] as usize * 2);
         let ss = v(p.side_start, n_opt + 1);
-        let sv = v(p.side_v, ss[n_opt] as usize * 5);
+        let sv = v(p.side_v, ss[n_opt] as usize * 6);
         let hs = v(p.halo_start, n_opt + 1);
         let hv = v(p.halo_yxz, hs[n_opt] as usize * 3);
         let pstart = [v(p.pixx_start, n_opt + 1), v(p.pixy_start, n_opt + 1), v(p.pixz_start, n_opt + 1)];
@@ -291,7 +303,7 @@ impl Data {
             let bottom: Vec<(i32, i32)> =
                 (bs[k] as usize..bs[k + 1] as usize).map(|c| (bxz[2 * c], bxz[2 * c + 1])).collect();
             let sides = (ss[k] as usize..ss[k + 1] as usize)
-                .map(|c| (sv[5 * c], sv[5 * c + 1], sv[5 * c + 2], sv[5 * c + 3], sv[5 * c + 4]))
+                .map(|c| (sv[6 * c], sv[6 * c + 1], sv[6 * c + 2], sv[6 * c + 3], sv[6 * c + 4], sv[6 * c + 5]))
                 .collect();
             let halo = (hs[k] as usize..hs[k + 1] as usize)
                 .map(|c| (hv[3 * c], hv[3 * c + 1], hv[3 * c + 2]))
@@ -360,6 +372,9 @@ impl Data {
             n_ref: p.n_ref,
             w_dens: p.w_dens,
             dens_sd: p.dens_sd,
+            p_ref: p.p_ref,
+            w_cnt: p.w_cnt,
+            cnt_sd: p.cnt_sd,
             w_sil: p.w_sil,
             style: p.style,
             w_glob2: p.w_glob2,
@@ -371,6 +386,8 @@ impl Data {
                 v(p.tsz, (p.h * SUB * p.x * SUB) as usize).iter().map(|&b| b != 0).collect(),
             ],
             scols: [p.z * SUB, p.z * SUB, p.x * SUB],
+            n_conn: p.n_conn as usize,
+            fits: v(p.fits, (p.n_conn * p.n_conn) as usize),
             net: if p.use_net != 0 { Some(Net::from(p, n_opt)) } else { None },
             top_k: p.top_k.max(1) as usize,
         }
@@ -422,16 +439,67 @@ impl Data {
         s as f64 / NSAMP
     }
 
-    /// Its side studs and holes facing a cell outside the object.
+    /// The cells a side connector faces: just outside its face, one or (on
+    /// a cell boundary) two along it (sampler.side_cells).
+    fn side_cells(o: &Opt, oy: i32, ox: i32, oz: i32, sd: &(i32, i32, i32, i32, i32, i32)) -> Vec<(i32, i32, i32)> {
+        let &(hx, hy, hz, dx, dz, _) = sd;
+        let y = oy + (hy / 2).min(o.h - 1);
+        let mut out = Vec::with_capacity(2);
+        if dx != 0 {
+            let x = ox + if dx > 0 { o.w } else { -1 };
+            for zz in if hz % 2 == 0 { [(hz - 1).div_euclid(2), hz / 2] } else { [hz / 2, hz / 2] } {
+                if zz >= 0 && zz < o.d && !out.contains(&(y, x, oz + zz)) {
+                    out.push((y, x, oz + zz));
+                }
+            }
+        } else {
+            let z = oz + if dz > 0 { o.d } else { -1 };
+            for xx in if hx % 2 == 0 { [(hx - 1).div_euclid(2), hx / 2] } else { [hx / 2, hx / 2] } {
+                if xx >= 0 && xx < o.w && !out.contains(&(y, ox + xx, z)) {
+                    out.push((y, ox + xx, z));
+                }
+            }
+        }
+        out
+    }
+
+    fn inside(&self, y: i32, x: i32, z: i32) -> bool {
+        y >= 0 && x >= 0 && z >= 0 && y < self.h && x < self.x && z < self.z
+    }
+
+    /// Its side connectors facing no cell of the object.
     fn bare_sides(&self, o: &Opt, oy: i32, ox: i32, oz: i32) -> i64 {
         let mut n = 0;
-        for &(y, x, z, dx, dz) in &o.sides {
-            let (x2, z2) = (ox + x + dx, oz + z + dz);
-            if x2 < 0 || z2 < 0 || x2 >= self.x || z2 >= self.z || self.fill[self.idx(oy + y, x2, z2)] < 0.5 {
+        for sd in &o.sides {
+            let cells = Data::side_cells(o, oy, ox, oz, sd);
+            if !cells.iter().any(|&(y, x, z)| self.inside(y, x, z) && self.fill[self.idx(y, x, z)] >= 0.5) {
                 n += 1;
             }
         }
         n
+    }
+
+    /// Whether a side connector of a meets one of b (sampler.sides_join).
+    fn sides_join(&self, a: &Opt, ay: i32, ax: i32, az: i32, b: &Opt, by: i32, bx: i32, bz: i32) -> bool {
+        for &(hx, hy, hz, dx, dz, k) in &a.sides {
+            if k < 0 {
+                continue;
+            }
+            let (px, py, pz) = (2 * ax + hx, 2 * ay + hy, 2 * az + hz);
+            for &(gx, gy, gz, ex, ez, kb) in &b.sides {
+                if kb >= 0
+                    && self.fits[k as usize * self.n_conn + kb as usize] != 0
+                    && ex == -dx
+                    && ez == -dz
+                    && 2 * bx + gx == px
+                    && 2 * bz + gz == pz
+                    && (2 * by + gy - py).abs() <= 1
+                {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// The share of its top with more to build above but no stud there.
@@ -497,6 +565,8 @@ struct Net {
     opt_out: Vec<i32>,
     opt_lpart: Vec<f64>,
     opt_kind: Vec<i32>,
+    n_static: usize,
+    static_: Vec<f32>,
 }
 
 impl Net {
@@ -517,6 +587,8 @@ impl Net {
             opt_out: v(p.opt_out, n_opt),
             opt_lpart: v(p.opt_lpart, n_opt),
             opt_kind: v(p.opt_kind, n_opt),
+            n_static: p.net_static as usize,
+            static_: v(p.static_, (p.h * p.x * p.z) as usize * p.net_static as usize),
         }
     }
 
@@ -551,7 +623,7 @@ impl Net {
 /// before it in fill order, the kinds built there, the object's kind.
 fn net_features(d: &Data, net: &Net, kindgrid: &[i32], y: i32, x: i32, z: i32) -> Vec<f32> {
     let nwin = ((WY.1 - WY.0) * (WX.1 - WX.0) * (WZ.1 - WZ.0)) as usize;
-    let mut f = vec![0.0f32; 2 * nwin + net.kinds + 1 + net.objects];
+    let mut f = vec![0.0f32; 2 * nwin + net.kinds + 1 + net.objects + net.n_static];
     let mut k = 0;
     for dy in WY.0..WY.1 {
         for dx in WX.0..WX.1 {
@@ -559,9 +631,7 @@ fn net_features(d: &Data, net: &Net, kindgrid: &[i32], y: i32, x: i32, z: i32) -
                 let (yy, xx, zz) = (y + dy, x + dx, z + dz);
                 if yy >= 0 && xx >= 0 && zz >= 0 && yy < d.h && xx < d.x && zz < d.z {
                     let c = d.idx(yy, xx, zz);
-                    if d.fill[c] >= 0.5 {
-                        f[k] = 1.0;
-                    }
+                    f[k] = d.fill[c] as f32;
                     let before = dy < 0 || (dy == 0 && (dx < 0 || (dx == 0 && dz < 0)));
                     let kd = kindgrid[c];
                     if before && kd >= 0 {
@@ -576,6 +646,9 @@ fn net_features(d: &Data, net: &Net, kindgrid: &[i32], y: i32, x: i32, z: i32) -
     if net.object >= 0 {
         f[2 * nwin + net.kinds + 1 + net.object as usize] = 1.0;
     }
+    let base = 2 * nwin + net.kinds + 1 + net.objects;
+    let c = d.idx(y, x, z) * net.n_static;
+    f[base..base + net.n_static].copy_from_slice(&net.static_[c..c + net.n_static]);
     f
 }
 
@@ -779,6 +852,25 @@ impl<'a> State<'a> {
                 }
             }
         }
+        self.side_held(&d.opts[it.opt], it.y, it.x, it.z, i as i32)
+    }
+
+    /// Held at a side: a pin, stud, bar or axle of it meets one of a part beside it.
+    fn side_held(&self, o: &Opt, oy: i32, ox: i32, oz: i32, me: i32) -> bool {
+        let d = self.d;
+        for sd in &o.sides {
+            for (y, x, z) in Data::side_cells(o, oy, ox, oz, sd) {
+                if d.inside(y, x, z) {
+                    let j = self.owner[d.idx(y, x, z)];
+                    if j >= 0 && j != me {
+                        let b = self.item(j as usize);
+                        if d.sides_join(o, oy, ox, oz, &d.opts[b.opt], b.y, b.x, b.z) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
         false
     }
 
@@ -911,12 +1003,16 @@ impl<'a> State<'a> {
             return 0.0;
         }
         let r = (n / d.n_ref).ln();
+        let np = self.live.len() as f64;
+        let rp = if np > 0.0 { (np / d.p_ref).ln() } else { 0.0 };
+        let cnt = if np > 0.0 { d.w_cnt * rp * rp / (2.0 * d.cnt_sd * d.cnt_sd) } else { 0.0 };
         d.style
             * d.n_ref
             * (d.w_loc * self.loc / n
                 + d.w_glob * self.kl1.value()
                 + d.w_glob2 * self.kl2.value()
-                + d.w_dens * r * r / (2.0 * d.dens_sd * d.dens_sd))
+                + d.w_dens * r * r / (2.0 * d.dens_sd * d.dens_sd)
+                + cnt)
     }
 
     fn energy(&self) -> f64 {
@@ -1049,7 +1145,7 @@ impl Filler {
                 }
             }
         }
-        false
+        st.side_held(o, oy, ox, oz, -1)
     }
 
     /// log P(part | the parts already above and below its box).
@@ -1425,5 +1521,5 @@ pub unsafe extern "C" fn e2l_sample(p: *const Problem) -> i32 {
 /// The layout version: Python checks it before calling.
 #[no_mangle]
 pub extern "C" fn e2l_abi() -> i32 {
-    7
+    10
 }

@@ -28,7 +28,7 @@ from typing import Optional
 
 import numpy as np
 
-ABI = 7
+ABI = 10
 INFO_LEN = 16
 
 _P = C.POINTER
@@ -52,9 +52,11 @@ class Problem(C.Structure):
         ("bot_start", _P(C.c_int32)), ("bot_xz", _P(C.c_int32)),
         ("side_start", _P(C.c_int32)), ("side_v", _P(C.c_int32)),
         ("halo_start", _P(C.c_int32)), ("halo_yxz", _P(C.c_int32)),
+        ("n_conn", C.c_int32), ("fits", _P(C.c_uint8)),
         ("w_cov", C.c_double), ("w_col", C.c_double), ("w_loc", C.c_double),
         ("w_glob", C.c_double), ("w_sup", C.c_double), ("w_side", C.c_double),
         ("n_ref", C.c_double), ("w_dens", C.c_double), ("dens_sd", C.c_double),
+        ("p_ref", C.c_double), ("w_cnt", C.c_double), ("cnt_sd", C.c_double),
         ("w_sil", C.c_double), ("style", C.c_double), ("w_glob2", C.c_double), ("logp2", _P(C.c_double)),
         ("middle_w", _P(C.c_double)),
         ("pixx_start", _P(C.c_int32)), ("pixx", _P(C.c_int32)),
@@ -67,6 +69,7 @@ class Problem(C.Structure):
         ("w1", _P(C.c_float)), ("b1", _P(C.c_float)), ("w2", _P(C.c_float)), ("b2", _P(C.c_float)),
         ("mu", _P(C.c_float)), ("sd", _P(C.c_float)),
         ("opt_out", _P(C.c_int32)), ("opt_lpart", _P(C.c_double)), ("opt_kind", _P(C.c_int32)),
+        ("net_static", C.c_int32), ("static", _P(C.c_float)),
         ("t_start_share", C.c_double), ("t_final_share", C.c_double),
         ("iters", C.c_int64), ("warmup", C.c_int64), ("seed", C.c_uint64),
         ("top_k", C.c_int32), ("log_every", C.c_int64),
@@ -190,6 +193,7 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
     if lib is None:
         raise RuntimeError("native sampler not built: python -m everything2lego.native build")
     from .colors import _palette_lab
+    from .sampler import CONNECTORS, FITS
     H, X, Z = target.want.shape
     keep = []                                            # arrays the struct points into
 
@@ -279,12 +283,14 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         bot_start=_ptr(arr(bs, np.int32), C.c_int32),
         bot_xz=_ptr(arr(np.array(bxz, np.int32).reshape(-1, 2), np.int32), C.c_int32),
         side_start=_ptr(arr(ss, np.int32), C.c_int32),
-        side_v=_ptr(arr(np.array(sv, np.int32).reshape(-1, 5), np.int32), C.c_int32),
+        side_v=_ptr(arr(np.array(sv, np.int32).reshape(-1, 6), np.int32), C.c_int32),
+        n_conn=len(CONNECTORS), fits=_ptr(arr(FITS, np.uint8), C.c_uint8),
         halo_start=_ptr(arr(hs, np.int32), C.c_int32),
         halo_yxz=_ptr(arr(np.concatenate(halo), np.int32), C.c_int32),
         w_cov=weights.cov, w_col=weights.col, w_loc=weights.loc, w_glob=weights.glob,
         w_sup=weights.sup, w_side=weights.side,
         n_ref=stats.density * float(target.fill.sum()), w_dens=weights.dens, dens_sd=stats.density_sd,
+        p_ref=stats.part_density * float(target.fill.sum()), w_cnt=weights.cnt, cnt_sd=stats.part_density_sd,
         w_sil=weights.sil, style=weights.style, w_glob2=weights.glob2,
         logp2=_ptr(arr(logp2, np.float64), C.c_double),
         middle_w=_ptr(arr([stats.middle_w(t) for t in toks], np.float64), C.c_double),
@@ -310,11 +316,13 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         okind = [nn.kind_index.get(kind_of(v.token), len(nn.kinds)) for v, _ in opts]
         p.use_net, p.net_in, p.net_h, p.net_c = 1, nn.W1.shape[0], nn.W1.shape[1], nn.W2.shape[1]
         p.net_kinds, p.net_objects, p.net_object = len(nn.kinds), len(nn.objects), obj
+        p.net_static = proposals.NSTATIC
         for name, a, ct, dt in (("w1", nn.W1, C.c_float, np.float32), ("b1", nn.b1, C.c_float, np.float32),
                                 ("w2", nn.W2, C.c_float, np.float32), ("b2", nn.b2, C.c_float, np.float32),
                                 ("mu", nn.mu, C.c_float, np.float32), ("sd", nn.sd, C.c_float, np.float32),
                                 ("opt_out", out_t, C.c_int32, np.int32), ("opt_lpart", lpart, C.c_double, np.float64),
-                                ("opt_kind", okind, C.c_int32, np.int32)):
+                                ("opt_kind", okind, C.c_int32, np.int32),
+                                ("static", proposals.static_context(target.fill), C.c_float, np.float32)):
             setattr(p, name, _ptr(arr(a, dt), ct))
     rc = lib.e2l_sample(C.byref(p))
     if rc == 1:

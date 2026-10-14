@@ -6,8 +6,10 @@ curves, rounds, wedges, ...) that LEGO makes now, with
              its own frame), and where in it: `bits`, 4x4x4 samples per
              cell as a 64-bit mask (shapes.pack); and where its box
              centre is from its origin
-  studs      the cells with a stud on top / a hole underneath, and the
-             studs and holes on its sides with the face they point out of
+  studs      the cells with a stud on top / a hole underneath, and its
+             side connectors (studs, holes, pins, axles, bars, clips): kind,
+             face, place along the face (half studs), height (half plates)
+  companion  a part written with it (a wheel's tyre), or none
   token      its statistics token (features.py: the official models'
              neighbourhood patterns are counted in these)
   colours    the LDraw colours it came in (2+ sets since 2010), with counts
@@ -72,11 +74,12 @@ def main() -> None:
                     "occ": json.loads(r.occ), "bits": json.loads(r.bits), "studs_top": json.loads(r.studs_top),
                     "holes_bottom": json.loads(r.holes_bottom), "sides": json.loads(r.sides),
                     "n_sets": int(r.n_sets_recent), "colours": colours[r.part_num],
-                    "kinds": kinds.get(r.part_num, {})})
+                    "kinds": kinds.get(r.part_num, {}),
+                    "companion": r.companion if isinstance(getattr(r, "companion", None), str) else None})
     best = {}
     for p in sorted(out, key=lambda p: -p["n_sets"]):
         key = hashlib.md5(json.dumps([p["token"], p["occ"], p["studs_top"], p["holes_bottom"],
-                                      p["sides"]]).encode()).hexdigest()
+                                      p["sides"], p["companion"]]).encode()).hexdigest()
         best.setdefault(key, p)
     vocab = sorted(best.values(), key=lambda p: (p["category"], p["token"], -p["n_sets"]))
     OUT.write_text(json.dumps({"source": "tools/partsdb/vocabulary.py", "min_sets": MIN_SETS,
