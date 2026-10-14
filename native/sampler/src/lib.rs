@@ -86,6 +86,23 @@ pub struct Problem {
     pub tsx: *const u8,
     pub tsy: *const u8,
     pub tsz: *const u8,
+    // the proposal network (everything2lego/proposals.py); use_net 0: the pair statistics propose
+    pub use_net: i32,
+    pub net_in: i32,
+    pub net_h: i32,
+    pub net_c: i32,
+    pub net_kinds: i32,
+    pub net_objects: i32,
+    pub net_object: i32,
+    pub w1: *const f32, // net_in*net_h
+    pub b1: *const f32,
+    pub w2: *const f32, // net_h*net_c
+    pub b2: *const f32,
+    pub mu: *const f32,
+    pub sd: *const f32,
+    pub opt_out: *const i32,   // n_opt: the network output of its token
+    pub opt_lpart: *const f64, // n_opt: log P(part | token)
+    pub opt_kind: *const i32,  // n_opt: its kind index, for the context
     pub t_start_share: f64,
     pub t_final_share: f64,
     pub iters: i64,
@@ -218,6 +235,7 @@ struct Data {
     middle_w: Vec<f64>,
     tsil: [Vec<bool>; 3],
     scols: [i32; 3], // columns of each view (rows are implied)
+    net: Option<Net>,
     top_k: usize,
 }
 
@@ -353,6 +371,7 @@ impl Data {
                 v(p.tsz, (p.h * SUB * p.x * SUB) as usize).iter().map(|&b| b != 0).collect(),
             ],
             scols: [p.z * SUB, p.z * SUB, p.x * SUB],
+            net: if p.use_net != 0 { Some(Net::from(p, n_opt)) } else { None },
             top_k: p.top_k.max(1) as usize,
         }
     }
@@ -455,6 +474,112 @@ impl Data {
 }
 
 // ---------------------------------------------------------------------------
+// the proposal network (everything2lego/proposals.py: the same window,
+// features and layers)
+// ---------------------------------------------------------------------------
+
+const WY: (i32, i32) = (-1, 4);
+const WX: (i32, i32) = (-2, 4);
+const WZ: (i32, i32) = (-2, 4);
+
+struct Net {
+    n_h: usize,
+    n_c: usize,
+    kinds: usize,
+    objects: usize,
+    object: i32,
+    w1: Vec<f32>,
+    b1: Vec<f32>,
+    w2: Vec<f32>,
+    b2: Vec<f32>,
+    mu: Vec<f32>,
+    sd: Vec<f32>,
+    opt_out: Vec<i32>,
+    opt_lpart: Vec<f64>,
+    opt_kind: Vec<i32>,
+}
+
+impl Net {
+    unsafe fn from(p: &Problem, n_opt: usize) -> Net {
+        let (i, h, c) = (p.net_in as usize, p.net_h as usize, p.net_c as usize);
+        Net {
+            n_h: h,
+            n_c: c,
+            kinds: p.net_kinds as usize,
+            objects: p.net_objects as usize,
+            object: p.net_object,
+            w1: v(p.w1, i * h),
+            b1: v(p.b1, h),
+            w2: v(p.w2, h * c),
+            b2: v(p.b2, c),
+            mu: v(p.mu, i),
+            sd: v(p.sd, i),
+            opt_out: v(p.opt_out, n_opt),
+            opt_lpart: v(p.opt_lpart, n_opt),
+            opt_kind: v(p.opt_kind, n_opt),
+        }
+    }
+
+    /// log P(output | x), x the raw features.
+    fn logprobs(&self, x: &[f32]) -> Vec<f64> {
+        let mut h = self.b1.clone();
+        for (i, &xi) in x.iter().enumerate() {
+            let xn = (xi - self.mu[i]) / self.sd[i];
+            if xn != 0.0 {
+                let row = &self.w1[i * self.n_h..(i + 1) * self.n_h];
+                for (hj, w) in h.iter_mut().zip(row) {
+                    *hj += xn * w;
+                }
+            }
+        }
+        let mut z = self.b2.clone();
+        for (j, &hj) in h.iter().enumerate() {
+            if hj > 0.0 {
+                let row = &self.w2[j * self.n_c..(j + 1) * self.n_c];
+                for (zk, w) in z.iter_mut().zip(row) {
+                    *zk += hj * w;
+                }
+            }
+        }
+        let m = z.iter().cloned().fold(f32::NEG_INFINITY, f32::max) as f64;
+        let lse = m + z.iter().map(|&v| (v as f64 - m).exp()).sum::<f64>().ln();
+        z.iter().map(|&v| v as f64 - lse).collect()
+    }
+}
+
+/// The cell's context: the target's cells in the window, the cells built
+/// before it in fill order, the kinds built there, the object's kind.
+fn net_features(d: &Data, net: &Net, kindgrid: &[i32], y: i32, x: i32, z: i32) -> Vec<f32> {
+    let nwin = ((WY.1 - WY.0) * (WX.1 - WX.0) * (WZ.1 - WZ.0)) as usize;
+    let mut f = vec![0.0f32; 2 * nwin + net.kinds + 1 + net.objects];
+    let mut k = 0;
+    for dy in WY.0..WY.1 {
+        for dx in WX.0..WX.1 {
+            for dz in WZ.0..WZ.1 {
+                let (yy, xx, zz) = (y + dy, x + dx, z + dz);
+                if yy >= 0 && xx >= 0 && zz >= 0 && yy < d.h && xx < d.x && zz < d.z {
+                    let c = d.idx(yy, xx, zz);
+                    if d.fill[c] >= 0.5 {
+                        f[k] = 1.0;
+                    }
+                    let before = dy < 0 || (dy == 0 && (dx < 0 || (dx == 0 && dz < 0)));
+                    let kd = kindgrid[c];
+                    if before && kd >= 0 {
+                        f[nwin + k] = 1.0;
+                        f[2 * nwin + kd as usize] += 1.0 / nwin as f32;
+                    }
+                }
+                k += 1;
+            }
+        }
+    }
+    if net.object >= 0 {
+        f[2 * nwin + net.kinds + 1 + net.object as usize] = 1.0;
+    }
+    f
+}
+
+// ---------------------------------------------------------------------------
 // state
 // ---------------------------------------------------------------------------
 
@@ -519,6 +644,7 @@ struct State<'a> {
     adj: Vec<Vec<(usize, u8)>>,
     path_queue: Vec<(usize, f64)>,
     csil: [Vec<i32>; 3], // parts covering each outline pixel
+    kindgrid: Vec<i32>,  // the part kind built in each cell (-1 empty), the network's context
     sil: i64,            // outline pixels wrong
     loc: f64,
     col: f64,
@@ -558,6 +684,7 @@ impl<'a> State<'a> {
             adj: Vec::new(),
             path_queue: Vec::new(),
             csil: [0, 1, 2].map(|a| vec![0; d.tsil[a].len()]),
+            kindgrid: vec![-1; n],
             sil: d.tsil.iter().map(|t| t.iter().filter(|&&b| b).count() as i64).sum(),
             loc: 0.0,
             col: 0.0,
@@ -834,6 +961,9 @@ impl<'a> State<'a> {
             let c = d.idx(it.y + y, it.x + x, it.z + z);
             self.owner[c] = i as i32;
             self.cur[c] = bits;
+            if let Some(net) = &d.net {
+                self.kindgrid[c] = net.opt_kind[it.opt];
+            }
         }
         self.bare += d.bare_sides(o, it.y, it.x, it.z);
         self.col += d.colour_cost(o, it.y, it.x, it.z, it.colour);
@@ -866,6 +996,7 @@ impl<'a> State<'a> {
             let c = d.idx(it.y + y, it.x + x, it.z + z);
             self.owner[c] = -1;
             self.cur[c] = 0;
+            self.kindgrid[c] = -1;
         }
         self.bare -= d.bare_sides(o, it.y, it.x, it.z);
         self.fid -= d.fid_delta(o, it.y, it.x, it.z);
@@ -946,7 +1077,8 @@ impl Filler {
     }
 
     /// Candidates whose first cell can go at (y, x, z): (pre-score, option, origin, residual).
-    fn candidates(st: &State, y: i32, x: i32, z: i32, out: &mut Vec<(f64, usize, i32, i32, i32, f64)>) {
+    fn candidates(st: &State, y: i32, x: i32, z: i32, prior: Option<&[f64]>,
+                  out: &mut Vec<(f64, usize, i32, i32, i32, f64)>) {
         out.clear();
         let d = st.d;
         'opt: for (k, o) in d.opts.iter().enumerate() {
@@ -968,7 +1100,8 @@ impl Filler {
             }
             let resid = wrong as f64 / NSAMP;
             // style and content weighed as in the energy
-            out.push((d.style * o.logprior - d.w_cov * resid, k, oy, ox, oz, resid));
+            let lp = prior.map_or(o.logprior, |p| p[k]);
+            out.push((d.style * lp - d.w_cov * resid, k, oy, ox, oz, resid));
         }
         let k = d.top_k;
         if out.len() > k {
@@ -988,7 +1121,12 @@ impl Filler {
             if st.owner[d.idx(y, x, z)] >= 0 {
                 continue;
             }
-            Filler::candidates(st, y, x, z, &mut cands);
+            // with the network: log P(part, yaw | the cell's context), once per cell
+            let prior: Option<Vec<f64>> = d.net.as_ref().map(|net| {
+                let lp = net.logprobs(&net_features(d, net, &st.kindgrid, y, x, z));
+                (0..d.opts.len()).map(|k| lp[net.opt_out[k] as usize] + net.opt_lpart[k]).collect()
+            });
+            Filler::candidates(st, y, x, z, prior.as_deref(), &mut cands);
             if cands.is_empty() {
                 continue;
             }
@@ -996,7 +1134,11 @@ impl Filler {
             for &(_, k, oy, ox, oz, resid) in &cands {
                 let o = &d.opts[k];
                 let colour = d.colour_for(o, oy, ox, oz, &mut self.colour_counts);
-                let stat = d.style * Filler::stat_score(st, k, oy, ox, oz);
+                let stat = d.style
+                    * match &prior {
+                        Some(p) => p[k],
+                        None => Filler::stat_score(st, k, oy, ox, oz),
+                    };
                 let mut fit = -d.w_cov * resid
                     - d.w_sil * st.sil_delta(o, oy, ox, oz) as f64 / (SUB * SUB) as f64
                     - d.w_col * d.colour_cost(o, oy, ox, oz, colour);
@@ -1283,5 +1425,5 @@ pub unsafe extern "C" fn e2l_sample(p: *const Problem) -> i32 {
 /// The layout version: Python checks it before calling.
 #[no_mangle]
 pub extern "C" fn e2l_abi() -> i32 {
-    6
+    7
 }

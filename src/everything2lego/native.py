@@ -28,7 +28,7 @@ from typing import Optional
 
 import numpy as np
 
-ABI = 6
+ABI = 7
 INFO_LEN = 16
 
 _P = C.POINTER
@@ -61,6 +61,12 @@ class Problem(C.Structure):
         ("pixy_start", _P(C.c_int32)), ("pixy", _P(C.c_int32)),
         ("pixz_start", _P(C.c_int32)), ("pixz", _P(C.c_int32)),
         ("tsx", _P(C.c_uint8)), ("tsy", _P(C.c_uint8)), ("tsz", _P(C.c_uint8)),
+        # the proposal network (proposals.py); use_net 0: the pair statistics propose
+        ("use_net", C.c_int32), ("net_in", C.c_int32), ("net_h", C.c_int32), ("net_c", C.c_int32),
+        ("net_kinds", C.c_int32), ("net_objects", C.c_int32), ("net_object", C.c_int32),
+        ("w1", _P(C.c_float)), ("b1", _P(C.c_float)), ("w2", _P(C.c_float)), ("b2", _P(C.c_float)),
+        ("mu", _P(C.c_float)), ("sd", _P(C.c_float)),
+        ("opt_out", _P(C.c_int32)), ("opt_lpart", _P(C.c_double)), ("opt_kind", _P(C.c_int32)),
         ("t_start_share", C.c_double), ("t_final_share", C.c_double),
         ("iters", C.c_int64), ("warmup", C.c_int64), ("seed", C.c_uint64),
         ("top_k", C.c_int32), ("log_every", C.c_int64),
@@ -177,7 +183,8 @@ def snap_table(vocab, n_col: int) -> np.ndarray:
 
 
 def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: int,
-        t_start_share: float, t_final_share: float, top_k: int, log_every: int, opts_logprior):
+        t_start_share: float, t_final_share: float, top_k: int, log_every: int, opts_logprior,
+        net: bool = True):
     """Run the native sampler.  Returns ([(vpart, orient, colour, y, x, z)], info, history)."""
     lib = library()
     if lib is None:
@@ -294,6 +301,21 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         info=_ptr(info, C.c_double),
         hist_cap=hist_cap, hist_n=_ptr(hist_n, C.c_int32), hist=_ptr(hist, C.c_double),
     )
+    from . import proposals
+    from .sampler import net_tables
+    from .style import kind_of
+    nn = proposals.load() if net else None
+    if nn is not None:
+        out_t, lpart, obj = net_tables(nn, vocab, kind)
+        okind = [nn.kind_index.get(kind_of(v.token), len(nn.kinds)) for v, _ in opts]
+        p.use_net, p.net_in, p.net_h, p.net_c = 1, nn.W1.shape[0], nn.W1.shape[1], nn.W2.shape[1]
+        p.net_kinds, p.net_objects, p.net_object = len(nn.kinds), len(nn.objects), obj
+        for name, a, ct, dt in (("w1", nn.W1, C.c_float, np.float32), ("b1", nn.b1, C.c_float, np.float32),
+                                ("w2", nn.W2, C.c_float, np.float32), ("b2", nn.b2, C.c_float, np.float32),
+                                ("mu", nn.mu, C.c_float, np.float32), ("sd", nn.sd, C.c_float, np.float32),
+                                ("opt_out", out_t, C.c_int32, np.int32), ("opt_lpart", lpart, C.c_double, np.float64),
+                                ("opt_kind", okind, C.c_int32, np.int32)):
+            setattr(p, name, _ptr(arr(a, dt), ct))
     rc = lib.e2l_sample(C.byref(p))
     if rc == 1:
         raise RuntimeError("native sampler panicked")

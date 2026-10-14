@@ -71,7 +71,7 @@ def test_sample_fits_a_ramp_with_slopes(engine):
     want = bits != 0
     target = sampler.Target(want, np.full(want.shape, 4), want.copy(), bits=bits)
     placements, info = sampler.sample(target, _models(), iters=1500, seed=1, k_models=1, warmup=50,
-                                      n_special=20, engine=engine)
+                                      n_special=20, engine=engine, net=False)
     assert info["unsupported"] == 0 and info["fidelity"] < 1.0
     assert any(p.part.shape.startswith("slope") and p.rotation_deg == 90 for p in placements)
 

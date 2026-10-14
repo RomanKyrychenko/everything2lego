@@ -49,9 +49,14 @@ content.  Which parts may be used at all, and how readily, comes from how
 often sets of the target's kind use them (the vocabulary's per-kind share
 and lift) — so a house is not built of wheel arches.
 
+Learned from the official models (tools/learn): the style weights, by
+moment matching (Weights.learned: builds of official models' shapes get
+the official models' statistics), and the proposals — a network that says
+which part comes next from the cell's context (proposals.py).
+
 A move re-tiles a small window: the parts meeting it are removed and its
-cells re-filled part by part, each drawn from P(part, yaw | the parts
-around it, the fit), or joins two parts into the one real part covering
+cells re-filled part by part, each drawn from P(part, yaw | the cell's
+context, the fit), or joins two parts into the one real part covering
 both.  Metropolis acceptance at a temperature that anneals to a small
 `t_final` > 0 — a sample, not the single likeliest build, which would be
 monotonous.
@@ -82,6 +87,7 @@ from .bricks import Part
 from .colors import _palette_lab, nearest_where, palette
 from .io_ldraw import _ROT as _LDRAW_ROT
 from .pack import Placement
+from . import proposals
 from .style import Reference, RunningKL, kind_of, middle_weight, token_degree
 
 # (x' from x, x' from z, z' from x, z' from z): io_ldraw's yaw matrices on the x-z plane
@@ -404,12 +410,22 @@ class Weights:
     side: float = 6.0         # a side stud or hole facing out of the object: SNOT with nothing on it
     dens: float = 1.0         # pairs per cell as real sets have them (not too few big, too many small parts)
 
+    @classmethod
+    def learned(cls) -> "Weights":
+        """The style weights fitted to the official models
+        (data/energy_weights.json; tools/learn/fit_energy.py), the rest as above."""
+        f = files("everything2lego.data").joinpath("energy_weights.json")
+        return cls(**json.loads(f.read_text())["weights"]) if f.is_file() else cls()
+
 
 class State:
     def __init__(self, target: Target, stats: Stats, weights: Weights):
         self.t, self.s, self.w = target, stats, weights
         self.owner = np.full(target.want.shape, -1, dtype=np.int32)
         self.cur = np.zeros(target.want.shape, dtype=np.uint64)   # each cell's shape now
+        # the part kind built in each cell (proposals.Net.kinds; -1 empty), the network's context
+        self.net = proposals.load()
+        self.kindgrid = np.full(target.want.shape, -1, dtype=np.int64)
         self.items: dict[int, Item] = {}
         self.next_id = 0
         self.kl = RunningKL(stats.ref)
@@ -585,6 +601,8 @@ class State:
         self.fid += self.fid_delta(ys, xs, zs, it.ori.bits)
         self.owner[ys, xs, zs] = i
         self.cur[ys, xs, zs] = it.ori.bits
+        if self.net is not None:
+            self.kindgrid[ys, xs, zs] = self.net.kind_index.get(kind_of(it.vp.token), len(self.net.kinds))
         self.bare += self.bare_sides(it.ori, it.y, it.x, it.z)
         self.col += self.colour_cost(ys, xs, zs, it.ori.o, it.colour)
         self._sil(it.ori, it.y, it.x, it.z, +1)
@@ -609,6 +627,7 @@ class State:
         ys, xs, zs = it.cells()
         self.owner[ys, xs, zs] = -1
         self.cur[ys, xs, zs] = 0
+        self.kindgrid[ys, xs, zs] = -1
         self.bare -= self.bare_sides(it.ori, it.y, it.x, it.z)
         self.fid -= self.fid_delta(ys, xs, zs, it.ori.bits)
         self.col -= self.colour_cost(ys, xs, zs, it.ori.o, it.colour)
@@ -650,6 +669,20 @@ def option_logprior(vocab: tuple[VPart, ...], stats: Stats, kind: Optional[str])
         for v in vocab for o in v.orients])
 
 
+def net_tables(net: "proposals.Net", vocab: tuple[VPart, ...], kind: Optional[str]):
+    """Per (part, yaw), in vocabulary order: the network's output for its
+    token, and log P(part | token) — how widely sets of this kind (or all
+    sets) use it among the parts of its token; and the object's index."""
+    out, use = [], []
+    for v in vocab:
+        for _ in v.orients:
+            out.append(net.token_index.get(v.token, net.other()))
+            use.append((v.kinds.get(kind, {}).get("sets", 0) if kind else v.n_sets) + 1.0)
+    out, use = np.array(out), np.array(use)
+    tot = np.bincount(out, weights=use, minlength=net.other() + 1)
+    return out, np.log(use / tot[out]), (net.object_index.get(kind, -1) if kind else -1)
+
+
 class Filler:
     """Fills empty cells part by part, each part and yaw drawn from
     P(part | the parts around it) times its fit to the target, colour
@@ -657,10 +690,18 @@ class Filler:
     once against a window of the grid."""
 
     def __init__(self, state: State, rnd: random.Random, vocab: tuple[VPart, ...], kind: Optional[str],
-                 top_k: int = 12):
+                 top_k: int = 12, net: bool = True):
         self.st, self.rnd, self.vocab, self.top_k = state, rnd, vocab, top_k
         self.opts: list[tuple[VPart, Orient]] = [(v, o) for v in vocab for o in v.orients]
         self.logprior = option_logprior(vocab, state.s, kind)
+        self.net = state.net if net else None
+        if self.net is not None:
+            # P(part, yaw | cell) = P(token | context) * P(part | token): the network
+            # proposes the token, the part within it goes by how widely sets of this
+            # kind (or all sets) use it
+            self.opt_out, self.opt_lpart, self.obj = net_tables(self.net, vocab, kind)
+            self.target01 = state.t.fill >= 0.5
+        self.prior = self.logprior
         # the window every option is tested in: origin (y, x - FX, z - FZ) for a cell (y, x, z)
         self.FX = max(o.first[1] for _, o in self.opts)
         self.FZ = max(o.first[2] for _, o in self.opts)
@@ -710,7 +751,7 @@ class Filler:
         # likeliest few by prior and fit
         # style and content weighed as in the energy, so a typical part that
         # fits a little worse is proposed when style counts for more
-        pre = np.where(ok, self.st.w.style * self.logprior - self.st.w.cov * resid, -np.inf)
+        pre = np.where(ok, self.st.w.style * self.prior - self.st.w.cov * resid, -np.inf)
         if ok.sum() > self.top_k:
             ok &= pre >= np.partition(pre, -self.top_k)[-self.top_k]
         out = []
@@ -725,8 +766,17 @@ class Filler:
         c = int(np.bincount(vals).argmax()) if len(vals) else 0
         return nearest_where(c, lambda code: code in vp.colours)
 
+    def cell_prior(self, y: int, x: int, z: int) -> np.ndarray:
+        """Per option, log P(it | the cell's context) from the network."""
+        net = self.net
+        ctx = proposals.features(self.target01, self.st.kindgrid, y, x, z, self.obj, len(net.kinds), len(net.objects))
+        return net.logprobs(ctx[None])[0][self.opt_out] + self.opt_lpart
+
     def stat_score(self, k: int, oy: int, ox: int, oz: int) -> float:
-        """log P(part | the parts already above and below its box)."""
+        """log P(part | the parts already above and below its box) — or, with
+        the network, log P(part | the cell's context)."""
+        if self.net is not None:
+            return float(self.prior[k])
         st = self.st
         vp, o = self.opts[k]
         h, W, D = o.size
@@ -775,6 +825,8 @@ class Filler:
         for (y, x, z) in sorted(cells):                   # bottom-up: parts land on what's there
             if st.owner[y, x, z] >= 0:
                 continue
+            if self.net is not None:
+                self.prior = self.cell_prior(y, x, z)
             cands = self.candidates(y, x, z)
             if not cands:
                 continue
@@ -884,14 +936,23 @@ def merge(state: State, filler: Filler, rnd: random.Random):
 # driver
 # ---------------------------------------------------------------------------
 
+def _dens(pairs: float, n_ref: float, sd: float) -> float:
+    """The density term's statistic: log(pairs / N_ref)^2 / (2 sd^2)."""
+    return math.log(pairs / n_ref) ** 2 / (2 * sd ** 2) if pairs > 0 else 0.0
+
+
 def sample(target: Target, models: list[dict], *, iters: int = 20000, seed: int = 0,
            weights: Optional[Weights] = None, t_start_share: float = 0.05, t_final_share: float = 0.002,
            k_models: int = 50, n_special: int = 160, log_every: int = 2000,
-           warmup: int = 200, top_k: int = 12, engine: str = "auto") -> tuple[list[Placement], dict]:
+           warmup: int = 200, top_k: int = 12, engine: str = "auto",
+           net: bool = True) -> tuple[list[Placement], dict]:
     """The temperature comes from the data: the median energy change of
     `warmup` proposals (measured, then undone) is the scale; it anneals
     from `t_start_share` to `t_final_share` of it.  Monotony is the KL
     term's to prevent, so the walk may cool close to zero.
+
+    `net`: propose parts with the learned network (proposals.py) when there
+    is one, else by the pair statistics.
 
     `engine`: "native" runs the walk in Rust (native/sampler, everything2lego.native),
     "python" here; "auto" the native one when it is built."""
@@ -899,7 +960,7 @@ def sample(target: Target, models: list[dict], *, iters: int = 20000, seed: int 
     refs = nearest_models(models, target.shape_descriptor(), k_models, target.kind)
     stats = Stats(refs)
     stats.degree = token_degree(models)
-    weights = weights or Weights()
+    weights = weights or Weights.learned()
     vocab = select_vocabulary(target.kind, n_special)
     if engine == "auto" and not native.available():
         warnings.warn(f"native sampler: {native.why_not()} (python -m everything2lego.native build); "
@@ -908,16 +969,17 @@ def sample(target: Target, models: list[dict], *, iters: int = 20000, seed: int 
         got, info, history = native.run(
             target, stats, vocab, target.kind, weights, iters=iters, warmup=warmup, seed=seed,
             t_start_share=t_start_share, t_final_share=t_final_share, top_k=top_k, log_every=log_every,
-            opts_logprior=option_logprior(vocab, stats, target.kind))
+            opts_logprior=option_logprior(vocab, stats, target.kind), net=net)
         placements = [Placement(v.part, c, x, z, y, o.size[1], o.size[2], o.rot) for v, o, c, y, x, z in got]
         used = Counter(v.category for v, *_ in got)
-        info.update({"history": history, "vocabulary": len(vocab), "categories": dict(used),
-                     "n_ref": stats.density * float(target.fill.sum()),
+        n_ref = stats.density * float(target.fill.sum())
+        info.update({"history": history, "vocabulary": len(vocab), "categories": dict(used), "n_ref": n_ref,
+                     "dens": _dens(info["pairs"], n_ref, stats.density_sd),
                      "references": [r["model"] for r in refs[:10]], "engine": "native"})
         return placements, info
     rnd = random.Random(seed)
     st = State(target, stats, weights)
-    filler = Filler(st, rnd, vocab, target.kind, top_k)
+    filler = Filler(st, rnd, vocab, target.kind, top_k, net)
     ys, xs, zs = np.nonzero(target.want)
     filler.fill(list(zip(ys.tolist(), xs.tolist(), zs.tolist())))
     e = st.energy()
@@ -952,5 +1014,6 @@ def sample(target: Target, models: list[dict], *, iters: int = 20000, seed: int 
             "content_loss": st.content_loss(), "style_loss": st.style_loss(),
             "bad_cells": st.bad_cells(), "unsupported": len(st.unsup), "bare_side_connectors": st.bare, "history": history,
             "vocabulary": len(vocab), "categories": dict(used),
-            "references": [r["model"] for r in refs[:10]], "engine": "python", "n_ref": st.n_ref}
+            "references": [r["model"] for r in refs[:10]], "engine": "python", "n_ref": st.n_ref,
+            "pairs": st.kl.n, "dens": _dens(st.kl.n, st.n_ref, stats.density_sd)}
     return st.placements(), info
