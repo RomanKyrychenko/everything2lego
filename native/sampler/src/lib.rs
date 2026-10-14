@@ -66,6 +66,9 @@ pub struct Problem {
     pub w_glob: f64,
     pub w_sup: f64,
     pub w_side: f64,
+    pub n_ref: f64, // pairs a real set of the target's volume has
+    pub w_dens: f64,
+    pub dens_sd: f64, // spread of log(pairs per cell) over the reference models
     pub t_start_share: f64,
     pub t_final_share: f64,
     pub iters: i64,
@@ -186,6 +189,9 @@ struct Data {
     w_glob: f64,
     w_sup: f64,
     w_side: f64,
+    n_ref: f64,
+    w_dens: f64,
+    dens_sd: f64,
     top_k: usize,
 }
 
@@ -296,6 +302,9 @@ impl Data {
             w_glob: p.w_glob,
             w_sup: p.w_sup,
             w_side: p.w_side,
+            n_ref: p.n_ref,
+            w_dens: p.w_dens,
+            dens_sd: p.dens_sd,
             top_k: p.top_k.max(1) as usize,
         }
     }
@@ -572,20 +581,27 @@ impl<'a> State<'a> {
         }
     }
 
-    fn kl_term(&self) -> f64 {
-        // pairs * KL = sum c log c - sum c log p - n log n
+    fn kl(&self) -> f64 {
+        // sum c log c / n - sum c log p / n - log n
         if self.n_pairs <= 0.0 {
             return 0.0;
         }
-        self.s_clogc - self.s_clogp - self.n_pairs * self.n_pairs.ln()
+        (self.s_clogc - self.s_clogp) / self.n_pairs - self.n_pairs.ln()
     }
 
     fn energy(&self) -> f64 {
+        // the pairs' typicality weighed by the pairs a real set this size
+        // has, not by the build's own count (sampler.py's docstring)
         let d = self.d;
+        let typical = if self.n_pairs > 0.0 {
+            let r = (self.n_pairs / d.n_ref).ln();
+            d.w_loc * self.loc / self.n_pairs + d.w_glob * self.kl() + d.w_dens * r * r / (2.0 * d.dens_sd * d.dens_sd)
+        } else {
+            0.0
+        };
         d.w_cov * self.fid
             + d.w_col * self.col
-            + d.w_loc * self.loc
-            + d.w_glob * self.kl_term()
+            + d.n_ref * typical
             + d.w_sup * self.n_unsup as f64
             + d.w_side * self.bare as f64
     }
@@ -1007,7 +1023,7 @@ unsafe fn run(p: &Problem) -> i32 {
         *p.out_z.add(k) = it.z;
     }
     *p.out_n = n as i32;
-    let kl = if st.n_pairs > 0.0 { st.kl_term() / st.n_pairs } else { 0.0 };
+    let kl = st.kl();
     let info = [
         e,
         accepted as f64 / iters.max(1) as f64,
@@ -1057,5 +1073,5 @@ pub unsafe extern "C" fn e2l_sample(p: *const Problem) -> i32 {
 /// The layout version: Python checks it before calling.
 #[no_mangle]
 pub extern "C" fn e2l_abi() -> i32 {
-    2
+    4
 }

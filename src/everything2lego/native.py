@@ -28,7 +28,7 @@ from typing import Optional
 
 import numpy as np
 
-ABI = 2
+ABI = 4
 INFO_LEN = 12
 
 _P = C.POINTER
@@ -54,6 +54,7 @@ class Problem(C.Structure):
         ("halo_start", _P(C.c_int32)), ("halo_yxz", _P(C.c_int32)),
         ("w_cov", C.c_double), ("w_col", C.c_double), ("w_loc", C.c_double),
         ("w_glob", C.c_double), ("w_sup", C.c_double), ("w_side", C.c_double),
+        ("n_ref", C.c_double), ("w_dens", C.c_double), ("dens_sd", C.c_double),
         ("t_start_share", C.c_double), ("t_final_share", C.c_double),
         ("iters", C.c_int64), ("warmup", C.c_int64), ("seed", C.c_uint64),
         ("top_k", C.c_int32), ("log_every", C.c_int64),
@@ -245,6 +246,7 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         halo_yxz=_ptr(arr(np.concatenate(halo), np.int32), C.c_int32),
         w_cov=weights.cov, w_col=weights.col, w_loc=weights.loc, w_glob=weights.glob,
         w_sup=weights.sup, w_side=weights.side,
+        n_ref=stats.density * float(target.fill.sum()), w_dens=weights.dens, dens_sd=stats.density_sd,
         t_start_share=t_start_share, t_final_share=t_final_share,
         iters=iters, warmup=warmup, seed=seed, top_k=top_k, log_every=log_every,
         out_cap=cap, out_n=_ptr(out_n, C.c_int32),

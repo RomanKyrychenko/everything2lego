@@ -11,12 +11,22 @@ its box is; data/vocabulary.json).  Its energy is
 
     E = w_cov  * sum over cells |part fill - target fill|
       + w_col  * colour error of the cells that show (Lab, per cell)
-      + w_loc  * sum over touching pairs of -log P(B, where | A)
-      + w_glob * pairs * KL(pattern mix || official models of its kind and shape)
+      + N_ref * (w_loc  * mean over touching pairs of -log P(B, where | A)
+               + w_glob * KL(pattern mix || official models of its kind and shape)
+               + w_dens * (log(pairs / N_ref))^2 / (2 sd^2))
       + w_sup  * parts no stud holds (a stud of the part below in a hole
                  of this one, or of this one in a hole of the part above)
       + w_side * side studs and holes facing out of the object (a set
                  puts something on every side stud; here nothing can be)
+
+N_ref is the number of (directed) touching pairs a real set of the
+target's volume has — the reference models' pairs per occupied cell times
+the cells the target fills — not the build's own count: summed over its own
+pairs, a build of fewer, bigger parts would score better for having fewer
+pairs, however untypical each.  Weighed so, only how typical the pairs and
+their mix are counts, and part sizes answer to the KL (tokens carry sizes)
+and to the last term: how many pairs a cell has — few big parts or many
+small ones — likely as the reference models' spread of it (log-normal).
 
 — fidelity (a slope is the part for a sloped surface because it fills the
 cells such a surface cuts where the surface does; a round brick is not a
@@ -261,6 +271,7 @@ class Stats:
 
     def __init__(self, models: list[dict], lam=(0.8, 0.17, 0.03)):
         self.ref = Reference.from_models(models)
+        self.density, self.density_sd = pair_density(models)
         self.lam = lam
         self.pair = self.ref.counts                       # (a, b, d) -> weight
         self.a_tot: Counter = Counter()
@@ -288,6 +299,22 @@ class Stats:
             kd = self.kpair.get(kk, 0) / ka / (self.spread.get(kk, 0) + 1) if ka else 0.0
             v = self._cache[key] = -math.log(l1 * ex + l2 * kd + l3 / self.vocab)
         return v
+
+
+def pair_density(models: list[dict], default: float = 1.0, default_sd: float = 0.5) -> tuple[float, float]:
+    """Directed touching pairs per occupied cell (stud x stud x plate) in
+    these models (features rows: patterns, shape): the median, and the
+    spread of its log over them."""
+    d = []
+    for m in models:
+        w, dd, h, fill = float(np.exp(m["shape"][0])), float(np.exp(m["shape"][1])), float(np.exp(m["shape"][2])), float(m["shape"][3])
+        vol = fill * w * dd * h * 2.5
+        if vol > 0 and m["patterns"]:
+            d.append(sum(m["patterns"].values()) / vol)
+    if not d:
+        return default, default_sd
+    sd = float(np.std(np.log(d))) if len(d) > 2 else default_sd
+    return float(np.median(d)), max(sd, 0.1)
 
 
 def nearest_models(rows: list[dict], shape, k: int = 50, kind: Optional[str] = None) -> list[dict]:
@@ -341,6 +368,7 @@ class Weights:
     glob: float = 1.0
     sup: float = 40.0         # a part no stud holds falls off: all but forbidden
     side: float = 6.0         # a side stud or hole facing out of the object: SNOT with nothing on it
+    dens: float = 1.0         # pairs per cell as real sets have them (not too few big, too many small parts)
 
 
 class State:
@@ -356,6 +384,7 @@ class State:
         self.unsup: set[int] = set()
         self.bare = 0                                        # side connectors facing out
         self.fid = float(target.fill.sum())                  # wrong samples / 64, everything empty
+        self.n_ref = stats.density * float(target.fill.sum())  # pairs a real set this size has
         self.lab = _palette_lab()
         self.tlab = np.where(target.colour[..., None] >= 0, self.lab[np.maximum(target.colour, 0)], np.nan)
 
@@ -439,8 +468,11 @@ class State:
 
     def energy(self) -> float:
         w = self.w
-        return (w.cov * self.fid + w.col * self.col + w.loc * self.loc
-                + w.glob * self.kl.n * self.kl.value() + w.sup * len(self.unsup) + w.side * self.bare)
+        n = self.kl.n
+        typical = (w.loc * self.loc / n + w.glob * self.kl.value()
+                   + w.dens * math.log(n / self.n_ref) ** 2 / (2 * self.s.density_sd ** 2)) if n > 0 else 0.0
+        return (w.cov * self.fid + w.col * self.col + self.n_ref * typical
+                + w.sup * len(self.unsup) + w.side * self.bare)
 
     # -- edits ----------------------------------------------------------------
     def add(self, it: Item) -> int:
@@ -761,6 +793,7 @@ def sample(target: Target, models: list[dict], *, iters: int = 20000, seed: int 
         placements = [Placement(v.part, c, x, z, y, o.size[1], o.size[2], o.rot) for v, o, c, y, x, z in got]
         used = Counter(v.category for v, *_ in got)
         info.update({"history": history, "vocabulary": len(vocab), "categories": dict(used),
+                     "n_ref": stats.density * float(target.fill.sum()),
                      "references": [r["model"] for r in refs[:10]], "engine": "native"})
         return placements, info
     rnd = random.Random(seed)
@@ -798,5 +831,5 @@ def sample(target: Target, models: list[dict], *, iters: int = 20000, seed: int 
             "kl": st.kl.value(), "local_per_pair": st.loc / max(1, st.kl.n), "fidelity": st.fid,
             "bad_cells": st.bad_cells(), "unsupported": len(st.unsup), "bare_side_connectors": st.bare, "history": history,
             "vocabulary": len(vocab), "categories": dict(used),
-            "references": [r["model"] for r in refs[:10]], "engine": "python"}
+            "references": [r["model"] for r in refs[:10]], "engine": "python", "n_ref": st.n_ref}
     return st.placements(), info

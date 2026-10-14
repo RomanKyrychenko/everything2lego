@@ -14,9 +14,12 @@ ENGINES = ["python", pytest.param("native", marks=pytest.mark.skipif(
 
 def _models():
     pats = Counter({("brick4x2h3", "brick4x2h3", "up"): 10, ("brick4x2h3", "brick4x2h3", "down"): 10,
-                    ("brick2x1h3", "brick4x2h3", "level"): 4, ("slope45-2x2h3", "brick4x2h3", "down"): 4,
-                    ("brick4x2h3", "slope45-2x2h3", "up"): 4})
-    return [{"model": "m", "patterns": pats, "shape": np.zeros(4), "held_out": False}]
+                    ("brick2x1h3", "brick4x2h3", "level"): 4, ("slope452x2h3", "brick4x2h3", "down"): 4,
+                    ("brick4x2h3", "slope452x2h3", "up"): 4, ("slope452x2h3", "slope452x2h3", "level"): 6})
+    # an 8 x 4 stud, 5 plate model, 95% full: 38 pairs over 152 cells, a
+    # build of big parts (a quarter pair per cell)
+    shape = np.array([np.log(8), np.log(4), np.log(2), 0.95])
+    return [{"model": "m", "patterns": pats, "shape": shape, "held_out": False}]
 
 
 def _vp(ldraw):
@@ -64,7 +67,7 @@ def test_sample_fits_a_ramp_with_slopes(engine):
     bits = np.concatenate([one, one], axis=2)
     want = bits != 0
     target = sampler.Target(want, np.full(want.shape, 4), want.copy(), bits=bits)
-    placements, info = sampler.sample(target, _models(), iters=300, seed=1, k_models=1, warmup=50,
+    placements, info = sampler.sample(target, _models(), iters=1500, seed=1, k_models=1, warmup=50,
                                       n_special=20, engine=engine)
     assert info["unsupported"] == 0 and info["fidelity"] < 1.0
     assert any(p.part.shape.startswith("slope") and p.rotation_deg == 90 for p in placements)
