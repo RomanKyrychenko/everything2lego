@@ -33,3 +33,6 @@ examples/synth_house/                   # locally-rendered turntable of a mesh
 *.safetensors
 *.onnx
 *.pth
+
+# Native build output.
+native/*/target/

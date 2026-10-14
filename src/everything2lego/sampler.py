@@ -39,6 +39,11 @@ monotonous.
 
     from everything2lego.sampler import Target, sample
     placements, info = sample(Target(want, colours, visible, kind="building"), refs)
+
+The walk itself runs in Rust when the library is built (native/sampler,
+everything2lego.native: `python -m everything2lego.native build`), about
+a hundred times faster; this module is its reference and fallback, and the
+two keep the same energy (tests/test_sampler.py checks it).
 """
 from __future__ import annotations
 
@@ -131,6 +136,19 @@ class Orient:
     top: frozenset               # (x, z) offsets with a stud on top
     bottom: frozenset            # (x, z) offsets with a hole underneath
     sides: tuple = ()            # (y, x, z, dx, dz): a stud or hole in that cell facing (dx, dz)
+    halo: np.ndarray = None      # (m, 3): offsets of the cells next to its cells (26-neighbourhood), not its own
+
+
+def _halo(cells: np.ndarray, size) -> np.ndarray:
+    """The cells within one of its cells (diagonals too), its own left out:
+    two parts touch when one occupies a cell of the other's halo — the
+    same either way round, whatever empty corners their boxes have."""
+    h, W, D = size
+    occ = np.zeros((h + 2, W + 2, D + 2), bool)
+    occ[tuple((cells + 1).T)] = True
+    from scipy.ndimage import binary_dilation
+    ring = binary_dilation(occ, structure=np.ones((3, 3, 3), bool)) & ~occ
+    return np.argwhere(ring) - 1
 
 
 @dataclass(frozen=True, eq=False)
@@ -170,7 +188,7 @@ def _orients(bits: np.ndarray, top: list, bottom: list, sides: list = ()) -> tup
             continue
         cb = wbits[tuple(cells.T)]
         out.append(Orient(rot, (h, W, D), cells, cb, popcount(cb) / SUB ** 3,
-                          tuple(int(v) for v in cells[0]), wt, wb, ws))
+                          tuple(int(v) for v in cells[0]), wt, wb, ws, _halo(cells, (h, W, D))))
     return tuple(out)
 
 
@@ -343,13 +361,14 @@ class State:
 
     # -- geometry -----------------------------------------------------------
     def neighbours(self, i: int) -> dict[int, str]:
-        """{j: where j is relative to i} for parts touching i's box (above,
-        below, beside; diagonals count, as the official models' patterns
-        were counted)."""
+        """{j: where j is relative to i} for parts touching i (a cell of one
+        next to a cell of the other, diagonals too, as the official models'
+        patterns were counted); where from the two boxes."""
         it = self.items[i]
         H, X, Z = self.owner.shape
-        x0, x1, z0, z1 = max(0, it.x - 1), min(X, it.x + it.W + 1), max(0, it.z - 1), min(Z, it.z + it.D + 1)
-        found = set(self.owner[max(0, it.y - 1):min(H, it.y + it.h + 1), x0:x1, z0:z1].ravel().tolist())
+        c = it.ori.halo + np.array([it.y, it.x, it.z])
+        c = c[(c >= 0).all(axis=1) & (c[:, 0] < H) & (c[:, 1] < X) & (c[:, 2] < Z)]
+        found = set(self.owner[c[:, 0], c[:, 1], c[:, 2]].tolist())
         found.discard(-1)
         found.discard(i)
         out: dict[int, str] = {}
@@ -474,6 +493,19 @@ class State:
 # proposals
 # ---------------------------------------------------------------------------
 
+def option_logprior(vocab: tuple[VPart, ...], stats: Stats, kind: Optional[str]) -> np.ndarray:
+    """Per (part, yaw), in vocabulary order: log P(its token) in the
+    references, plus log its lift for the kind of object, plus a pull to
+    larger parts (fewer, as sets are)."""
+    a_tot = stats.a_tot
+    z = sum(a_tot.values()) or 1.0
+    return np.array([
+        math.log((a_tot.get(v.token, 0) + 1.0) / z)
+        + (math.log(max(1e-3, v.kinds.get(kind, {}).get("lift", 0.0) or 1e-3)) if kind else 0.0)
+        + 0.6 * math.log(float(o.o.sum()))
+        for v in vocab for o in v.orients])
+
+
 class Filler:
     """Fills empty cells part by part, each part and yaw drawn from
     P(part | the parts around it) times its fit to the target, colour
@@ -483,14 +515,8 @@ class Filler:
     def __init__(self, state: State, rnd: random.Random, vocab: tuple[VPart, ...], kind: Optional[str],
                  top_k: int = 12):
         self.st, self.rnd, self.vocab, self.top_k = state, rnd, vocab, top_k
-        a_tot = state.s.a_tot
-        z = sum(a_tot.values()) or 1.0
         self.opts: list[tuple[VPart, Orient]] = [(v, o) for v in vocab for o in v.orients]
-        self.logprior = np.array([
-            math.log((a_tot.get(v.token, 0) + 1.0) / z)
-            + (math.log(max(1e-3, v.kinds.get(kind, {}).get("lift", 0.0) or 1e-3)) if kind else 0.0)
-            + 0.6 * math.log(float(o.o.sum()))                 # larger parts: fewer, as sets are
-            for v, o in self.opts])
+        self.logprior = option_logprior(vocab, state.s, kind)
         # the window every option is tested in: origin (y, x - FX, z - FZ) for a cell (y, x, z)
         self.FX = max(o.first[1] for _, o in self.opts)
         self.FZ = max(o.first[2] for _, o in self.opts)
@@ -714,16 +740,32 @@ def merge(state: State, filler: Filler, rnd: random.Random):
 def sample(target: Target, models: list[dict], *, iters: int = 20000, seed: int = 0,
            weights: Optional[Weights] = None, t_start_share: float = 0.05, t_final_share: float = 0.002,
            k_models: int = 50, n_special: int = 160, log_every: int = 2000,
-           warmup: int = 200) -> tuple[list[Placement], dict]:
+           warmup: int = 200, top_k: int = 12, engine: str = "auto") -> tuple[list[Placement], dict]:
     """The temperature comes from the data: the median energy change of
     `warmup` proposals (measured, then undone) is the scale; it anneals
     from `t_start_share` to `t_final_share` of it.  Monotony is the KL
-    term's to prevent, so the walk may cool close to zero."""
-    rnd = random.Random(seed)
+    term's to prevent, so the walk may cool close to zero.
+
+    `engine`: "native" runs the walk in Rust (native/sampler, everything2lego.native),
+    "python" here; "auto" the native one when it is built."""
+    from . import native
     refs = nearest_models(models, target.shape_descriptor(), k_models, target.kind)
-    st = State(target, Stats(refs), weights or Weights())
+    stats = Stats(refs)
+    weights = weights or Weights()
     vocab = select_vocabulary(target.kind, n_special)
-    filler = Filler(st, rnd, vocab, target.kind)
+    if engine == "native" or (engine == "auto" and native.available()):
+        got, info, history = native.run(
+            target, stats, vocab, target.kind, weights, iters=iters, warmup=warmup, seed=seed,
+            t_start_share=t_start_share, t_final_share=t_final_share, top_k=top_k, log_every=log_every,
+            opts_logprior=option_logprior(vocab, stats, target.kind))
+        placements = [Placement(v.part, c, x, z, y, o.size[1], o.size[2], o.rot) for v, o, c, y, x, z in got]
+        used = Counter(v.category for v, *_ in got)
+        info.update({"history": history, "vocabulary": len(vocab), "categories": dict(used),
+                     "references": [r["model"] for r in refs[:10]], "engine": "native"})
+        return placements, info
+    rnd = random.Random(seed)
+    st = State(target, stats, weights)
+    filler = Filler(st, rnd, vocab, target.kind, top_k)
     ys, xs, zs = np.nonzero(target.want)
     filler.fill(list(zip(ys.tolist(), xs.tolist(), zs.tolist())))
     e = st.energy()
@@ -756,5 +798,5 @@ def sample(target: Target, models: list[dict], *, iters: int = 20000, seed: int 
             "kl": st.kl.value(), "local_per_pair": st.loc / max(1, st.kl.n), "fidelity": st.fid,
             "bad_cells": st.bad_cells(), "unsupported": len(st.unsup), "bare_side_connectors": st.bare, "history": history,
             "vocabulary": len(vocab), "categories": dict(used),
-            "references": [r["model"] for r in refs[:10]]}
+            "references": [r["model"] for r in refs[:10]], "engine": "python"}
     return st.placements(), info

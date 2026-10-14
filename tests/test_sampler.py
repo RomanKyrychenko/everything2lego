@@ -3,9 +3,13 @@ it, in colours LEGO makes them in."""
 from collections import Counter
 
 import numpy as np
+import pytest
 
-from everything2lego import sampler
+from everything2lego import native, sampler
 from everything2lego.io_ldraw import placement_to_line
+
+ENGINES = ["python", pytest.param("native", marks=pytest.mark.skipif(
+    not native.available(), reason="native sampler not built (python -m everything2lego.native build)"))]
 
 
 def _models():
@@ -50,7 +54,8 @@ def test_a_slope_is_written_where_its_box_is():
         assert -10 <= x <= 30 and -10 <= z <= 30 and y == -24
 
 
-def test_sample_fits_a_ramp_with_slopes():
+@pytest.mark.parametrize("engine", ENGINES)
+def test_sample_fits_a_ramp_with_slopes(engine):
     """A ramp shaped as a 45° slope's own cells, twice side by side, is
     built of slopes facing the way it falls — not of stepped boxes."""
     o = next(o for o in _vp("3039.dat").orients if o.rot == 90)
@@ -60,14 +65,51 @@ def test_sample_fits_a_ramp_with_slopes():
     want = bits != 0
     target = sampler.Target(want, np.full(want.shape, 4), want.copy(), bits=bits)
     placements, info = sampler.sample(target, _models(), iters=300, seed=1, k_models=1, warmup=50,
-                                      n_special=20)
+                                      n_special=20, engine=engine)
     assert info["unsupported"] == 0 and info["fidelity"] < 1.0
     assert any(p.part.shape.startswith("slope") and p.rotation_deg == 90 for p in placements)
 
 
-def test_sample_fills_a_box():
+@pytest.mark.parametrize("engine", ENGINES)
+def test_sample_fills_a_box(engine):
     want = np.ones((6, 6, 4), dtype=bool)
     target = sampler.Target(want, np.full(want.shape, 4), want.copy())
     placements, info = sampler.sample(target, _models(), iters=300, seed=1, k_models=1, warmup=50,
-                                      n_special=0)
+                                      n_special=0, engine=engine)
     assert info["bad_cells"] == 0 and info["unsupported"] == 0
+
+
+@pytest.mark.skipif(not native.available(), reason="native sampler not built")
+def test_native_energy_is_the_reference_energy():
+    """The native walk keeps the same energy as sampler.State: its build,
+    re-added part by part in Python, has the energy it reports."""
+    want = np.ones((6, 6, 4), dtype=bool)
+    target = sampler.Target(want, np.full(want.shape, 4), want.copy())
+    stats, w = sampler.Stats(_models()), sampler.Weights()
+    vocab = sampler.select_vocabulary(None, 20)
+    for seed in range(3):
+        got, info, _ = native.run(target, stats, vocab, None, w, iters=200, warmup=20, seed=seed,
+                                  t_start_share=0.05, t_final_share=0.002, top_k=12, log_every=50,
+                                  opts_logprior=sampler.option_logprior(vocab, stats, None))
+        st = sampler.State(target, stats, w)
+        for v, o, c, y, x, z in got:
+            st.add(sampler.Item(v, o, c, y, x, z))
+        assert st.energy() == pytest.approx(info["energy"], rel=1e-9, abs=1e-6)
+        assert len(st.unsup) == info["unsupported"] and st.bad_cells() == info["bad_cells"]
+
+
+@pytest.mark.skipif(not native.available(), reason="native sampler not built")
+def test_long_walk_keeps_its_energy():
+    """After thousands of moves with slopes and corners (parts whose boxes
+    have empty cells), the energy kept move by move is the energy of the
+    build recomputed from nothing: no pattern counted from one side and
+    uncounted from the other."""
+    o = next(o for o in _vp("3039.dat").orients if o.rot == 90)
+    one = np.zeros(o.size, dtype=np.uint64)
+    one[tuple(o.cells.T)] = o.bits
+    bits = np.tile(np.concatenate([one, one], axis=2), (2, 2, 2))
+    want = bits != 0
+    target = sampler.Target(want, np.full(want.shape, 4), want.copy(), bits=bits)
+    _, info = sampler.sample(target, _models(), iters=5000, seed=3, k_models=1, warmup=50,
+                             n_special=60, engine="native")
+    assert info["energy"] == pytest.approx(info["energy_recomputed"], rel=1e-9)
