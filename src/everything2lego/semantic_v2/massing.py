@@ -867,6 +867,32 @@ def floors_and_spines(solid: np.ndarray, walls: list[WallSpec], gables: list, *,
     # gable's whole footprint even where another, lower roof covers it
     # (a cross-gable's rows rise out of the main roof's attic and need
     # their own sheet to stand on).
+    surface_top = height_map(solid)
+
+    def under_roof(y: int) -> np.ndarray:
+        """Columns where plate level `y` is inside a paired roof's volume
+        and nothing rises out of it there (a tower's columns top out above
+        the roof, and keep their floors)."""
+        m = np.zeros((X, Z), dtype=bool)
+        for g in gables:
+            if g.b is None or y < g.y_bottom:
+                continue
+            roof_top = g.y_bottom + g.n_rows * COURSE
+            if y >= roof_top:
+                continue
+            faces = [g.a, g.b]
+            lo = int(np.floor(min(min(f.eave, f.ridge) for f in faces)))
+            hi = int(np.ceil(max(max(f.eave, f.ridge) for f in faces)))
+            r0 = min(f.span[0] for f in faces)
+            r1 = max(f.span[1] for f in faces)
+            box = np.zeros((X, Z), dtype=bool)
+            if g.a.axis == "x":
+                box[max(0, lo):hi, max(0, r0):r1] = True
+            else:
+                box[max(0, r0):r1, max(0, lo):hi] = True
+            m |= box & (surface_top <= roof_top + COURSE)
+        return m
+
     def roofed(y0: int, c: int) -> np.ndarray:
         m = np.zeros((X, Z), dtype=bool)
         own = np.zeros((X, Z), dtype=bool)
@@ -917,8 +943,12 @@ def floors_and_spines(solid: np.ndarray, walls: list[WallSpec], gables: list, *,
         # Walls that start right above this course stand on it, roof or
         # no roof: a tower rising out of the attic gets its floor over the
         # footprint those walls enclose (their bounding box in the plan).
+        # Not the walls that end under a roof — a gable's stepped end, the
+        # infill under its slopes: they are the roof's own, and a floor
+        # for them would run through the roof's rows.
         above = wall_plan.get(c + 1)
         if above is not None and above.any():
+            above = above & ~under_roof(ground_y + (c + 1) * COURSE)
             for cells in _components(binary_dilation(above, iterations=2)):
                 x0, x1 = int(cells[:, 0].min()), int(cells[:, 0].max()) + 1
                 z0, z1 = int(cells[:, 1].min()), int(cells[:, 1].max()) + 1

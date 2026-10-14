@@ -154,3 +154,15 @@ def test_a_house_and_a_shed_beside_it_stand_on_one_base_plate(tmp_path):
     # the shed is kept, not dropped as an island or tied on with bridges
     assert c.get("structure:dropped_islands", 0) == 0 and c.get("structure:bridges", 0) == 0
     assert max(p.x_stud + p.w_world for p in res.placements) > 20
+
+
+def test_no_storey_floor_runs_through_a_roof(result):
+    """The gable's stepped ends are walls starting inside the roof; they
+    must not earn a floor sheet through the roof's rows."""
+    plates = [p for p in result.placements if p.part.shape == "plate"]
+    slopes = [p for p in result.placements if p.part.shape == "slope"]
+    eave = min(p.y_plate for p in slopes)
+    assert not any(eave <= p.y_plate < eave + COURSE and
+                   any(s.x_stud <= p.x_stud < s.x_stud + s.w_world and s.z_stud <= p.z_stud < s.z_stud + s.d_world
+                       for s in slopes if s.y_plate == eave)
+                   for p in plates)
