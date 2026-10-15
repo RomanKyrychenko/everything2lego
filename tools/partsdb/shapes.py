@@ -45,7 +45,8 @@ from everything2lego.sampler import SUB, pack  # noqa: E402  (one bit order for 
 
 CATEGORIES = ("Bricks", "Plates", "Tiles", "Bricks Sloped", "Bricks Curved", "Bricks Round and Cones",
               "Tiles Round and Curved", "Plates Round Curved and Dishes", "Bricks Wedged", "Plates Wedged",
-              "Bricks Special", "Plates Special", "Tiles Special")
+              "Bricks Special", "Plates Special", "Tiles Special",
+              "Hinges, Arms and Turntables", "Technic Bricks", "Technic Beams")
 MIN_SETS = 30
 TOL = 1.0                     # LDU a body may miss the grid by
 
@@ -143,9 +144,12 @@ def shape(row, T: np.ndarray | None = None, relaxed: bool = False, parity: int =
         z0, z1 = _snap(P[:, 2].min(), 10), _snap(P[:, 2].max(), 10)
         y0, y1 = _snap(P[:, 1].min(), 8), _snap(P[:, 1].max(), 8)    # the body's top and bottom
         if None in (y0, y1) and studs:
-            # the plate grid starts at its studs' base (y 0); the box takes in what hangs below
-            y0 = 0.0 if P[:, 1].min() > -TOL else y0
-            y1 = 8 * np.ceil((P[:, 1].max() - TOL) / 8)
+            # the plate grid starts at its studs' base (y 0, body growing
+            # downward); the box takes in what hangs below, and ignores a
+            # finger or clip sticking above (hinge plates)
+            y0 = 0.0
+            body_max = P[P[:, 1] > -TOL, 1]
+            y1 = 8 * np.ceil(((body_max.max() if len(body_max) else P[:, 1].max()) - TOL) / 8)
         if None in (x0, x1, z0, z1) and studs:
             # something sticks out past the grid (a holder's pins, a clip): the
             # grid is where its studs are; the box takes in what sticks out
@@ -268,7 +272,8 @@ def main() -> None:
             WHERE p.category IN ({",".join("?" * len(CATEGORIES))}) AND p.n_sets_recent >= ?
             AND g.ldraw IS NOT NULL GROUP BY p.part_num"""
     studs = {}
-    for pn, x, z in con.execute("SELECT part_num, x, z FROM connector WHERE kind = 'stud' AND fy < -0.9"):
+    for pn, x, z in con.execute("SELECT part_num, x, z FROM connector "
+                                "WHERE (kind='stud' AND fy<-0.9) OR (kind='antistud' AND fy>0.9)"):
         studs.setdefault(pn, []).append((x, z))
     rows = [(pn, ld, studs.get(pn)) for pn, ld in con.execute(q, (*CATEGORIES, MIN_SETS)).fetchall()]
     with Pool(max(1, (os.cpu_count() or 2) - 1)) as pool:
