@@ -83,12 +83,15 @@ def target_from_mesh(path: str, studs: int, shell: int, kind: str | None = None,
             [[[0, 0, 0], [0, 1, 0], [0, 0, 0]], [[0, 1, 0], [1, 1, 1], [0, 1, 0]], [[0, 0, 0], [0, 1, 0], [0, 0, 0]]], bool))
     want = (solid & ~inner) | ((frac > 0.1) & ~inner)
     # the base: layer 0 is the model's full x-z shadow, one stud wider than
-    # the model, so the build sits on a plate that reaches past its walls
+    # the model, so the build sits on a plate that reaches past its walls.
+    # Vehicles don't want a solid chassis plate — they sit on wheels at the
+    # corners; let the mesh decide what layer 0 contains.
     shadow = want.any(0)
     from scipy.ndimage import binary_dilation as _dil
-    base = _dil(shadow, iterations=1)
-    want[0] |= base
-    bits[0] = np.where(base, FULL, bits[0])
+    if kind != "road_vehicle":
+        base = _dil(shadow, iterations=1)
+        want[0] |= base
+        bits[0] = np.where(base, FULL, bits[0])
     if stand > 0:
         # a plate `stand` studs wider on each side than the model's shadow,
         # for a figure or small object that would otherwise sit on no plate
