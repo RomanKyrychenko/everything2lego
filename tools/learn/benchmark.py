@@ -16,6 +16,8 @@ Scores (means over the models; lower is better except where noted):
 from __future__ import annotations
 
 import argparse
+import multiprocessing as mp
+import os
 import json
 import random
 import sys
@@ -43,6 +45,25 @@ def models_for_benchmark(rows: list[dict], n: int) -> list[dict]:
     return random.Random(0).sample(pool, min(n, len(pool)))
 
 
+_G: dict = {}
+
+
+def _build(row):
+    got = C.target(row["model"], row["object_kind"])
+    if got is None:
+        return None
+    target, (pns, *_) = got
+    w = sampler.Weights() if _G["hand"] else sampler.Weights.learned(target.kind)
+    ps, info = sampler.sample(target, _G["train"], iters=_G["iters"], seed=0,
+                              weights=w, net=not _G["no_net"])
+    cells = float(target.want.sum())
+    return {"model": row["model"], "kind": row["object_kind"], "cells": cells,
+            "volume": info["fidelity"] / cells, "outline": info["outline"] / max(1.0, cells ** (2 / 3)),
+            "local": info["local_per_pair"], "kl": info["kl"], "paths": info["kl_paths"],
+            "dens": info["dens"], "loose": info["unsupported"] / max(1, len(ps)),
+            "parts": len(ps) / max(1, len(pns))}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("tag")
@@ -59,22 +80,11 @@ def main() -> None:
     kind = dict(zip(k.id, k.kind))
     for r in rows:
         r["object_kind"] = kind.get(r["model"]) or kind.get(r["model"].split("_")[0])
-    train = load_models()                                 # the references: training models only
-    res = []
+    _G.update(train=load_models(), iters=a.iters, no_net=a.no_net, hand=a.hand)
+    chosen = models_for_benchmark(rows, a.n)
     t0 = time.time()
-    for row in models_for_benchmark(rows, a.n):
-        got = C.target(row["model"], row["object_kind"])
-        if got is None:
-            continue
-        target, (pns, *_) = got
-        w = sampler.Weights() if a.hand else sampler.Weights.learned(target.kind)
-        ps, info = sampler.sample(target, train, iters=a.iters, seed=0, weights=w, net=not a.no_net)
-        cells = float(target.want.sum())
-        res.append({"model": row["model"], "kind": row["object_kind"], "cells": cells,
-                    "volume": info["fidelity"] / cells, "outline": info["outline"] / max(1.0, cells ** (2 / 3)),
-                    "local": info["local_per_pair"], "kl": info["kl"], "paths": info["kl_paths"],
-                    "dens": info["dens"], "loose": info["unsupported"] / max(1, len(ps)),
-                    "parts": len(ps) / max(1, len(pns))})
+    with mp.get_context("fork").Pool(max(1, (os.cpu_count() or 2) - 2)) as workers:
+        res = [r for r in workers.imap_unordered(_build, chosen) if r is not None]
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / f"{a.tag}.json").write_text(json.dumps(res, indent=1))
     keys = ("volume", "outline", "local", "kl", "paths", "dens", "loose", "parts")

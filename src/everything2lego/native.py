@@ -112,8 +112,12 @@ def build() -> Path:
     first cargo that can: rustup's (it holds other architectures' standard
     libraries once `rustup target add`-ed), then the one on PATH (a system
     cargo builds for its own machine)."""
-    rustup = Path.home() / ".cargo" / "bin" / "cargo"
-    cargos = [str(c) for c in (rustup if rustup.exists() else None, shutil.which("cargo")) if c]
+    # try every cargo on the machine: each rustup install has its own targets, and
+    # we need one that holds the arm64 or x86_64 std library for this Python
+    found = [Path.home() / ".cargo" / "bin" / "cargo",
+             Path("/opt/homebrew/Cellar/rustup/1.29.1/libexec/bin/cargo"),
+             Path(shutil.which("cargo") or "/dev/null")]
+    cargos = [str(c) for c in found if c.exists()]
     t = _triple()
     for cargo in dict.fromkeys(cargos):
         cmd = [cargo, "build", "--release", "--manifest-path", str(CRATE / "Cargo.toml")]

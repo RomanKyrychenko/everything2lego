@@ -97,10 +97,11 @@ def _build(job):
     if got is None or got[0].want.sum() > 400_000:
         return None
     target, (_, _, _, _, true_bits) = got
-    others = [m for m in _G["models"] if m["model"] != row["model"]]
+    others = _G["others"][row["model"]]
     refs = sampler.nearest_models(others, target.shape_descriptor(), 50, target.kind)
     stats = sampler.Stats(refs)
-    ps, info = sampler.sample(target, others, iters=_G["iters"], seed=rnd_i, weights=w)
+    stats.degree = _G["degree"]
+    ps, info = sampler.sample(target, iters=_G["iters"], seed=rnd_i, weights=w, stats=stats)
     cells = float(target.want.sum())
     return {"model": row["model"], "kind": row["object_kind"], "ours": statistics(info, len(ps), cells),
             "official": official_statistics(row, stats, float(target.fill.sum()), _G["vocab_tokens"],
@@ -122,7 +123,9 @@ def main() -> None:
     pool = [r for r in models if 300 <= r["n_parts"] <= 2500 and r.get("object_kind") in sampler.known_kinds()
             and r["object_kind"] not in ("scene",) and (a.kind is None or r["object_kind"] == a.kind)]
     vocab_tokens = {v.token for v in sampler.vocabulary()}
-    _G.update(models=models, vocab_tokens=vocab_tokens, iters=a.iters)
+    # one filtered list per model, shared via fork; degree depends only on all models
+    _G.update(others={m["model"]: [x for x in models if x["model"] != m["model"]] for m in pool},
+              degree=sampler.token_degree(models), vocab_tokens=vocab_tokens, iters=a.iters)
     w = sampler.Weights() if a.kind is None else sampler.Weights.learned()   # a kind starts from the pooled fit
     log = []
     for rnd_i in range(a.rounds):

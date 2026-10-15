@@ -353,6 +353,7 @@ class Stats:
     official models' pattern counts (a list of features rows)."""
 
     def __init__(self, models: list[dict], lam=(0.8, 0.17, 0.03)):
+        self._refs = models
         self.ref = Reference.from_models(models)
         self.ref2 = Reference.from_models(models, key="paths")
         self.density, self.density_sd = pair_density(models)
@@ -1019,11 +1020,11 @@ def _dens(pairs: float, n_ref: float, sd: float) -> float:
     return math.log(pairs / n_ref) ** 2 / (2 * sd ** 2) if pairs > 0 else 0.0
 
 
-def sample(target: Target, models: list[dict], *, iters: int = 20000, seed: int = 0,
+def sample(target: Target, models: list[dict] | None = None, *, iters: int = 20000, seed: int = 0,
            weights: Optional[Weights] = None, t_start_share: float = 0.05, t_final_share: float = 0.002,
            k_models: int = 50, n_special: int = 160, log_every: int = 2000,
            warmup: int = 200, top_k: int = 12, engine: str = "auto",
-           net: bool = True) -> tuple[list[Placement], dict]:
+           net: bool = True, stats: Optional["Stats"] = None) -> tuple[list[Placement], dict]:
     """The temperature comes from the data: the median energy change of
     `warmup` proposals (measured, then undone) is the scale; it anneals
     from `t_start_share` to `t_final_share` of it.  Monotony is the KL
@@ -1035,9 +1036,12 @@ def sample(target: Target, models: list[dict], *, iters: int = 20000, seed: int 
     `engine`: "native" runs the walk in Rust (native/sampler, everything2lego.native),
     "python" here; "auto" the native one when it is built."""
     from . import native
-    refs = nearest_models(models, target.shape_descriptor(), k_models, target.kind)
-    stats = Stats(refs)
-    stats.degree = token_degree(models)
+    if stats is None:
+        refs = nearest_models(models, target.shape_descriptor(), k_models, target.kind)
+        stats = Stats(refs)
+        stats.degree = token_degree(models)
+    else:
+        refs = stats._refs                               # for info["references"]
     weights = weights or Weights.learned(target.kind)
     vocab = select_vocabulary(target.kind, n_special)
     if engine == "auto" and not native.available():
