@@ -70,8 +70,13 @@ def target_from_mesh(path: str, studs: int, shell: int, kind: str | None = None)
         inner = binary_erosion(inner, structure=np.ones((3, 3, 3), bool) & np.array(
             [[[0, 0, 0], [0, 1, 0], [0, 0, 0]], [[0, 1, 0], [1, 1, 1], [0, 1, 0]], [[0, 0, 0], [0, 1, 0], [0, 0, 0]]], bool))
     want = (solid & ~inner) | ((frac > 0.1) & ~inner)
-    want[0] |= solid[0]                                   # the bottom layer is the base
-    bits[0] = np.where(solid[0], FULL, bits[0])
+    # the base: layer 0 is the model's full x-z shadow, one stud wider than
+    # the model, so the build sits on a plate that reaches past its walls
+    shadow = want.any(0)
+    from scipy.ndimage import binary_dilation as _dil
+    base = _dil(shadow, iterations=1)
+    want[0] |= base
+    bits[0] = np.where(base, FULL, bits[0])
     visible = (solid & ~binary_erosion(solid)) | (want & ~solid)
     pal = t.voxel_grid.palette_idx
     from scipy.ndimage import distance_transform_edt

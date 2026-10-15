@@ -15,6 +15,41 @@ class BuildResult:
     report: dict
 
 
+def assemble_sampler(grid: VoxelGrid, *, kind: str | None = None, iters: int = 30000,
+                     seed: int = 0) -> BuildResult:
+    """Build the voxel grid with the statistics sampler (everything2lego.sampler),
+    the data-driven path.  Replaces the recipe builder (assemble) end to end:
+    one target made from the grid, one sample, one stability report."""
+    from . import sampler as S
+    pal = grid.palette_idx
+    if pal.ndim != 3 or not (pal >= 0).any():
+        raise ValueError("The model must contain occupied voxels")
+    want = pal >= 0
+    bits = np.where(want, S.FULL, np.uint64(0))
+    colour = np.where(want, pal, -1).astype(np.int32)
+    from scipy.ndimage import binary_erosion
+    visible = want & ~binary_erosion(want)
+    import pickle, pandas as pd
+    from pathlib import Path
+    FEATURES = Path("/Volumes/PRO-G40/lego_data/analysis/features.pkl")
+    rows = pickle.load(open(FEATURES, "rb"))
+    kinds_csv = Path("/Volumes/PRO-G40/lego_data/analysis/set_kinds.csv")
+    if kinds_csv.exists():
+        k = pd.read_csv(kinds_csv).drop_duplicates("id", keep="last")
+        kmap = dict(zip(k.id, k.kind))
+        for r in rows:
+            r["object_kind"] = kmap.get(r["model"]) or kmap.get(r["model"].split("_")[0])
+    models = [r for r in rows if not r["held_out"]]
+    target = S.Target(want=want, colour=colour, visible=visible, bits=bits, kind=kind)
+    placements, info = S.sample(target, models, iters=iters, seed=seed)
+    report = {"source": "sampler", "iters": iters, "seed": seed,
+              "parts": info["parts"], "kind": kind,
+              "fidelity": info["fidelity"], "outline": info["outline"],
+              "unsupported": info["unsupported"], "kl": info["kl"]}
+    report.update(structure_report(placements))
+    return BuildResult(grid=grid, placements=placements, report=report)
+
+
 def structure_report(placements: list[pack.Placement],
                      check: stability.StabilityReport | None = None) -> dict:
     """The part count and structural fields of a report, for the placements

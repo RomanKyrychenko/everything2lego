@@ -113,12 +113,16 @@ def _run(grid, out: Path, model_name: str, use_tiles: bool, supports: bool = Tru
          color_swaps: dict[int, str] | None = None,
          detect_features: bool = False, color_smoothing: bool = True,
          variety: bool = False, brace_mode: str = "auto",
-         architectural_style: bool = False) -> None:
-    console.rule("[bold]packing bricks[/bold]")
+         architectural_style: bool = False, sampler: bool = False,
+         sampler_iters: int = 30000, sampler_kind: str | None = None) -> None:
+    console.rule("[bold]packing bricks[/bold]" + (" (sampler)" if sampler else ""))
     try:
-        result = pipeline.assemble(grid, use_tiles=use_tiles, use_slopes=use_slopes,
-                                    supports=supports, brace_mode=brace_mode,
-                                    use_cheese=use_cheese)
+        if sampler:
+            result = pipeline.assemble_sampler(grid, kind=sampler_kind, iters=sampler_iters)
+        else:
+            result = pipeline.assemble(grid, use_tiles=use_tiles, use_slopes=use_slopes,
+                                        supports=supports, brace_mode=brace_mode,
+                                        use_cheese=use_cheese)
     except (ValueError, RuntimeError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     placements = result.placements
@@ -365,7 +369,8 @@ def build(
                                     help="closest_face (deterministic per-voxel face lookup) or kdtree (random-sample median, legacy)."),
     subvoxels: int = typer.Option(1, "--subvoxels", min=1, max=8,
                                     help="Super-sample the occupancy grid at N times finer resolution, then majority-vote to LEGO scale. Preserves thin walls; costs more RAM/time."),
-) -> None:
+    sampler: bool = typer.Option(False, "--sampler", help="use the statistics sampler instead of the recipe builder"),
+    sampler_kind: str = typer.Option(None, "--sampler-kind", help="building, road_vehicle, object, ...")) -> None:
     """Convert a textured mesh into LEGO."""
     console.rule(f"[bold]loading[/bold] {mesh.name}")
     try:
@@ -432,6 +437,7 @@ def build(
     _parse(panels_color,  "4865.dat")
 
     _run(grid, out, model_name=mesh.stem, use_tiles=use_tiles, use_slopes=use_slopes, use_cheese=use_cheese,
+          sampler=sampler, sampler_kind=sampler_kind,
          supports=supports, texture=texture, color_swaps=color_swaps,
          detect_features=detect_features, color_smoothing=color_smoothing,
          variety=variety, brace_mode=brace_mode,

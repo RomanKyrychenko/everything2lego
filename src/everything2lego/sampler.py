@@ -987,6 +987,9 @@ def merge(state: State, filler: Filler, rnd: random.Random):
     if not a.vp.box:
         return None
     boxes = _boxes(filler.vocab)
+    # among the neighbours a can merge with, pick the largest (bigger merge =
+    # one more part gone, which the density term asks for)
+    best = None
     for j, where in list(state.adj[i].items()):
         if where != "level":
             continue
@@ -1000,15 +1003,20 @@ def merge(state: State, filler: Filler, rnd: random.Random):
         got = boxes.get((a.vp.box, a.h, x1 - x0, z1 - z0))
         if got is None or palette()[a.colour].code not in got[0].colours:
             continue
-        ra, rb = state.remove(i), state.remove(j)
-        k = state.add(Item(got[0], got[1], a.colour, a.y, x0, z0))
+        area = (x1 - x0) * (z1 - z0)
+        if best is None or area > best[0]:
+            best = (area, j, x0, z0, x1, z1, got)
+    if best is None:
+        return None
+    _, j, x0, z0, x1, z1, got = best
+    ra, rb = state.remove(i), state.remove(j)
+    k = state.add(Item(got[0], got[1], a.colour, a.y, x0, z0))
 
-        def undo(k=k, ra=ra, rb=rb):
-            state.remove(k)
-            state.add(ra)
-            state.add(rb)
-        return undo
-    return None
+    def undo(k=k, ra=ra, rb=rb):
+        state.remove(k)
+        state.add(ra)
+        state.add(rb)
+    return undo
 
 
 # ---------------------------------------------------------------------------

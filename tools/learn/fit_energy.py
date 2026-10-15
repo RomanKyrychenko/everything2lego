@@ -131,7 +131,7 @@ def main() -> None:
     for rnd_i in range(a.rounds):
         diff = {k: 0.0 for k in FITTED}
         rows = []
-        jobs = [(row, rnd_i, w) for row in rnd.sample(pool, a.targets)]
+        jobs = [(row, rnd_i, w) for row in rnd.sample(pool, min(a.targets, len(pool)))]
         # the round's targets are independent: one per core, forked workers share what is loaded
         with mp.get_context("fork").Pool(max(1, (os.cpu_count() or 2) - 2)) as workers:
             for got in workers.imap_unordered(_build, jobs):
@@ -143,8 +143,10 @@ def main() -> None:
         n = max(1, len(rows))
         for k in FITTED:
             g = max(-1.0, min(1.0, a.rate * diff[k] / n))           # at most a factor e per round
-            # content weights do not go to zero: form is what the user wants fitted
-            lo = 0.5 if k in ("sil",) else 0.01
+            # content and style must each carry real weight: the fit can scale them
+            # relative to each other but neither drops to the floor
+            lo = {"sil": 2.0, "loc": 0.3, "glob": 0.3, "glob2": 0.3,
+                  "dens": 1.0, "cnt": 1.0, "sup": 20.0, "side": 2.0}[k]
             setattr(w, k, float(min(100.0, max(lo, getattr(w, k) * math.exp(g)))))
         mean = {k: (np.mean([r["ours"][k] for r in rows]), np.mean([r["official"][k] for r in rows])) for k in FITTED}
         print(f"round {rnd_i + 1}: " + "  ".join(f"{k} {o:.3f}/{t:.3f}->w {getattr(w, k):.3g}"

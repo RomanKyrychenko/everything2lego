@@ -1359,6 +1359,9 @@ fn merge(st: &mut State, rng: &mut Rng) -> Option<Undo> {
     if ao.boxk < 0 {
         return None;
     }
+    // among the neighbours a can merge with, pick the largest (bigger merge =
+    // one more part gone, which the density term asks for)
+    let mut best: Option<(i32, usize, i32, i32, i32, i32, usize)> = None;
     for (j, dir) in st.adj[i].clone() {
         if dir != LEVEL {
             continue;
@@ -1378,14 +1381,18 @@ fn merge(st: &mut State, rng: &mut Rng) -> Option<Undo> {
             None => continue,
         };
         if d.snap[d.opts[k].part * d.n_col + a.colour as usize] != a.colour {
-            continue; // not made in this colour
+            continue;
         }
-        let ra = st.remove(i);
-        let rb = st.remove(j);
-        let k = st.add(Item { opt: k, colour: a.colour, y: a.y, x: x0, z: z0 });
-        return Some(Undo::Merge { k, a: ra, b: rb });
+        let area = (x1 - x0) * (z1 - z0);
+        if best.map_or(true, |(ba, ..)| area > ba) {
+            best = Some((area, j, x0, z0, x1, z1, k));
+        }
     }
-    None
+    let (_, j, x0, z0, _x1, _z1, k) = best?;
+    let ra = st.remove(i);
+    let rb = st.remove(j);
+    let k = st.add(Item { opt: k, colour: a.colour, y: a.y, x: x0, z: z0 });
+    Some(Undo::Merge { k, a: ra, b: rb })
 }
 
 fn propose(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
