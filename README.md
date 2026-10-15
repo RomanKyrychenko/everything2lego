@@ -83,6 +83,66 @@ export HY3DGEN_MODELS=/Volumes/PRO-G40/hy3dgen
 
 ## Quick start
 
+### Statistics sampler (data-driven, recommended)
+
+The sampler plays the real-set statistics against the target's form (as in
+neural style transfer: a content loss plus a style loss) and samples a
+build; the parts, the weights and the proposals are all learnt from the
+1,766 official LEGO models (see "Learning", below).
+
+```bash
+.venv/bin/everything2lego build examples/sample.glb --out out/ \
+    --sampler --sampler-kind object --max-studs 32
+```
+
+`--sampler-kind` picks the kind-specific weights (`building`,
+`road_vehicle`, `aircraft`, `watercraft`, `spacecraft`, `train`, `robot`,
+`creature`, `character`, `plant`, `object`); without it the pooled
+weights apply.  The output is a `.ldr` model, a `wanted.xml` parts list,
+step-by-step `instructions.pdf` and a `preview.png` render.
+
+For quick experiments without the whole CLI pipeline:
+
+```bash
+.venv/bin/python tools/sampler_demo.py mesh.glb out_dir --kind building
+.venv/bin/python tools/style_sweep.py mesh.glb out_dir --kind building    # trade-off strip
+.venv/bin/python tools/learn/benchmark.py tag                              # score 46 held-out models
+.venv/bin/python tools/perceptual_eval.py out_dir/model.ldr photo.png      # build vs photo
+```
+
+The sampler core (annealing walk and energy bookkeeping) is in Rust
+(`native/sampler/`), about a hundred times faster than the Python
+reference it mirrors.  Build it once per architecture:
+
+```bash
+.venv/bin/python -m everything2lego.native build
+```
+
+### Learning
+
+Three data pipelines feed the sampler:
+
+- `tools/partsdb/` builds a parts database from LDraw, Rebrickable and
+  the official models: part shapes (4x4x4 masks per cell), connectors
+  (studs, pins, axles, bars, clips as points on part faces), wheel
+  assemblies (rim + tyre, mined from the official models), per-kind
+  usage, neighbourhood pair and path statistics.
+- `tools/learn/proposal_net.py` trains a small neural network on 361k
+  placements from the official models: it says which part comes next
+  from the cell's context (shape of the window, parts already built,
+  wider blocks around the cell, object kind).  Unlikelihood training
+  from the sampler's own over-used choices (`negatives.py`) pulls the
+  network away from mistakes.
+- `tools/learn/fit_energy.py` fits the sampler's energy weights by
+  moment matching on degraded real-shape targets, once pooled and once
+  per object kind.  Content and style weights are each floored so neither
+  drifts to zero.
+
+### Recipe builder (older)
+
+A hand-coded builder lives alongside the sampler for comparison and for
+the semantic pipeline below.
+
 ### Pure LEGO pipeline (mesh you already have)
 
 ```bash

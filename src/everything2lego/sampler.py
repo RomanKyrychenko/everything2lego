@@ -330,6 +330,7 @@ class Target:
     visible: np.ndarray               # (H, X, Z) bool: cells that show
     bits: Optional[np.ndarray] = None  # (H, X, Z) uint64: each cell's shape, 4x4x4 (default: want, full)
     kind: Optional[str] = None        # building, road_vehicle, creature, ... (vocabulary.json kinds)
+    region_kind: Optional[np.ndarray] = None   # (H, X, Z) str, per-cell kind; overrides `kind` where set
 
     def __post_init__(self):
         if self.bits is None:
@@ -339,6 +340,10 @@ class Target:
         known = known_kinds()
         if self.kind is not None and self.kind not in known:
             raise ValueError(f"unknown kind {self.kind!r}; one of {', '.join(sorted(known))}")
+        if self.region_kind is not None:
+            unknown = set(np.unique(self.region_kind)) - known - {"", None}
+            if unknown:
+                raise ValueError(f"unknown region kinds {unknown}; valid: {', '.join(sorted(known))}")
 
     def shape_descriptor(self) -> np.ndarray:
         ys, xs, zs = np.nonzero(self.want)
@@ -847,7 +852,11 @@ class Filler:
     def cell_prior(self, y: int, x: int, z: int) -> np.ndarray:
         """Per option, log P(it | the cell's context) from the network."""
         net = self.net
-        ctx = proposals.features(self.st.t.fill, self.st.kindgrid, self.static, y, x, z, self.obj,
+        obj = self.obj
+        rk = self.st.t.region_kind
+        if rk is not None and rk[y, x, z]:
+            obj = net.object_index.get(str(rk[y, x, z]), obj)
+        ctx = proposals.features(self.st.t.fill, self.st.kindgrid, self.static, y, x, z, obj,
                                  len(net.kinds), len(net.objects))
         return net.logprobs(ctx[None])[0][self.opt_out] + self.opt_lpart
 

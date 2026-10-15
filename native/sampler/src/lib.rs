@@ -108,6 +108,7 @@ pub struct Problem {
     pub opt_out: *const i32,   // n_opt: the network output of its token
     pub opt_lpart: *const f64, // n_opt: log P(part | token)
     pub opt_kind: *const i32,  // n_opt: its kind index, for the context
+    pub region_object: *const i32, // H*X*Z: per-cell object index, -1 = use net.object
     pub net_static: i32,       // the wider view's features per cell (proposals.static_context)
     pub static_: *const f32,   // H*X*Z*net_static
     pub t_start_share: f64,
@@ -565,6 +566,7 @@ struct Net {
     opt_out: Vec<i32>,
     opt_lpart: Vec<f64>,
     opt_kind: Vec<i32>,
+    region_object: Vec<i32>,
     n_static: usize,
     static_: Vec<f32>,
 }
@@ -587,6 +589,7 @@ impl Net {
             opt_out: v(p.opt_out, n_opt),
             opt_lpart: v(p.opt_lpart, n_opt),
             opt_kind: v(p.opt_kind, n_opt),
+            region_object: v(p.region_object, (p.h * p.x * p.z) as usize),
             n_static: p.net_static as usize,
             static_: v(p.static_, (p.h * p.x * p.z) as usize * p.net_static as usize),
         }
@@ -643,8 +646,12 @@ fn net_features(d: &Data, net: &Net, kindgrid: &[i32], y: i32, x: i32, z: i32) -
             }
         }
     }
-    if net.object >= 0 {
-        f[2 * nwin + net.kinds + 1 + net.object as usize] = 1.0;
+    let obj = {
+        let r = net.region_object[d.idx(y, x, z) as usize];
+        if r >= 0 { r } else { net.object }
+    };
+    if obj >= 0 {
+        f[2 * nwin + net.kinds + 1 + obj as usize] = 1.0;
     }
     let base = 2 * nwin + net.kinds + 1 + net.objects;
     let c = d.idx(y, x, z) * net.n_static;
@@ -1528,5 +1535,5 @@ pub unsafe extern "C" fn e2l_sample(p: *const Problem) -> i32 {
 /// The layout version: Python checks it before calling.
 #[no_mangle]
 pub extern "C" fn e2l_abi() -> i32 {
-    10
+    11
 }

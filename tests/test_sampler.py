@@ -146,3 +146,19 @@ def test_a_wheel_on_a_holder_is_held_at_its_side():
     bz = (hz - s[2]) // 2
     assert sampler.sides_join(holder, 0, 0, 0, o, by, W, bz)
     assert not sampler.sides_join(holder, 0, 0, 0, o, by, W + 1, bz)   # a stud apart: not joined
+
+
+def test_region_kind_overrides_object_kind():
+    """A per-cell region_kind can set different kinds in different regions
+    (a car's body vs its wheels); the sampler is told it per cell."""
+    want = np.ones((2, 4, 4), bool)
+    region = np.empty(want.shape, dtype=object)
+    region[:] = "building"
+    region[:, :2, :] = "road_vehicle"
+    target = sampler.Target(want, np.full(want.shape, 4), want.copy(), region_kind=region)
+    assert target.region_kind[0, 0, 0] == "road_vehicle"
+    # a kind that isn't known is refused
+    bad = np.where(region == "road_vehicle", "car", region)
+    import pytest
+    with pytest.raises(ValueError, match="unknown region kinds"):
+        sampler.Target(want, np.full(want.shape, 4), want.copy(), region_kind=bad)

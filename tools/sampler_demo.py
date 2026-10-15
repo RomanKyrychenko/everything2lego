@@ -59,7 +59,8 @@ def mesh_bits(t: MeshTarget, shape) -> np.ndarray:
     return bits
 
 
-def target_from_mesh(path: str, studs: int, shell: int, kind: str | None = None) -> Target:
+def target_from_mesh(path: str, studs: int, shell: int, kind: str | None = None,
+                     stand: int = 0) -> Target:
     t = MeshTarget.from_path(path, max_studs=studs, n_samples=40000, min_island_cells=8)
     occ = t.voxel_grid.occupied()
     solid = solid_volume(occ)
@@ -77,6 +78,12 @@ def target_from_mesh(path: str, studs: int, shell: int, kind: str | None = None)
     base = _dil(shadow, iterations=1)
     want[0] |= base
     bits[0] = np.where(base, FULL, bits[0])
+    if stand > 0:
+        # a plate `stand` studs wider on each side than the model's shadow,
+        # for a figure or small object that would otherwise sit on no plate
+        pad = _dil(shadow, iterations=stand)
+        want[0] |= pad
+        bits[0] = np.where(pad, FULL, bits[0])
     visible = (solid & ~binary_erosion(solid)) | (want & ~solid)
     pal = t.voxel_grid.palette_idx
     from scipy.ndimage import distance_transform_edt
@@ -107,9 +114,10 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--kind", default=None)
     ap.add_argument("--style", type=float, default=1.0, help="style weight: real-set statistics against form")
+    ap.add_argument("--stand", type=int, default=0, help="pad base plate by N studs (for figures or small objects)")
     a = ap.parse_args()
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
-    target = target_from_mesh(a.mesh, a.studs, a.shell, a.kind)
+    target = target_from_mesh(a.mesh, a.studs, a.shell, a.kind, stand=a.stand)
     models = load_models()
     t0 = time.time()
     from everything2lego.sampler import Weights

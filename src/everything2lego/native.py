@@ -28,7 +28,7 @@ from typing import Optional
 
 import numpy as np
 
-ABI = 10
+ABI = 11
 INFO_LEN = 16
 
 _P = C.POINTER
@@ -69,6 +69,7 @@ class Problem(C.Structure):
         ("w1", _P(C.c_float)), ("b1", _P(C.c_float)), ("w2", _P(C.c_float)), ("b2", _P(C.c_float)),
         ("mu", _P(C.c_float)), ("sd", _P(C.c_float)),
         ("opt_out", _P(C.c_int32)), ("opt_lpart", _P(C.c_double)), ("opt_kind", _P(C.c_int32)),
+        ("region_object", _P(C.c_int32)),  # H*X*Z: per-cell object index, -1 = use net_object
         ("net_static", C.c_int32), ("static", _P(C.c_float)),
         ("t_start_share", C.c_double), ("t_final_share", C.c_double),
         ("iters", C.c_int64), ("warmup", C.c_int64), ("seed", C.c_uint64),
@@ -328,6 +329,13 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
                                 ("opt_kind", okind, C.c_int32, np.int32),
                                 ("static", proposals.static_context(target.fill), C.c_float, np.float32)):
             setattr(p, name, _ptr(arr(a, dt), ct))
+        # per-cell region kinds, if any
+        if target.region_kind is not None:
+            region = np.array([[[nn.object_index.get(str(rk) if rk else "", -1) for rk in row]
+                                for row in layer] for layer in target.region_kind], dtype=np.int32)
+        else:
+            region = np.full(target.want.shape, -1, dtype=np.int32)
+        p.region_object = _ptr(arr(region, np.int32), C.c_int32)
     rc = lib.e2l_sample(C.byref(p))
     if rc == 1:
         raise RuntimeError("native sampler panicked")
