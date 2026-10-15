@@ -121,18 +121,18 @@ class RunningKL:
         return v
 
     def add(self, k, dc: float = 1) -> None:
-        """Counts may be weights (paths); a count within EPS of 0 is 0."""
+        """Counts may be weights (paths); keep the raw count so swap+undo
+        round-trips exactly.  The log terms clamp to 0 when counts fall
+        just below 0 (floating-point noise would give NaN otherwise)."""
         c0 = self.c.get(k, 0)
         c1 = c0 + dc
-        if c1 < self.EPS:
-            c1 = 0
         if c0 > 0:
             self.s_clogc -= c0 * math.log(c0)
         if c1 > 0:
             self.s_clogc += c1 * math.log(c1)
         self.s_clogp += dc * self._lp(k)
         self.n += dc
-        if c1:
+        if abs(c1) > self.EPS:
             self.c[k] = c1
         else:
             self.c.pop(k, None)

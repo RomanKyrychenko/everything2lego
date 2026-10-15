@@ -686,12 +686,11 @@ impl Kl {
         Kl { counts: vec![0.0; len], s_clogc: 0.0, s_clogp: 0.0, n: 0.0 }
     }
     fn add(&mut self, key: usize, dc: f64, logp: f64) {
-        // counts may be weights (paths); a count within EPS of 0 is 0
+        // counts may be weights (paths); keep the raw count so swap+undo
+        // round-trips exactly.  The log terms clamp to 0 when counts fall
+        // just below 0 (floating-point noise would give NaN otherwise).
         let c0 = self.counts[key];
-        let mut c1 = c0 + dc;
-        if c1 < 1e-9 {
-            c1 = 0.0;
-        }
+        let c1 = c0 + dc;
         if c0 > 0.0 {
             self.s_clogc -= c0 * c0.ln();
         }
@@ -1453,7 +1452,8 @@ fn swap(st: &mut State, rng: &mut Rng) -> Option<Undo> {
 }
 
 fn propose(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
-    let _ = swap;  // Rust swap introduces energy drift (unknown bookkeeping bug); Python only
+    let _ = swap;  // Rust swap introduces ~3% energy drift (bookkeeping bug in paths/sil);
+                   // Python engine has the move at 10% of iterations
     if rng.f64() < 0.5 {
         merge(st, rng)
     } else {
