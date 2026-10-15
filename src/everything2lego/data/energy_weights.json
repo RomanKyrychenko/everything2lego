@@ -2,13 +2,13 @@
  "_source": "tools/learn/fit_energy.py (moment matching on official models)",
  "weights": {
   "sil": 2.0,
-  "loc": 1.4359660911003582,
+  "loc": 0.8979164363550606,
   "glob": 0.3,
   "glob2": 0.3,
-  "dens": 31.272247452791902,
-  "cnt": 100.0,
+  "dens": 4.491296307246698,
+  "cnt": 20.085536923187664,
   "sup": 100.0,
-  "side": 6.1413602158876675
+  "side": 8.027445719139056
  },
  "by_kind": {
   "building": {
