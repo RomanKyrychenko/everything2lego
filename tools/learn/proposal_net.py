@@ -109,10 +109,12 @@ def dataset() -> None:
 
 
 def train(hidden: int = 128, epochs: int = 6, batch: int = 512, lr: float = 1e-3, seed: int = 0,
-          lam: float = 0.5) -> None:
+          lam: float = 0.5, resume: bool = False) -> None:
     """Maximum likelihood on the official placements, plus — when
     negatives.py has run — unlikelihood on the sampler's over-used choices:
-    -w log(1 - p(token | context)), w how much more our builds use it."""
+    -w log(1 - p(token | context)), w how much more our builds use it.
+    `resume=True`: start from the previously saved network (compounds
+    across iterate.sh rounds instead of restarting weights each round)."""
     neg = np.load(NEG) if NEG.exists() else None
     d = np.load(DS)
     X, Y, V = d["X"].astype(np.float32), d["Y"].astype(np.int64), d["val"]
@@ -120,10 +122,17 @@ def train(hidden: int = 128, epochs: int = 6, batch: int = 512, lr: float = 1e-3
     Xt, Yt, Xv, Yv = X[~V], Y[~V], X[V], Y[V]
     mu, sd = Xt.mean(0), Xt.std(0) + 1e-3
     rnd = np.random.default_rng(seed)
-    P = {"W1": rnd.normal(0, np.sqrt(2 / X.shape[1]), (X.shape[1], hidden)).astype(np.float32),
-         "b1": np.zeros(hidden, np.float32),
-         "W2": rnd.normal(0, np.sqrt(1 / hidden), (hidden, C)).astype(np.float32),
-         "b2": np.zeros(C, np.float32)}
+    if resume and OUT.exists():
+        prev = np.load(OUT)
+        P = {"W1": prev["W1"].copy(), "b1": prev["b1"].copy(),
+             "W2": prev["W2"].copy(), "b2": prev["b2"].copy()}
+        mu, sd = prev["mu"], prev["sd"]              # keep normalisation stable
+        print(f"resuming from {OUT.name}: W1 {P['W1'].shape}, W2 {P['W2'].shape}", flush=True)
+    else:
+        P = {"W1": rnd.normal(0, np.sqrt(2 / X.shape[1]), (X.shape[1], hidden)).astype(np.float32),
+             "b1": np.zeros(hidden, np.float32),
+             "W2": rnd.normal(0, np.sqrt(1 / hidden), (hidden, C)).astype(np.float32),
+             "b2": np.zeros(C, np.float32)}
     m = {k: np.zeros_like(v) for k, v in P.items()}
     s = {k: np.zeros_like(v) for k, v in P.items()}
     step = 0
@@ -179,4 +188,4 @@ def train(hidden: int = 128, epochs: int = 6, batch: int = 512, lr: float = 1e-3
 
 
 if __name__ == "__main__":
-    {"dataset": dataset, "train": train}[sys.argv[1]]()
+    {"dataset": dataset, "train": lambda: train(resume="--resume" in sys.argv)}[sys.argv[1]]()
