@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 
+import os
 import numpy as np
 
 from . import bonding, bricks, colors, pack, stability
@@ -31,9 +32,9 @@ def assemble_sampler(grid: VoxelGrid, *, kind: str | None = None, iters: int = 3
     visible = want & ~binary_erosion(want)
     import pickle, pandas as pd
     from pathlib import Path
-    FEATURES = Path("/Volumes/PRO-G40/lego_data/analysis/features.pkl")
+    FEATURES = Path(os.environ.get("LEGO_DATA", "/Volumes/PRO-G40/lego_data")) / "analysis" / "features.pkl"
     rows = pickle.load(open(FEATURES, "rb"))
-    kinds_csv = Path("/Volumes/PRO-G40/lego_data/analysis/set_kinds.csv")
+    kinds_csv = Path(os.environ.get("LEGO_DATA", "/Volumes/PRO-G40/lego_data")) / "analysis" / "set_kinds.csv"
     if kinds_csv.exists():
         k = pd.read_csv(kinds_csv).drop_duplicates("id", keep="last")
         kmap = dict(zip(k.id, k.kind))

@@ -1452,13 +1452,10 @@ fn swap(st: &mut State, rng: &mut Rng) -> Option<Undo> {
 }
 
 fn propose(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
-    let _ = swap;  // Rust swap introduces ~3% energy drift (bookkeeping bug in paths/sil);
-                   // Python engine has the move at 10% of iterations
-    if rng.f64() < 0.5 {
-        merge(st, rng)
-    } else {
-        retile(st, filler, rng)
-    }
+    let r = rng.f64();
+    if r < 0.1 { swap(st, rng) }
+    else if r < 0.55 { merge(st, rng) }
+    else { retile(st, filler, rng) }
 }
 
 // ---------------------------------------------------------------------------

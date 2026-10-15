@@ -337,10 +337,16 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         else:
             region = np.full(target.want.shape, -1, dtype=np.int32)
         p.region_object = _ptr(arr(region, np.int32), C.c_int32)
+    # swap variants: same box kind, size, AND cells positions (so halo matches)
     from .sampler import _box_kind
     group_id = {}
-    opt_g = [-1 if _box_kind(v) is None else group_id.setdefault((_box_kind(v), o.size), len(group_id))
-             for v, o in opts]
+    opt_g = []
+    for v, o in opts:
+        if _box_kind(v) is None:
+            opt_g.append(-1); continue
+        cells_sig = tuple(sorted(map(tuple, o.cells.tolist())))
+        key = (_box_kind(v), o.size, cells_sig)
+        opt_g.append(group_id.setdefault(key, len(group_id)))
     p.opt_variants = _ptr(arr(opt_g, np.int32), C.c_int32)
     rc = lib.e2l_sample(C.byref(p))
     if rc == 1:

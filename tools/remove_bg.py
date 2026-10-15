@@ -15,12 +15,13 @@ windows and shadowed base to the saliency net, but those pixels sit at
 the object's depth, inside its outline — they are given back; the table
 in front and the trees behind are at other depths and stay out.
 """
+import os
 import sys
 import numpy as np
 import onnxruntime as ort
 from PIL import Image
 
-MODEL_PATH = "/Volumes/PRO-G40/models/rembg/u2net.onnx"
+MODEL_PATH = os.environ.get("REMBG_MODEL", "/Volumes/PRO-G40/models/rembg/u2net.onnx")
 
 src, dst = sys.argv[1], sys.argv[2]
 depth_npz = sys.argv[3] if len(sys.argv) > 3 else None

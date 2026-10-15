@@ -11,6 +11,7 @@ the object is (vocabulary.json's kinds: building, road_vehicle, creature,
 """
 from __future__ import annotations
 
+import os
 import argparse
 import json
 import pickle
@@ -30,10 +31,10 @@ from everything2lego.sampler import FULL, SUB, Target, popcount, sample  # noqa:
 from everything2lego.semantic_v2.massing import solid_volume  # noqa: E402
 from everything2lego.semantic_v2.mesh_target import MeshTarget  # noqa: E402
 
-FEATURES = Path("/Volumes/PRO-G40/lego_data/analysis/features.pkl")
+FEATURES = Path(os.environ.get("LEGO_DATA", "/Volumes/PRO-G40/lego_data")) / "analysis" / "features.pkl"
 
 
-KINDS = Path("/Volumes/PRO-G40/lego_data/analysis/set_kinds.csv")
+KINDS = Path(os.environ.get("LEGO_DATA", "/Volumes/PRO-G40/lego_data")) / "analysis" / "set_kinds.csv"
 def mesh_bits(t: MeshTarget, shape) -> np.ndarray:
     """Each grid cell's shape: the mesh voxelised SUB times finer in grid
     units (studs, plates, studs), closed and filled solid, each cell's

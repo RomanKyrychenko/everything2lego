@@ -1049,15 +1049,19 @@ def _box_kind(vp: "VPart") -> Optional[str]:
 
 @lru_cache(maxsize=8)
 def _variants(vocab: tuple["VPart", ...]) -> dict:
-    """(box_kind, size) -> [(VPart, Orient)] of same shape and footprint,
-    with and without side connectors.  swap() picks one of these at random."""
+    """(box_kind, size, cells positions) -> [(VPart, Orient)] of same shape
+    and same cells (halo matches), with and without side connectors.  swap()
+    picks one of these at random.  Parts whose cells differ even at the same
+    box size (a corner plate vs a full plate) are in different groups: a
+    swap between them would change the halo and leak energy."""
     out: dict = {}
     for vp in vocab:
         k = _box_kind(vp)
         if k is None:
             continue
         for o in vp.orients:
-            out.setdefault((k, o.size), []).append((vp, o))
+            cells_sig = tuple(sorted(map(tuple, o.cells.tolist())))
+            out.setdefault((k, o.size, cells_sig), []).append((vp, o))
     return out
 
 
