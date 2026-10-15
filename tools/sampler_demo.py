@@ -153,6 +153,7 @@ def main() -> None:
     ap.add_argument("--stand", type=int, default=0, help="pad base plate by N studs (for figures or small objects)")
     ap.add_argument("--regions", default=None, help='JSON file mapping palette codes to kinds, e.g. {"0":"road_vehicle","4":"object"} — gives different sampler weights per colour region')
     ap.add_argument("--segmentation", default=None, help="npz from tools/segment_mesh.py: per-voxel region_kind (overrides --regions)")
+    ap.add_argument("--prune-unsupported", action="store_true", help="drop parts with no vertical supporter below from the final build (post-process)")
     a = ap.parse_args()
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     regions = None
@@ -172,6 +173,11 @@ def main() -> None:
     from everything2lego.sampler import Weights
     ps, info = sample(target, models, iters=a.iters, seed=a.seed, weights=Weights(style=a.style))
     info["seconds"] = round(time.time() - t0, 1)
+    if a.prune_unsupported:
+        from everything2lego.supports import prune_unsupported
+        ps, pruned = prune_unsupported(list(ps))
+        info["pruned_unsupported"] = pruned
+        info["parts"] = len(ps)
     write_ldr(ps, out / "model.ldr")
     (out / "info.json").write_text(json.dumps({k: v for k, v in info.items()}, indent=1, default=float))
     print(json.dumps({k: v for k, v in info.items() if k != "history"}, default=float))
