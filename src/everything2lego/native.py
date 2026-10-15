@@ -28,7 +28,7 @@ from typing import Optional
 
 import numpy as np
 
-ABI = 11
+ABI = 12
 INFO_LEN = 16
 
 _P = C.POINTER
@@ -70,6 +70,7 @@ class Problem(C.Structure):
         ("mu", _P(C.c_float)), ("sd", _P(C.c_float)),
         ("opt_out", _P(C.c_int32)), ("opt_lpart", _P(C.c_double)), ("opt_kind", _P(C.c_int32)),
         ("region_object", _P(C.c_int32)),  # H*X*Z: per-cell object index, -1 = use net_object
+        ("opt_variants", _P(C.c_int32)),  # n_opt: swap-group id (-1 none)
         ("net_static", C.c_int32), ("static", _P(C.c_float)),
         ("t_start_share", C.c_double), ("t_final_share", C.c_double),
         ("iters", C.c_int64), ("warmup", C.c_int64), ("seed", C.c_uint64),
@@ -336,6 +337,11 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         else:
             region = np.full(target.want.shape, -1, dtype=np.int32)
         p.region_object = _ptr(arr(region, np.int32), C.c_int32)
+    from .sampler import _box_kind
+    group_id = {}
+    opt_g = [-1 if _box_kind(v) is None else group_id.setdefault((_box_kind(v), o.size), len(group_id))
+             for v, o in opts]
+    p.opt_variants = _ptr(arr(opt_g, np.int32), C.c_int32)
     rc = lib.e2l_sample(C.byref(p))
     if rc == 1:
         raise RuntimeError("native sampler panicked")

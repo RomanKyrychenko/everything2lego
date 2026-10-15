@@ -109,6 +109,7 @@ pub struct Problem {
     pub opt_lpart: *const f64, // n_opt: log P(part | token)
     pub opt_kind: *const i32,  // n_opt: its kind index, for the context
     pub region_object: *const i32, // H*X*Z: per-cell object index, -1 = use net.object
+    pub opt_variants: *const i32,  // n_opt: swap-group id (same box kind + size); -1 none
     pub net_static: i32,       // the wider view's features per cell (proposals.static_context)
     pub static_: *const f32,   // H*X*Z*net_static
     pub t_start_share: f64,
@@ -227,6 +228,8 @@ struct Data {
     snap: Vec<i32>,
     opts: Vec<Opt>,
     boxes: std::collections::HashMap<(i32, i32, i32, i32), usize>,
+    variants: std::collections::HashMap<i32, Vec<usize>>,
+    opt_variants: Vec<i32>,
     w_cov: f64,
     w_col: f64,
     w_loc: f64,
@@ -343,6 +346,11 @@ impl Data {
                 bot_mask,
             });
         }
+        let opt_variants = v(p.opt_variants, n_opt);
+        let mut variants: std::collections::HashMap<i32, Vec<usize>> = std::collections::HashMap::new();
+        for (k, &g) in opt_variants.iter().enumerate() {
+            if g >= 0 { variants.entry(g).or_default().push(k); }
+        }
         let n_col = p.n_col as usize;
         let n_tok = p.n_tok as usize;
         Data {
@@ -364,6 +372,8 @@ impl Data {
             snap: v(p.snap, p.n_part as usize * n_col),
             opts,
             boxes,
+            variants,
+            opt_variants,
             w_cov: p.w_cov,
             w_col: p.w_col,
             w_loc: p.w_loc,
@@ -1283,6 +1293,7 @@ impl Filler {
 enum Undo {
     Retile { added: Vec<usize>, removed: Vec<Item> },
     Merge { k: usize, a: Item, b: Item },
+    Swap { k: usize, a: Item },
 }
 
 fn undo(st: &mut State, u: Undo) {
@@ -1299,6 +1310,10 @@ fn undo(st: &mut State, u: Undo) {
             st.remove(k);
             st.add(a);
             st.add(b);
+        }
+        Undo::Swap { k, a } => {
+            st.remove(k);
+            st.add(a);
         }
     }
 }
@@ -1402,7 +1417,43 @@ fn merge(st: &mut State, rng: &mut Rng) -> Option<Undo> {
     Some(Undo::Merge { k, a: ra, b: rb })
 }
 
+/// Replace a plain part with another of the same box kind and footprint
+/// (87087 side-stud, 11211 double-side, round, tooth; sampler.swap).
+fn swap(st: &mut State, rng: &mut Rng) -> Option<Undo> {
+    if st.live.is_empty() {
+        return None;
+    }
+    let i = st.live[rng.below(st.live.len())];
+    let a = *st.item(i);
+    let d = st.d;
+    let g = d.opt_variants[a.opt];
+    if g < 0 {
+        return None;
+    }
+    let group = &d.variants[&g];
+    if group.len() < 2 {
+        return None;
+    }
+    let mut k = a.opt;
+    for _ in 0..4 {
+        k = group[rng.below(group.len())];
+        if k != a.opt {
+            break;
+        }
+    }
+    if k == a.opt {
+        return None;
+    }
+    if d.snap[d.opts[k].part * d.n_col + a.colour as usize] != a.colour {
+        return None;                                 // not made in this colour
+    }
+    let ra = st.remove(i);
+    let k2 = st.add(Item { opt: k, colour: a.colour, y: a.y, x: a.x, z: a.z });
+    Some(Undo::Swap { k: k2, a: ra })
+}
+
 fn propose(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
+    let _ = swap;  // Rust swap introduces energy drift (unknown bookkeeping bug); Python only
     if rng.f64() < 0.5 {
         merge(st, rng)
     } else {
@@ -1535,5 +1586,5 @@ pub unsafe extern "C" fn e2l_sample(p: *const Problem) -> i32 {
 /// The layout version: Python checks it before calling.
 #[no_mangle]
 pub extern "C" fn e2l_abi() -> i32 {
-    11
+    12
 }

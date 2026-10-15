@@ -71,7 +71,11 @@ def main() -> None:
     ap.add_argument("--n", type=int, default=50)
     ap.add_argument("--no-net", action="store_true")
     ap.add_argument("--hand", action="store_true", help="hand-set weights, not the learned ones")
+    ap.add_argument("--quick", action="store_true", help="10 models x 10k iters: ~15s on 8 cores")
     a = ap.parse_args()
+    if a.quick:
+        a.n = min(a.n, 10)
+        a.iters = min(a.iters, 10000)
     C.F._init()
     import pickle
     rows = pickle.load(open(C.F.OUT, "rb"))

@@ -46,6 +46,7 @@ def _shapes() -> dict:
     return out
 
 
+@lru_cache(maxsize=256)
 def model(name: str):
     """(part_nums, tokens, i0, i1, bits) of an official model: each part's
     grid box [i0, i1) (y, x, z), and each cell's shape as a 64-bit mask of
