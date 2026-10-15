@@ -61,7 +61,9 @@ def mesh_bits(t: MeshTarget, shape) -> np.ndarray:
 
 
 def target_from_mesh(path: str, studs: int, shell: int, kind: str | None = None,
-                     stand: int = 0, regions: dict[int, str] | None = None) -> Target:
+                     stand: int = 0, regions: dict[int, str] | None = None,
+                     seg_label: np.ndarray | None = None,
+                     seg_kind_of: dict[int, str] | None = None) -> Target:
     t = MeshTarget.from_path(path, max_studs=studs, n_samples=40000, min_island_cells=8)
     occ = t.voxel_grid.occupied()
     solid = solid_volume(occ)
@@ -101,6 +103,18 @@ def target_from_mesh(path: str, studs: int, shell: int, kind: str | None = None,
         region_kind = np.full(want.shape, "", dtype=object)
         for code, k in regions.items():
             region_kind[colour == int(code)] = k
+    if seg_label is not None and seg_kind_of:
+        from everything2lego.sampler import known_kinds
+        valid = known_kinds()
+        bad = set(seg_kind_of.values()) - valid
+        if bad:
+            raise ValueError(f"segmentation kinds not known: {bad}; valid: {sorted(valid)}")
+        if seg_label.shape != want.shape:
+            raise ValueError(f"segmentation shape {seg_label.shape} != target {want.shape}; "
+                             f"use the same --studs for segment_mesh and sampler_demo")
+        region_kind = np.full(want.shape, "", dtype=object)
+        for rid, k in seg_kind_of.items():
+            region_kind[seg_label == int(rid)] = k
     return Target(want=want, colour=colour, visible=visible, bits=bits, kind=kind, region_kind=region_kind)
 
 
@@ -127,12 +141,19 @@ def main() -> None:
     ap.add_argument("--style", type=float, default=1.0, help="style weight: real-set statistics against form")
     ap.add_argument("--stand", type=int, default=0, help="pad base plate by N studs (for figures or small objects)")
     ap.add_argument("--regions", default=None, help='JSON file mapping palette codes to kinds, e.g. {"0":"road_vehicle","4":"object"} — gives different sampler weights per colour region')
+    ap.add_argument("--segmentation", default=None, help="npz from tools/segment_mesh.py: per-voxel region_kind (overrides --regions)")
     a = ap.parse_args()
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     regions = None
     if a.regions:
         regions = {int(k): v for k, v in json.loads(Path(a.regions).read_text()).items()}
-    target = target_from_mesh(a.mesh, a.studs, a.shell, a.kind, stand=a.stand, regions=regions)
+    seg_label, seg_kind_of = None, None
+    if a.segmentation:
+        d = np.load(a.segmentation, allow_pickle=True)
+        seg_label = d["label"]
+        seg_kind_of = {int(k): v for k, v in d["kind_of"]}
+    target = target_from_mesh(a.mesh, a.studs, a.shell, a.kind, stand=a.stand, regions=regions,
+                              seg_label=seg_label, seg_kind_of=seg_kind_of)
     models = load_models()
     t0 = time.time()
     from everything2lego.sampler import Weights
