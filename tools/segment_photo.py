@@ -191,8 +191,33 @@ def main() -> None:
     _, nearest_face = tree.query(cell_centres_mesh)
     label = np.full(occ.shape, -1, np.int64)
     label[ys, xs, zs] = face_region[nearest_face]
+    # photo-silhouette carve: voxels whose projection to the fitted view
+    # lands on the photo's background get removed before the sampler runs.
+    # shortcut: single-view silhouette carve, so interior hollows that
+    # project behind foreground pixels are kept; upgrade to a VGG
+    # perceptual loss evaluated during annealing when we need colour/texture
+    # match too, not just outline.
+    biggest = np.asarray(max(masks, key=lambda m: m["area"])["segmentation"], bool)
+    Hp, Wp = biggest.shape
+    project = _camera(*view)
+    verts2 = project(mesh.vertices)
+    vlo, vhi = verts2[:, :2].min(0), verts2[:, :2].max(0)
+    scale = min(Wp / (vhi[0] - vlo[0] + 1e-6), Hp / (vhi[1] - vlo[1] + 1e-6)) * 0.95
+    cx, cy = Wp / 2 - 0.5 * (vlo[0] + vhi[0]) * scale, Hp / 2 - 0.5 * (vlo[1] + vhi[1]) * scale
+    vox_cam = project(cell_centres_mesh)
+    px = (vox_cam[:, 0] * scale + cx).astype(int).clip(0, Wp - 1)
+    py = (Hp - 1 - (vox_cam[:, 1] * scale + cy)).astype(int).clip(0, Hp - 1)
+    carve = np.zeros(occ.shape, bool)
+    carve[ys, xs, zs] = ~biggest[py, px]
+    frac = float(carve.sum()) / max(1, int(occ.sum()))
+    if frac > 0.5:
+        print(f"  carve skipped: biggest SAM mask excludes {frac:.0%} of mesh — probably not the subject", flush=True)
+        carve[:] = False
+    else:
+        print(f"  carve: {int(carve.sum())} / {int(occ.sum())} voxels drop ({frac:.0%}) by photo silhouette", flush=True)
     np.savez(a.out, label=label,
-             kind_of=np.array([[str(r), region_kind[r]] for r in region_kind], dtype=object))
+             kind_of=np.array([[str(r), region_kind[r]] for r in region_kind], dtype=object),
+             carve=carve)
     seen = {int(r): int((label == r).sum()) for r in region_kind}
     print(f"-> {a.out}: {len(region_kind)} regions by mask-majority; cells {dict(sorted(seen.items(), key=lambda x: -x[1])[:10])}")
 

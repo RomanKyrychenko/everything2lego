@@ -63,11 +63,19 @@ def mesh_bits(t: MeshTarget, shape) -> np.ndarray:
 def target_from_mesh(path: str, studs: int, shell: int, kind: str | None = None,
                      stand: int = 0, regions: dict[int, str] | None = None,
                      seg_label: np.ndarray | None = None,
-                     seg_kind_of: dict[int, str] | None = None) -> Target:
+                     seg_kind_of: dict[int, str] | None = None,
+                     carve: np.ndarray | None = None) -> Target:
     t = MeshTarget.from_path(path, max_studs=studs, n_samples=40000, min_island_cells=8)
     occ = t.voxel_grid.occupied()
+    if carve is not None:
+        if carve.shape != occ.shape:
+            raise ValueError(f"carve shape {carve.shape} != voxel shape {occ.shape}; "
+                             f"use the same --studs for segment_photo and sampler_demo")
+        occ = occ & ~carve
     solid = solid_volume(occ)
     bits = mesh_bits(t, occ.shape)
+    if carve is not None:
+        bits[carve] = 0
     frac = popcount(bits) / SUB ** 3
     inner = solid.copy()
     for _ in range(shell):
@@ -147,13 +155,15 @@ def main() -> None:
     regions = None
     if a.regions:
         regions = {int(k): v for k, v in json.loads(Path(a.regions).read_text()).items()}
-    seg_label, seg_kind_of = None, None
+    seg_label, seg_kind_of, carve = None, None, None
     if a.segmentation:
         d = np.load(a.segmentation, allow_pickle=True)
         seg_label = d["label"]
         seg_kind_of = {int(k): v for k, v in d["kind_of"]}
+        if "carve" in d.files:
+            carve = d["carve"]
     target = target_from_mesh(a.mesh, a.studs, a.shell, a.kind, stand=a.stand, regions=regions,
-                              seg_label=seg_label, seg_kind_of=seg_kind_of)
+                              seg_label=seg_label, seg_kind_of=seg_kind_of, carve=carve)
     models = load_models()
     t0 = time.time()
     from everything2lego.sampler import Weights
