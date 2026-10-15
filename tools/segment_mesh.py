@@ -78,6 +78,53 @@ def _components(mesh: trimesh.Trimesh, face_label: np.ndarray) -> np.ndarray:
     return comp
 
 
+def _merge_small(mesh: trimesh.Trimesh, face_region: np.ndarray, min_faces: int = 20) -> np.ndarray:
+    """Absorb regions with fewer than `min_faces` into the largest adjacent
+    region (and from there into theirs' if still small).  Keeps the big
+    regions' ids; small regions' faces take their new region's id.  Removes
+    projection noise and SAM mask edge artefacts that split one surface
+    into many tiny components."""
+    from collections import Counter, defaultdict
+    region_faces = defaultdict(list)
+    for i, r in enumerate(face_region):
+        region_faces[int(r)].append(i)
+    small = {r for r, f in region_faces.items() if len(f) < min_faces}
+    if not small:
+        return face_region
+    # neighbour sizes per small region
+    e = mesh.face_adjacency
+    adj = defaultdict(lambda: Counter())
+    for a, b in e:
+        ra, rb = int(face_region[a]), int(face_region[b])
+        if ra != rb:
+            adj[ra][rb] += 1
+            adj[rb][ra] += 1
+    out = face_region.copy()
+    changed = True
+    while changed and small:
+        changed = False
+        for r in list(small):
+            # pick the LARGEST neighbour that isn't also small
+            big_neighbours = [(len(region_faces[nb]), nb) for nb in adj[r] if nb not in small]
+            if not big_neighbours:
+                continue
+            _, target = max(big_neighbours)
+            for f in region_faces[r]:
+                out[f] = target
+            region_faces[target].extend(region_faces[r])
+            # retarget adj
+            for nb, w in adj[r].items():
+                if nb != target:
+                    adj[target][nb] += w
+                    adj[nb][target] += w
+                    adj[nb].pop(r, None)
+            del adj[r]
+            del region_faces[r]
+            small.remove(r)
+            changed = True
+    return out
+
+
 def segment(mesh: trimesh.Trimesh, k: int = 4) -> list[dict]:
     """[{id, size (faces), rgb, bbox}] of each region (connected faces of
     the same colour cluster), largest first."""
@@ -153,7 +200,7 @@ def main() -> None:
     # take its region id (connected-components label).  Fast query via trimesh.
     face_region = np.zeros(len(mesh.faces), np.int64)
     comp = _components(mesh, _cluster_colours(_face_colours(mesh), a.k)[0])
-    face_region[:] = comp
+    face_region[:] = _merge_small(mesh, comp)
     centres = mesh.triangles_center
     from scipy.spatial import cKDTree
     tree = cKDTree(centres)
