@@ -899,12 +899,18 @@ class Filler:
         h, W, D = o.size
         if oy + h >= t.fill.shape[0]:
             return 0.0
-        above = t.fill[oy + h, ox:ox + W, oz:oz + D] >= 0.5
+        tf = t.fill[oy + h]
+        H_, D_ = tf.shape
+        above = np.zeros((W, D), bool)
+        x0, x1 = max(0, ox), min(H_, ox + W)             # clip to the target grid
+        z0, z1 = max(0, oz), min(D_, oz + D)
+        above[x0 - ox:x1 - ox, z0 - oz:z1 - oz] = tf[x0:x1, z0:z1] >= 0.5
         if not above.any():
             return 0.0
         studs = np.zeros((W, D), bool)
         for dx, dz in o.top:
-            studs[dx, dz] = True
+            if 0 <= dx < W and 0 <= dz < D:
+                studs[dx, dz] = True
         return float((above & ~studs).sum()) / (W * D)
 
     def fill(self, cells: list[tuple[int, int, int]]) -> list[int]:
@@ -1032,6 +1038,61 @@ def merge(state: State, filler: Filler, rnd: random.Random):
 # driver
 # ---------------------------------------------------------------------------
 
+def _box_kind(vp: "VPart") -> Optional[str]:
+    """Which plain shape family a part belongs to (box, side-stud, round all
+    count as 'brick'/'plate'/'tile'), for swap()'s candidate lookup."""
+    k = {"brick": "brick", "brickS": "brick", "brickR": "brick",
+         "plate": "plate", "plateS": "plate", "plateR": "plate",
+         "tile": "tile", "tileS": "tile", "tileR": "tile"}.get(vp.part.shape)
+    return None if vp.part.companion else k
+
+
+@lru_cache(maxsize=8)
+def _variants(vocab: tuple["VPart", ...]) -> dict:
+    """(box_kind, size) -> [(VPart, Orient)] of same shape and footprint,
+    with and without side connectors.  swap() picks one of these at random."""
+    out: dict = {}
+    for vp in vocab:
+        k = _box_kind(vp)
+        if k is None:
+            continue
+        for o in vp.orients:
+            out.setdefault((k, o.size), []).append((vp, o))
+    return out
+
+
+def swap(state: "State", filler: "Filler", rnd: random.Random):
+    """Replace a plain part at (y, x, z) with another part of the same box
+    kind and size (a side-stud variant, a round brick, a jumper plate).
+    The Metropolis step accepts when it helps (a new side connector meets a
+    neighbour, bare_sides goes down); it drops when it doesn't."""
+    if not state.items:
+        return None
+    i = rnd.choice(list(state.items))
+    a = state.items[i]
+    k = _box_kind(a.vp)
+    if k is None:
+        return None
+    variants = _variants(filler.vocab).get((k, a.ori.size), [])
+    if len(variants) < 2:
+        return None
+    for _ in range(4):                                   # try a few times to find a different one
+        v, o = rnd.choice(variants)
+        if v is not a.vp:
+            break
+    else:
+        return None
+    if palette()[a.colour].code not in v.colours:
+        return None
+    ra = state.remove(i)
+    j = state.add(Item(v, o, a.colour, a.y, a.x, a.z))
+
+    def undo(j=j, ra=ra):
+        state.remove(j)
+        state.add(ra)
+    return undo
+
+
 def _dens(pairs: float, n_ref: float, sd: float) -> float:
     """The density term's statistic: log(pairs / N_ref)^2 / (2 sd^2)."""
     return math.log(pairs / n_ref) ** 2 / (2 * sd ** 2) if pairs > 0 else 0.0
@@ -1087,7 +1148,9 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
     history = [e]
     deltas = []
     for _ in range(warmup):                         # measure the scale, change nothing
-        undo = (merge if rnd.random() < 0.5 else retile)(st, filler, rnd)
+        r = rnd.random()
+        move = swap if r < 0.1 else merge if r < 0.55 else retile
+        undo = move(st, filler, rnd)
         if undo is None:
             continue
         deltas.append(abs(st.energy() - e))
@@ -1097,7 +1160,9 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
     accepted = 0
     for it in range(iters):
         T = t_start * (t_final / t_start) ** (it / max(1, iters - 1))
-        undo = (merge if rnd.random() < 0.5 else retile)(st, filler, rnd)
+        r = rnd.random()
+        move = swap if r < 0.1 else merge if r < 0.55 else retile
+        undo = move(st, filler, rnd)
         if undo is None:
             continue
         e2 = st.energy()
