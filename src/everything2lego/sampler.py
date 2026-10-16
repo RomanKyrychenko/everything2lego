@@ -796,6 +796,11 @@ class Filler:
         self.st, self.rnd, self.vocab, self.top_k = state, rnd, vocab, top_k
         self.opts: list[tuple[VPart, Orient]] = [(v, o) for v in vocab for o in v.orients]
         self.logprior = option_logprior(vocab, state.s, kind, tile_boost=tile_boost, snot_boost=snot_boost)
+        from . import hinges as _hinges
+        vocab_ldraws = {v.part.ldraw for v in vocab}
+        self.hinge_by_a = {a: [p for p in ps if p["b_ldraw"] in vocab_ldraws]
+                            for a, ps in _hinges.by_a_ldraw().items() if a in vocab_ldraws}
+        self.hinge_by_a = {a: ps for a, ps in self.hinge_by_a.items() if ps}
         self.net = state.net if net else None
         if self.net is not None:
             # P(part, yaw | cell) = P(token | context) * P(part | token): the network
@@ -1122,6 +1127,79 @@ def _dens(pairs: float, n_ref: float, sd: float) -> float:
     return math.log(pairs / n_ref) ** 2 / (2 * sd ** 2) if pairs > 0 else 0.0
 
 
+def hinge_swap(state: "State", filler: "Filler", rnd: random.Random):
+    """Attach B at its canonical pose to an existing A in the state, drawn
+    from the hinge-pair catalogue (tools/partsdb/hinges.py).  Fails
+    silently when no A is placed, the target B isn't in the vocabulary,
+    or any target cell is already filled by a different part.  Metropolis
+    accepts when the pair improves style/support/outline over the
+    previous occupant (if any) at B's cells."""
+    pairs_by_a = filler.hinge_by_a
+    if not pairs_by_a or not state.items:
+        return None
+    # pick an existing item whose ldraw is an "A" in some pair
+    candidates = [i for i, it in state.items.items() if it.vp.part.ldraw in pairs_by_a]
+    if not candidates:
+        return None
+    i = rnd.choice(candidates)
+    a = state.items[i]
+    pair = rnd.choice(pairs_by_a[a.vp.part.ldraw])
+    # find a VPart for B's ldraw name
+    b_vp = next((v for v in filler.vocab if v.part.ldraw == pair["b_ldraw"]), None)
+    if b_vp is None:
+        return None
+    yaw = pair["yaw_s"]
+    b_ori = next((o for o in b_vp.orients if o.rot == yaw), None)
+    if b_ori is None:
+        return None
+    # compute B's sampler position
+    if pair["stacked"]:
+        by, bx, bz = a.y + a.h, a.x, a.z
+    else:
+        by, bx, bz = a.y + pair["dy_s"], a.x + pair["dx_s"], a.z + pair["dz_s"]
+    H, X, Z = state.owner.shape
+    cy = b_ori.cells[:, 0] + by
+    cx = b_ori.cells[:, 1] + bx
+    cz = b_ori.cells[:, 2] + bz
+    if (cy < 0).any() or (cy >= H).any() or (cx < 0).any() or (cx >= X).any() \
+       or (cz < 0).any() or (cz >= Z).any():
+        return None
+    # cells must be empty or all owned by one evictable item (not A itself)
+    occ_ids = {int(state.owner[y, x, z]) for y, x, z in zip(cy, cx, cz)}
+    occ_ids.discard(-1)
+    occ_ids.discard(i)                                                # don't evict A
+    if len(occ_ids) > 1:
+        return None                                                   # mixed; too complex
+    evicted = None
+    if occ_ids:
+        j = next(iter(occ_ids))
+        # only evict if ALL its cells are inside B's footprint (don't orphan)
+        oy, ox, oz = state.items[j].cells()
+        if not np.all(state.owner[oy, ox, oz] == j):
+            return None
+        if not set(zip(oy.tolist(), ox.tolist(), oz.tolist())).issubset(
+                set(zip(cy.tolist(), cx.tolist(), cz.tolist()))):
+            return None
+        evicted = state.remove(j)
+    # pick a colour that matches A's for a tight hinge pair
+    colour = a.colour if (b_vp.colours is None or palette()[a.colour].code in b_vp.colours) else next(
+        iter(b_vp.colours), None)
+    if colour is None or palette()[colour if isinstance(colour, int) else 0].code not in (b_vp.colours or set()):
+        colour = a.colour
+    # if the chosen colour isn't actually in B's allowed set, bail
+    if b_vp.colours and palette()[colour].code not in b_vp.colours:
+        if evicted is not None:
+            state.add(evicted)
+        return None
+    k = state.add(Item(b_vp, b_ori, colour, by, bx, bz))
+
+    def undo(k=k, evicted=evicted):
+        state.remove(k)
+        if evicted is not None:
+            state.add(evicted)
+    return undo
+
+
 def sample(target: Target, models: list[dict] | None = None, *, iters: int = 20000, seed: int = 0,
            weights: Optional[Weights] = None, t_start_share: float = 0.05, t_final_share: float = 0.002,
            k_models: int = 50, n_special: int = 160, log_every: int = 2000,
@@ -1176,7 +1254,7 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
     deltas = []
     for _ in range(warmup):                         # measure the scale, change nothing
         r = rnd.random()
-        move = swap if r < 0.1 else merge if r < 0.55 else retile
+        move = hinge_swap if r < 0.03 else swap if r < 0.1 else merge if r < 0.55 else retile
         undo = move(st, filler, rnd)
         if undo is None:
             continue
@@ -1188,7 +1266,7 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
     for it in range(iters):
         T = t_start * (t_final / t_start) ** (it / max(1, iters - 1))
         r = rnd.random()
-        move = swap if r < 0.1 else merge if r < 0.55 else retile
+        move = hinge_swap if r < 0.03 else swap if r < 0.1 else merge if r < 0.55 else retile
         undo = move(st, filler, rnd)
         if undo is None:
             continue

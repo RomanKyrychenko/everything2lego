@@ -72,6 +72,7 @@ class Problem(C.Structure):
         ("region_object", _P(C.c_int32)),  # H*X*Z: per-cell object index, -1 = use net_object
         ("opt_variants", _P(C.c_int32)),  # n_opt: swap-group id (-1 none)
         ("net_static", C.c_int32), ("static", _P(C.c_float)),
+        ("n_hinge", C.c_int32), ("hinge_data", _P(C.c_int32)),  # n_hinge*5: (opt_a, opt_b, dy, dx, dz)
         ("t_start_share", C.c_double), ("t_final_share", C.c_double),
         ("iters", C.c_int64), ("warmup", C.c_int64), ("seed", C.c_uint64),
         ("top_k", C.c_int32), ("log_every", C.c_int64),
@@ -348,6 +349,29 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         key = (_box_kind(v), o.size, cells_sig)
         opt_g.append(group_id.setdefault(key, len(group_id)))
     p.opt_variants = _ptr(arr(opt_g, np.int32), C.c_int32)
+    # hinge pairs: (opt_a, opt_b, dy, dx, dz) resolved from hinges.py's catalogue
+    from . import hinges as _hinges
+    opt_by_ldraw_yaw: dict[tuple[str, int], int] = {}
+    for k, (v_, o_) in enumerate(opts):
+        opt_by_ldraw_yaw.setdefault((v_.part.ldraw, o_.rot), k)
+    hinge_rows: list[int] = []
+    for pair in _hinges.load_pairs():
+        a_opt = opt_by_ldraw_yaw.get((pair["a_ldraw"], 0))
+        if a_opt is None:
+            continue
+        b_opt = opt_by_ldraw_yaw.get((pair["b_ldraw"], pair["yaw_s"]))
+        if b_opt is None:
+            continue
+        a_h = opts[a_opt][1].size[0]
+        if pair["stacked"]:
+            hinge_rows.extend([a_opt, b_opt, a_h, 0, 0])
+        else:
+            hinge_rows.extend([a_opt, b_opt, pair["dy_s"], pair["dx_s"], pair["dz_s"]])
+    if hinge_rows:
+        p.n_hinge = len(hinge_rows) // 5
+        p.hinge_data = _ptr(arr(np.array(hinge_rows, np.int32), np.int32), C.c_int32)
+    else:
+        p.n_hinge = 0
     rc = lib.e2l_sample(C.byref(p))
     if rc == 1:
         raise RuntimeError("native sampler panicked")

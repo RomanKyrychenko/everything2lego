@@ -112,6 +112,11 @@ pub struct Problem {
     pub opt_variants: *const i32,  // n_opt: swap-group id (same box kind + size); -1 none
     pub net_static: i32,       // the wider view's features per cell (proposals.static_context)
     pub static_: *const f32,   // H*X*Z*net_static
+    // hinge pairs (everything2lego/hinges.py; tools/partsdb/hinges.py): each entry
+    // is (opt_a, opt_b, dy, dx, dz) in sampler grid units, with opt_a/b indexing
+    // into the opts array.  See hinge_swap() for how the pose is applied.
+    pub n_hinge: i32,
+    pub hinge_data: *const i32,   // n_hinge*5: (opt_a, opt_b, dy, dx, dz)
     pub t_start_share: f64,
     pub t_final_share: f64,
     pub iters: i64,
@@ -253,6 +258,10 @@ struct Data {
     fits: Vec<u8>,
     net: Option<Net>,
     top_k: usize,
+    hinge_a: Vec<usize>,
+    hinge_b: Vec<usize>,
+    hinge_pose: Vec<[i32; 3]>, // (dy, dx, dz)
+    hinge_by_a: std::collections::HashMap<usize, Vec<usize>>, // opt_a -> indices into hinge_a/b/pose
 }
 
 unsafe fn v<T: Copy>(p: *const T, n: usize) -> Vec<T> {
@@ -353,7 +362,7 @@ impl Data {
         }
         let n_col = p.n_col as usize;
         let n_tok = p.n_tok as usize;
-        Data {
+        let mut d = Data {
             h: p.h,
             x: p.x,
             z: p.z,
@@ -401,7 +410,30 @@ impl Data {
             fits: v(p.fits, (p.n_conn * p.n_conn) as usize),
             net: if p.use_net != 0 { Some(Net::from(p, n_opt)) } else { None },
             top_k: p.top_k.max(1) as usize,
+            hinge_a: Vec::new(),
+            hinge_b: Vec::new(),
+            hinge_pose: Vec::new(),
+            hinge_by_a: std::collections::HashMap::new(),
+        };
+        let n_hinge = p.n_hinge.max(0) as usize;
+        if n_hinge > 0 {
+            let raw = v(p.hinge_data, n_hinge * 5);
+            for k in 0..n_hinge {
+                let a = raw[5 * k] as usize;
+                let b = raw[5 * k + 1] as usize;
+                let dy = raw[5 * k + 2];
+                let dx = raw[5 * k + 3];
+                let dz = raw[5 * k + 4];
+                if a >= d.opts.len() || b >= d.opts.len() {
+                    continue;
+                }
+                d.hinge_by_a.entry(a).or_default().push(d.hinge_a.len());
+                d.hinge_a.push(a);
+                d.hinge_b.push(b);
+                d.hinge_pose.push([dy, dx, dz]);
+            }
         }
+        d
     }
 
     #[inline]
@@ -1293,6 +1325,7 @@ enum Undo {
     Retile { added: Vec<usize>, removed: Vec<Item> },
     Merge { k: usize, a: Item, b: Item },
     Swap { k: usize, a: Item },
+    Hinge { k: usize, evicted: Option<Item> },
 }
 
 fn undo(st: &mut State, u: Undo) {
@@ -1313,6 +1346,12 @@ fn undo(st: &mut State, u: Undo) {
         Undo::Swap { k, a } => {
             st.remove(k);
             st.add(a);
+        }
+        Undo::Hinge { k, evicted } => {
+            st.remove(k);
+            if let Some(it) = evicted {
+                st.add(it);
+            }
         }
     }
 }
@@ -1451,9 +1490,81 @@ fn swap(st: &mut State, rng: &mut Rng) -> Option<Undo> {
     Some(Undo::Swap { k: k2, a: ra })
 }
 
+/// Attach B at its canonical pose to an existing A, drawn from the hinge-pair
+/// catalogue (everything2lego/hinges.py).  Mirrors sampler.hinge_swap.
+fn hinge_swap(st: &mut State, rng: &mut Rng) -> Option<Undo> {
+    let d = st.d;
+    if d.hinge_a.is_empty() || st.live.is_empty() {
+        return None;
+    }
+    // sample a few live items and pick one whose opt has a hinge pair
+    let mut i = usize::MAX;
+    for _ in 0..8 {
+        let cand = st.live[rng.below(st.live.len())];
+        let a = st.item(cand);
+        if d.hinge_by_a.contains_key(&a.opt) {
+            i = cand;
+            break;
+        }
+    }
+    if i == usize::MAX {
+        return None;
+    }
+    let a = *st.item(i);
+    let pairs = &d.hinge_by_a[&a.opt];
+    let p = pairs[rng.below(pairs.len())];
+    let b_opt = d.hinge_b[p];
+    let [dy, dx, dz] = d.hinge_pose[p];
+    let (by, bx, bz) = (a.y + dy, a.x + dx, a.z + dz);
+    let b = &d.opts[b_opt];
+    // in-bounds?
+    if by < 0 || by + b.h > d.h || bx < 0 || bx + b.w > d.x || bz < 0 || bz + b.d > d.z {
+        return None;
+    }
+    // cells either empty or all owned by one evictable item (not A)
+    let mut occ: Option<usize> = None;
+    for &(cy, cx, cz, _, _) in &b.cells {
+        let j = st.owner[d.idx(by + cy, bx + cx, bz + cz)];
+        if j < 0 {
+            continue;
+        }
+        let j = j as usize;
+        if j == i {
+            return None;
+        }
+        if let Some(k) = occ {
+            if k != j {
+                return None;
+            }
+        } else {
+            occ = Some(j);
+        }
+    }
+    let evicted = if let Some(j) = occ {
+        // only evict j if all its cells are inside B's footprint (don't orphan)
+        let jitem = *st.item(j);
+        let jo = &d.opts[jitem.opt];
+        let b_cells: std::collections::HashSet<(i32, i32, i32)> =
+            b.cells.iter().map(|&(cy, cx, cz, _, _)| (by + cy, bx + cx, bz + cz)).collect();
+        let ok = jo.cells.iter().all(|&(cy, cx, cz, _, _)|
+            b_cells.contains(&(jitem.y + cy, jitem.x + cx, jitem.z + cz)));
+        if !ok {
+            return None;
+        }
+        Some(st.remove(j))
+    } else {
+        None
+    };
+    // colour: inherit A's unless not allowed; snap replaces a disallowed one
+    let colour = d.snap[b.part * d.n_col + a.colour as usize];
+    let k = st.add(Item { opt: b_opt, colour, y: by, x: bx, z: bz });
+    Some(Undo::Hinge { k, evicted })
+}
+
 fn propose(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
     let r = rng.f64();
-    if r < 0.1 { swap(st, rng) }
+    if r < 0.03 { hinge_swap(st, rng) }
+    else if r < 0.1 { swap(st, rng) }
     else if r < 0.55 { merge(st, rng) }
     else { retile(st, filler, rng) }
 }
