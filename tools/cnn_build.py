@@ -80,18 +80,36 @@ def main() -> None:
     n_tokens, n_kinds = len(tokens), len(kinds)
     tok_idx = {t: i for i, t in enumerate(tokens)}
     kind_idx = {k: i for i, k in enumerate(kinds)}
+    factored = bool(ckpt.get("factored"))
 
     target = target_from_mesh(a.mesh, a.studs, a.shell, a.kind)
     vocab = select_vocabulary(target.kind, a.n_special)
-    opts = [(o.size[0], o.size[1], o.size[2], o.cells, v.part, v.colours, o.rot,
-             tok_idx.get(v.part.ldraw, n_tokens))
-            for v in vocab for o in v.orients]
+    if factored:
+        cats = ckpt["cats"]
+        sizes = [tuple(s) for s in ckpt["sizes"]]
+        cat_idx = {c: i for i, c in enumerate(cats)}
+        size_idx = {tuple(s): i for i, s in enumerate(sizes)}
+        n_cats, n_sizes = len(cats), len(sizes)
+        opts = []
+        for v in vocab:
+            cid = cat_idx.get(v.category, n_cats)
+            for o in v.orients:
+                sid = size_idx.get(tuple(o.size), n_sizes)
+                yid = o.rot & 3
+                opts.append((o.size[0], o.size[1], o.size[2], o.cells, v.part, v.colours, o.rot,
+                              cid, sid, yid))
+    else:
+        n_cats = n_sizes = 0
+        opts = [(o.size[0], o.size[1], o.size[2], o.cells, v.part, v.colours, o.rot,
+                 tok_idx.get(v.part.ldraw, n_tokens))
+                for v in vocab for o in v.orients]
     H, X, Z = target.want.shape
 
     device = "cpu"                                                    # Conv3D not supported on MPS in torch 2.2
-    print(f"device: {device}, grid: {grid}", flush=True)
+    print(f"device: {device}, grid: {grid}, factored: {factored}", flush=True)
 
-    m = Model(n_tokens=n_tokens, n_kinds=n_kinds, grid=grid).to(device)
+    mkw = {"n_cats": n_cats, "n_sizes": n_sizes} if factored else {}
+    m = Model(n_tokens=n_tokens, n_kinds=n_kinds, grid=grid, factored=factored, **mkw).to(device)
     m.load_state_dict(ckpt["state_dict"])
     m.eval()
 
@@ -132,13 +150,22 @@ def main() -> None:
         prev_t = torch.tensor(new_prev, device=device)[None]            # (1, L)
         chunk_t = pos_t[..., 0]                                       # same-Y-layer chunking
         with torch.no_grad():
-            logits = m(v.unsqueeze(0), pos_t, prev_t, kind_t, chunk_id=chunk_t)[0, -1]
-            lp = logits - logits.max()
-            lp = lp - torch.logsumexp(lp, dim=-1)
-            lp = lp.cpu().numpy()
+            out = m(v.unsqueeze(0), pos_t, prev_t, kind_t, chunk_id=chunk_t)
+            if factored:
+                lc, ls, ly = (o[0, -1] for o in out)
+                lpc = (lc - lc.max() - torch.logsumexp(lc - lc.max(), dim=-1)).cpu().numpy()
+                lps = (ls - ls.max() - torch.logsumexp(ls - ls.max(), dim=-1)).cpu().numpy()
+                lpy = (ly - ly.max() - torch.logsumexp(ly - ly.max(), dim=-1)).cpu().numpy()
+            else:
+                logits = out[0, -1]
+                lp = (logits - logits.max() - torch.logsumexp(logits - logits.max(), dim=-1)).cpu().numpy()
         # collect valid options with (score, index)
         valid = []
-        for k, (h, W, D, cells_arr, part, colours, rot, tok) in enumerate(opts):
+        for k, opt in enumerate(opts):
+            if factored:
+                h, W, D, cells_arr, part, colours, rot, cid, sid, yid = opt
+            else:
+                h, W, D, cells_arr, part, colours, rot, tok = opt
             if cy + h > H or cx + W > X or cz + D > Z:
                 continue
             abs_cells = cells_arr + np.array([cy, cx, cz])
@@ -146,13 +173,19 @@ def main() -> None:
                 continue
             if not target.want[abs_cells[:, 0], abs_cells[:, 1], abs_cells[:, 2]].all():
                 continue
-            score = float(lp[tok]) + a.prefer_length * (len(cells_arr) - 1)
+            if factored:
+                score = float(lpc[cid]) + float(lps[sid]) + float(lpy[yid])
+            else:
+                score = float(lp[tok])
+            score += a.prefer_length * (len(cells_arr) - 1)
             valid.append((score, k))
         if not valid:
             continue
         valid.sort(reverse=True)
         best_k = valid[0][1]
-        h, W, D, cells_arr, part, colours, rot, tok = opts[best_k]
+        opt = opts[best_k]
+        h, W, D, cells_arr, part, colours, rot = opt[:7]
+        tok = tok_idx.get(part.ldraw, n_tokens) if factored else opt[7]  # state_emb still indexes by ldraw
         abs_cells = cells_arr + np.array([cy, cx, cz])
         allowed_codes = set(colours) if colours else None
         colour = _best_colour(target.colour[abs_cells[:, 0], abs_cells[:, 1], abs_cells[:, 2]], allowed_codes)

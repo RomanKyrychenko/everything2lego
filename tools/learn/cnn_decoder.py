@@ -44,6 +44,7 @@ from everything2lego.style import kind_of  # noqa: E402
 
 DATASET_DIR = Path("/Volumes/PRO-G40/lego_data/analysis/omr_dataset")
 MODEL_PATH = Path("/Volumes/PRO-G40/lego_data/analysis/cnn_decoder.pt")
+MODEL_PATH_FACTORED = Path("/Volumes/PRO-G40/lego_data/analysis/cnn_decoder_factored.pt")
 KNOWN_KINDS = ("building", "road_vehicle", "creature", "object", "figure", "scenery", "mechanism", "train")
 
 
@@ -57,17 +58,33 @@ def _tokens_and_kinds():
     return tokens, kinds
 
 
+def _factorization():
+    """Factored label spaces: category (16+unk), footprint (h,w,d) joint
+    (observed-sizes + unk), yaw (4).  Returns ordered lists and lookup
+    maps:   ldraw -> cat_id,   (h,w,d) -> size_id."""
+    vocab = vocabulary()
+    cats = sorted({v.category for v in vocab})
+    sizes = sorted({tuple(o.size) for v in vocab for o in v.orients})
+    cat_of = {v.part.ldraw: cats.index(v.category) for v in vocab}
+    size_of = {s: i for i, s in enumerate(sizes)}
+    return cats, sizes, cat_of, size_of
+
+
 class OMRDataset(Dataset):
     """One sample = one OMR model.  Returns a target voxel grid resized to
     (grid, grid, grid) and the placement sequence (positions + token ids +
-    kind id)."""
+    kind id).  In factored mode also returns cat_id, size_id, yaw_id per
+    placement."""
 
-    def __init__(self, grid: int = 16, max_placements: int = 300):
+    def __init__(self, grid: int = 16, max_placements: int = 300, factored: bool = False):
         self.grid = grid
         self.max_placements = max_placements
+        self.factored = factored
         self.tokens, self.kinds = _tokens_and_kinds()
         self.tok_idx = {t: i for i, t in enumerate(self.tokens)}
         self.kind_idx = {k: i for i, k in enumerate(self.kinds)}
+        if factored:
+            self.cats, self.sizes, self.cat_of, self.size_of = _factorization()
         self.files = sorted(f for f in DATASET_DIR.glob("*.npz") if not f.name.startswith("._"))
 
     def __len__(self):
@@ -81,6 +98,12 @@ class OMRDataset(Dataset):
         kind = str(d["kind"])
         kind_i = self.kind_idx.get(kind, len(self.kinds))
         tok_ids = np.array([self.tok_idx.get(str(l), len(self.tokens)) for l in ldraws], np.int64)
+        if self.factored:
+            w, h3, dd = d["w"], d["h"], d["d"]                             # dataset uses (h,w,d) convention
+            yaw = d["opt_yaw"].astype(np.int64) & 3
+            cat = np.array([self.cat_of.get(str(l), len(self.cats)) for l in ldraws], np.int64)
+            sz = np.array([self.size_of.get((int(h3[j]), int(w[j]), int(dd[j])), len(self.sizes))
+                            for j in range(len(ldraws))], np.int64)
         # resize voxel grid to (grid, grid, grid) via torch interpolate
         v = torch.from_numpy(voxels)[None, None]  # (1, 1, H, X, Z)
         v = F.interpolate(v, size=(self.grid, self.grid, self.grid), mode="trilinear", align_corners=False)
@@ -94,9 +117,15 @@ class OMRDataset(Dataset):
         if len(tok_ids) > self.max_placements:
             idx = np.random.permutation(len(tok_ids))[:self.max_placements]
             pos = pos[idx]; tok_ids = tok_ids[idx]
+            if self.factored:
+                cat = cat[idx]; sz = sz[idx]; yaw = yaw[idx]
         # sort bottom-up for teacher forcing
         order = np.lexsort((pos[:, 2], pos[:, 1], pos[:, 0]))
         pos = pos[order]; tok_ids = tok_ids[order]
+        if self.factored:
+            cat = cat[order]; sz = sz[order]; yaw = yaw[order]
+            return (v, torch.from_numpy(pos), torch.from_numpy(tok_ids), kind_i,
+                    torch.from_numpy(cat), torch.from_numpy(sz), torch.from_numpy(yaw))
         return v, torch.from_numpy(pos), torch.from_numpy(tok_ids), kind_i
 
 
@@ -104,7 +133,7 @@ def _collate(batch):
     """Pad placement sequences to the longest in the batch.  Returns
     chunk_id = Y-layer of each placement (-1 for padding) so the model
     can attend only within the same layer."""
-    voxels, poss, toks, kinds = zip(*batch)
+    voxels, poss, toks, kinds = (list(x) for x in zip(*[b[:4] for b in batch]))
     v = torch.stack(voxels, 0)
     L = max(len(t) for t in toks)
     pos_pad = torch.zeros(len(batch), L, 3, dtype=torch.long)
@@ -114,7 +143,19 @@ def _collate(batch):
         pos_pad[i, :len(p)] = p
         tok_pad[i, :len(t)] = t
         chunk_pad[i, :len(p)] = p[:, 0]                               # Y-layer id = chunk id
-    return v, pos_pad, tok_pad, torch.tensor(kinds, dtype=torch.long), chunk_pad
+    if len(batch[0]) == 4:
+        return v, pos_pad, tok_pad, torch.tensor(kinds, dtype=torch.long), chunk_pad
+    # factored: also pad cat/size/yaw
+    cat_pad = torch.full((len(batch), L), -1, dtype=torch.long)
+    size_pad = torch.full((len(batch), L), -1, dtype=torch.long)
+    yaw_pad = torch.full((len(batch), L), -1, dtype=torch.long)
+    for i, b in enumerate(batch):
+        c, s, y = b[4], b[5], b[6]
+        cat_pad[i, :len(c)] = c
+        size_pad[i, :len(s)] = s
+        yaw_pad[i, :len(y)] = y
+    return (v, pos_pad, tok_pad, torch.tensor(kinds, dtype=torch.long), chunk_pad,
+            cat_pad, size_pad, yaw_pad)
 
 
 class Model(nn.Module):
@@ -126,11 +167,13 @@ class Model(nn.Module):
     dataset size.  Attention is a next-session item on GPU."""
 
     def __init__(self, n_tokens: int, n_kinds: int, grid: int = 16, ch: int = 32,
-                 d_head: int = 128, chunk_attn: bool = True):
+                 d_head: int = 128, chunk_attn: bool = True, factored: bool = False,
+                 n_cats: int = 0, n_sizes: int = 0):
         """`chunk_attn=True` runs a 1-layer self-attention over placements
         WITHIN the same Y-layer (chunks are typically 10-50 placements, so
-        attention stays O(50^2) per layer, CPU-practical).  Attention is
-        shaped by a chunk mask passed in forward."""
+        attention stays O(50^2) per layer, CPU-practical).  `factored=True`
+        swaps the single n_tokens-way head for three smaller heads over
+        (category, footprint, yaw) — denser training signal per class."""
         super().__init__()
         self.grid = grid
         self.ch = ch
@@ -143,6 +186,7 @@ class Model(nn.Module):
         self.state_emb = nn.Embedding(n_tokens + 2, 16)
         self.pos_emb = nn.Embedding(grid, 16)
         self.n_tokens = n_tokens
+        self.factored = factored
         d_in = ch + 16 + 16 + 48
         self.proj = nn.Linear(d_in, d_head)
         self.chunk_attn = chunk_attn
@@ -151,10 +195,17 @@ class Model(nn.Module):
                                                  dim_feedforward=d_head * 2,
                                                  batch_first=True, dropout=0.0)
             self.attn = nn.TransformerEncoder(layer, num_layers=1)
-        self.head = nn.Sequential(
-            nn.Linear(d_head, d_head), nn.ReLU(),
-            nn.Linear(d_head, n_tokens + 1),
-        )
+        if factored:
+            trunk = nn.Sequential(nn.Linear(d_head, d_head), nn.ReLU())
+            self.head_trunk = trunk
+            self.head_cat = nn.Linear(d_head, n_cats + 1)
+            self.head_size = nn.Linear(d_head, n_sizes + 1)
+            self.head_yaw = nn.Linear(d_head, 4)
+        else:
+            self.head = nn.Sequential(
+                nn.Linear(d_head, d_head), nn.ReLU(),
+                nn.Linear(d_head, n_tokens + 1),
+            )
 
     def forward(self, voxels, pos, prev_tok, kind, chunk_id=None):
         """chunk_id (B, L): same-id positions attend to each other (within
@@ -187,69 +238,109 @@ class Model(nn.Module):
             for b in range(B):
                 out[b:b+1] = self.attn(h[b:b+1], mask=mask[b])
             h = out
+        if self.factored:
+            t = self.head_trunk(h)
+            return self.head_cat(t), self.head_size(t), self.head_yaw(t)
         return self.head(h)
 
 
 def train(epochs: int = 5, batch: int = 4, lr: float = 1e-3, grid: int = 16, limit: int = 0,
-          resume: bool = False):
-    ds = OMRDataset(grid=grid)
+          resume: bool = False, factored: bool = False):
+    ds = OMRDataset(grid=grid, factored=factored)
     if limit:
         ds.files = ds.files[:limit]
     n = len(ds)
     tr = int(n * 0.9)
     train_set = torch.utils.data.Subset(ds, range(tr))
     val_set = torch.utils.data.Subset(ds, range(tr, n))
+    extra = f", cats={len(ds.cats)}, sizes={len(ds.sizes)}" if factored else ""
     print(f"dataset: {n} models ({tr} train / {n - tr} val), grid={grid}, "
-          f"tokens={len(ds.tokens)}, kinds={len(ds.kinds)}", flush=True)
+          f"tokens={len(ds.tokens)}, kinds={len(ds.kinds)}{extra}, factored={factored}", flush=True)
     dl_tr = DataLoader(train_set, batch_size=batch, shuffle=True, collate_fn=_collate, num_workers=0)
     dl_v = DataLoader(val_set, batch_size=batch, shuffle=False, collate_fn=_collate, num_workers=0)
-    # Conv3D isn't supported on MPS (torch 2.2); stay on CPU.
-    device = "cpu"
+    device = "cpu"                                                     # Conv3D not supported on MPS (torch 2.2)
     print(f"device: {device} (Conv3D not supported on MPS)", flush=True)
-    m = Model(len(ds.tokens), len(ds.kinds), grid=grid).to(device)
-    if resume and MODEL_PATH.exists():
-        prev = torch.load(MODEL_PATH, map_location=device, weights_only=False)
+    mkw = {"n_cats": len(ds.cats), "n_sizes": len(ds.sizes)} if factored else {}
+    m = Model(len(ds.tokens), len(ds.kinds), grid=grid, factored=factored, **mkw).to(device)
+    out_path = MODEL_PATH_FACTORED if factored else MODEL_PATH
+    if resume and out_path.exists():
+        prev = torch.load(out_path, map_location=device, weights_only=False)
         m.load_state_dict(prev["state_dict"])
-        print(f"resumed from {MODEL_PATH.name}", flush=True)
+        print(f"resumed from {out_path.name}", flush=True)
     opt = torch.optim.AdamW(m.parameters(), lr=lr)
     for ep in range(epochs):
         m.train()
         t0 = time.time()
         total = n_tokens = 0.0
-        for v, pos, tok, kind, chunk in dl_tr:
-            v, pos, tok, kind, chunk = v.to(device), pos.to(device), tok.to(device), kind.to(device), chunk.to(device)
+        for batch_data in dl_tr:
+            if factored:
+                v, pos, tok, kind, chunk, cat, sz, yaw = (b.to(device) for b in batch_data)
+            else:
+                v, pos, tok, kind, chunk = (b.to(device) for b in batch_data)
             prev = torch.full_like(tok, len(ds.tokens) + 1)
             prev[:, 1:] = tok[:, :-1].clamp(0, len(ds.tokens))
-            logits = m(v, pos, prev, kind, chunk_id=chunk)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), tok.view(-1), ignore_index=-1)
+            out = m(v, pos, prev, kind, chunk_id=chunk)
+            if factored:
+                lc, ls, ly = out
+                loss = (F.cross_entropy(lc.view(-1, lc.size(-1)), cat.view(-1), ignore_index=-1)
+                        + F.cross_entropy(ls.view(-1, ls.size(-1)), sz.view(-1), ignore_index=-1)
+                        + F.cross_entropy(ly.view(-1, ly.size(-1)), yaw.view(-1), ignore_index=-1))
+            else:
+                loss = F.cross_entropy(out.view(-1, out.size(-1)), tok.view(-1), ignore_index=-1)
             opt.zero_grad(); loss.backward(); opt.step()
             n_valid = (tok != -1).sum().item()
             total += loss.item() * n_valid; n_tokens += n_valid
         tr_nll = total / max(1, n_tokens)
         m.eval()
         with torch.no_grad():
-            total = n_tokens = correct = top5 = 0.0
-            for v, pos, tok, kind, chunk in dl_v:
-                v, pos, tok, kind, chunk = v.to(device), pos.to(device), tok.to(device), kind.to(device), chunk.to(device)
-                prev = torch.full_like(tok, len(ds.tokens) + 1)
-                prev[:, 1:] = tok[:, :-1].clamp(0, len(ds.tokens))
-                logits = m(v, pos, prev, kind, chunk_id=chunk)
-                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), tok.view(-1), ignore_index=-1)
-                mask = tok != -1
-                nv = mask.sum().item()
-                total += loss.item() * nv; n_tokens += nv
-                top1 = logits.argmax(-1) == tok
-                correct += (top1 & mask).sum().item()
-                top5p = logits.topk(5, dim=-1).indices == tok.unsqueeze(-1)
-                top5 += (top5p.any(-1) & mask).sum().item()
-        val_nll = total / max(1, n_tokens)
-        print(f"epoch {ep+1}: train nll {tr_nll:.3f}  val nll {val_nll:.3f}  "
-              f"top-1 {correct/max(1,n_tokens):.3f}  top-5 {top5/max(1,n_tokens):.3f}  "
-              f"({time.time()-t0:.1f}s)", flush=True)
-    MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"state_dict": m.state_dict(), "n_tokens": len(ds.tokens), "n_kinds": len(ds.kinds),
-                "tokens": ds.tokens, "kinds": ds.kinds, "grid": grid}, MODEL_PATH)
-    print(f"-> {MODEL_PATH}")
+            if factored:
+                tot_c = tot_s = tot_y = c_top1 = s_top1 = y_top1 = n_tokens = 0.0
+                for batch_data in dl_v:
+                    v, pos, tok, kind, chunk, cat, sz, yaw = (b.to(device) for b in batch_data)
+                    prev = torch.full_like(tok, len(ds.tokens) + 1)
+                    prev[:, 1:] = tok[:, :-1].clamp(0, len(ds.tokens))
+                    lc, ls, ly = m(v, pos, prev, kind, chunk_id=chunk)
+                    mask = tok != -1
+                    nv = mask.sum().item()
+                    tot_c += F.cross_entropy(lc.view(-1, lc.size(-1)), cat.view(-1), ignore_index=-1).item() * nv
+                    tot_s += F.cross_entropy(ls.view(-1, ls.size(-1)), sz.view(-1), ignore_index=-1).item() * nv
+                    tot_y += F.cross_entropy(ly.view(-1, ly.size(-1)), yaw.view(-1), ignore_index=-1).item() * nv
+                    c_top1 += ((lc.argmax(-1) == cat) & mask).sum().item()
+                    s_top1 += ((ls.argmax(-1) == sz) & mask).sum().item()
+                    y_top1 += ((ly.argmax(-1) == yaw) & mask).sum().item()
+                    n_tokens += nv
+                print(f"epoch {ep+1}: train nll {tr_nll:.3f}  "
+                      f"val cat {tot_c/max(1,n_tokens):.3f}/top1 {c_top1/max(1,n_tokens):.3f}  "
+                      f"size {tot_s/max(1,n_tokens):.3f}/top1 {s_top1/max(1,n_tokens):.3f}  "
+                      f"yaw {tot_y/max(1,n_tokens):.3f}/top1 {y_top1/max(1,n_tokens):.3f}  "
+                      f"({time.time()-t0:.1f}s)", flush=True)
+            else:
+                total = n_tokens = correct = top5 = 0.0
+                for v, pos, tok, kind, chunk in dl_v:
+                    v, pos, tok, kind, chunk = (b.to(device) for b in (v, pos, tok, kind, chunk))
+                    prev = torch.full_like(tok, len(ds.tokens) + 1)
+                    prev[:, 1:] = tok[:, :-1].clamp(0, len(ds.tokens))
+                    logits = m(v, pos, prev, kind, chunk_id=chunk)
+                    loss = F.cross_entropy(logits.view(-1, logits.size(-1)), tok.view(-1), ignore_index=-1)
+                    mask = tok != -1
+                    nv = mask.sum().item()
+                    total += loss.item() * nv; n_tokens += nv
+                    top1 = logits.argmax(-1) == tok
+                    correct += (top1 & mask).sum().item()
+                    top5p = logits.topk(5, dim=-1).indices == tok.unsqueeze(-1)
+                    top5 += (top5p.any(-1) & mask).sum().item()
+                val_nll = total / max(1, n_tokens)
+                print(f"epoch {ep+1}: train nll {tr_nll:.3f}  val nll {val_nll:.3f}  "
+                      f"top-1 {correct/max(1,n_tokens):.3f}  top-5 {top5/max(1,n_tokens):.3f}  "
+                      f"({time.time()-t0:.1f}s)", flush=True)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    ckpt = {"state_dict": m.state_dict(), "n_tokens": len(ds.tokens), "n_kinds": len(ds.kinds),
+            "tokens": ds.tokens, "kinds": ds.kinds, "grid": grid, "factored": factored}
+    if factored:
+        ckpt["cats"] = ds.cats
+        ckpt["sizes"] = [list(s) for s in ds.sizes]
+    torch.save(ckpt, out_path)
+    print(f"-> {out_path}")
 
 
 if __name__ == "__main__":
@@ -261,9 +352,10 @@ if __name__ == "__main__":
     ap.add_argument("--grid", type=int, default=16)
     ap.add_argument("--limit", type=int, default=0, help="use only first N dataset files (quick test)")
     ap.add_argument("--resume", action="store_true", help="load weights from existing cnn_decoder.pt before training")
+    ap.add_argument("--factored", action="store_true", help="three heads (category, footprint, yaw) instead of one n_tokens-way softmax")
     a = ap.parse_args()
     if a.cmd == "train":
         train(epochs=a.epochs, batch=a.batch, lr=a.lr, grid=a.grid, limit=a.limit,
-               resume="--resume" in sys.argv)
+               resume=a.resume, factored=a.factored)
     else:
         print("eval not implemented yet; load the model and run inference directly")
