@@ -415,13 +415,30 @@ def pair_density(models: list[dict], default: float = 1.0, default_sd: float = 0
     return float(np.median(d)), max(sd, 0.1)
 
 
-def nearest_models(rows: list[dict], shape, k: int = 50, kind: Optional[str] = None) -> list[dict]:
+def _ref_volume(row: dict) -> float:
+    """A ref model's volume in cells (plate * stud * stud), from its shape
+    descriptor (log_w, log_d, log_h_bricks, fill): see pair_density."""
+    s = row["shape"]
+    return float(np.exp(s[0]) * np.exp(s[1]) * np.exp(s[2]) * s[3] * 2.5)
+
+
+def nearest_models(rows: list[dict], shape, k: int = 50, kind: Optional[str] = None,
+                    target_vol: Optional[float] = None, scale_tol: float = 3.0) -> list[dict]:
     """The `k` models nearest in shape — among those of the same kind of
-    object, when there are enough of them."""
+    object, when there are enough of them.  `target_vol` (cells) filters
+    refs whose own volume is within `scale_tol`× (default 3×) of the
+    target before the shape nearest-neighbour runs, so a 3000-part target
+    doesn't pick its style loss from 300-part sets whose pair density is
+    naturally much higher."""
     if kind:
         same = [r for r in rows if r.get("object_kind") == kind]
-        if len(same) >= k // 2:
+        if len(same) >= max(1, k // 2):
             rows = same
+    if target_vol is not None and target_vol > 0:
+        lo, hi = target_vol / scale_tol, target_vol * scale_tol
+        scaled = [r for r in rows if lo <= _ref_volume(r) <= hi]
+        if len(scaled) >= max(1, k // 2):
+            rows = scaled
     X = np.array([r["shape"] for r in rows])
     mu, sd = X.mean(0), X.std(0) + 1e-9
     d = (((X - mu) / sd - (np.asarray(shape) - mu) / sd) ** 2).sum(1)
@@ -1218,7 +1235,8 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
     "python" here; "auto" the native one when it is built."""
     from . import native
     if stats is None:
-        refs = nearest_models(models, target.shape_descriptor(), k_models, target.kind)
+        refs = nearest_models(models, target.shape_descriptor(), k_models, target.kind,
+                              target_vol=float(target.want.sum()))
         stats = Stats(refs)
         stats.degree = token_degree(models)
     else:

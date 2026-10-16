@@ -40,14 +40,21 @@ from everything2lego.sampler import known_kinds  # noqa: E402
 
 
 def _face_colours(mesh: trimesh.Trimesh) -> np.ndarray | None:
-    """(F, 3) uint8 face colours — from face colours, vertex colours or
-    texture (lazy)."""
+    """(F, 3) uint8 face colours — from face colours, vertex colours, or
+    the texture via visual.to_color() for textured (PBR) meshes."""
     v = mesh.visual
     if hasattr(v, "face_colors") and v.face_colors is not None and len(v.face_colors) == len(mesh.faces):
         return np.asarray(v.face_colors[:, :3], np.uint8)
     if hasattr(v, "vertex_colors") and v.vertex_colors is not None and len(v.vertex_colors) == len(mesh.vertices):
         vc = np.asarray(v.vertex_colors[:, :3], np.uint8)
         return vc[mesh.faces].mean(axis=1).astype(np.uint8)
+    if hasattr(v, "to_color"):
+        try:
+            vc = np.asarray(v.to_color().vertex_colors[:, :3], np.uint8)
+            if len(vc) == len(mesh.vertices):
+                return vc[mesh.faces].mean(axis=1).astype(np.uint8)
+        except Exception:
+            pass
     return None
 
 
@@ -158,7 +165,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("mesh", type=Path)
     ap.add_argument("--out", type=Path, default=None, help="where to write regions.json for sampler_demo --regions")
-    ap.add_argument("--k", type=int, default=4, help="k-means clusters over face colours (default 4)")
+    ap.add_argument("--k", type=int, default=8, help="k-means clusters over face colours (default 8; bump for highly textured meshes)")
     ap.add_argument("--studs", type=int, default=24, help="voxelise at this grid resolution (same as sampler_demo)")
     ap.add_argument("--kind", default=None, help="the object's main kind (used to label the biggest region)")
     ap.add_argument("--kinds", default=None, help="comma-separated region=kind, e.g. 'wheel=road_vehicle,body=object'")

@@ -64,8 +64,23 @@ def target_from_mesh(path: str, studs: int, shell: int, kind: str | None = None,
                      stand: int = 0, regions: dict[int, str] | None = None,
                      seg_label: np.ndarray | None = None,
                      seg_kind_of: dict[int, str] | None = None,
-                     carve: np.ndarray | None = None) -> Target:
-    t = MeshTarget.from_path(path, max_studs=studs, n_samples=40000, min_island_cells=8)
+                     carve: np.ndarray | None = None,
+                     smooth: int = 0) -> Target:
+    if smooth > 0:
+        import trimesh, tempfile, os
+        m = trimesh.load(path, force="mesh", process=False)
+        # gentle Taubin: lamb/nu balanced close enough that cumulative volume
+        # loss is minimal; purpose is to kill 1-face noise, not reshape
+        trimesh.smoothing.filter_taubin(m, iterations=smooth, lamb=0.1, nu=-0.11)
+        tmp = tempfile.NamedTemporaryFile(suffix=".glb", delete=False)
+        m.export(tmp.name)
+        tmp.close()
+        try:
+            t = MeshTarget.from_path(tmp.name, max_studs=studs, n_samples=40000, min_island_cells=8)
+        finally:
+            os.unlink(tmp.name)
+    else:
+        t = MeshTarget.from_path(path, max_studs=studs, n_samples=40000, min_island_cells=8)
     occ = t.voxel_grid.occupied()
     if carve is not None:
         if carve.shape != occ.shape:
@@ -154,10 +169,12 @@ def main() -> None:
     ap.add_argument("--regions", default=None, help='JSON file mapping palette codes to kinds, e.g. {"0":"road_vehicle","4":"object"} — gives different sampler weights per colour region')
     ap.add_argument("--segmentation", default=None, help="npz from tools/segment_mesh.py: per-voxel region_kind (overrides --regions)")
     ap.add_argument("--prune-unsupported", action="store_true", help="drop parts with no vertical supporter below from the final build (post-process)")
+    ap.add_argument("--drop-small-clusters", type=int, default=0, help="post-process: drop connected clusters smaller than N parts (1-2 safe; larger values will drop SNOT-held structure since side connectors aren't considered as adjacency)")
     ap.add_argument("--depth-carve", default=None, help="npz from tools/depth_carve.py: carve mask OR-ed into --segmentation's carve")
     ap.add_argument("--tile-boost", type=float, default=0.0, help="log-bonus on every tile option at proposal time; real sets use 15-23%% tiles vs our 11%%, +1 to +2 is a reasonable range")
     ap.add_argument("--snot-boost", type=float, default=0.0, help="log-bonus on every SNOT option (brickS/plateS/tileS) at proposal time; real sets use 17-32%% SNOT vs our ~0%%")
     ap.add_argument("--subassemblies", type=int, default=0, help="group placements into N-part submodels in an MPD .ldr (real sets have 11-26 sub-assemblies; 25 is a reasonable target)")
+    ap.add_argument("--smooth", type=int, default=0, help="apply N iterations of Taubin smoothing to the mesh before voxelising (reduces 1-stud surface noise; 5-10 is a reasonable range)")
     a = ap.parse_args()
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     regions = None
@@ -175,7 +192,8 @@ def main() -> None:
         extra = d["carve"]
         carve = extra if carve is None else (carve | extra)
     target = target_from_mesh(a.mesh, a.studs, a.shell, a.kind, stand=a.stand, regions=regions,
-                              seg_label=seg_label, seg_kind_of=seg_kind_of, carve=carve)
+                              seg_label=seg_label, seg_kind_of=seg_kind_of, carve=carve,
+                              smooth=a.smooth)
     models = load_models()
     t0 = time.time()
     from everything2lego.sampler import Weights
@@ -188,7 +206,11 @@ def main() -> None:
         from everything2lego.supports import prune_unsupported
         ps, pruned = prune_unsupported(list(ps))
         info["pruned_unsupported"] = pruned
-        info["parts"] = len(ps)
+    if a.drop_small_clusters > 0:
+        from everything2lego.supports import drop_isolated_clusters
+        ps, dropped = drop_isolated_clusters(list(ps), min_cluster=a.drop_small_clusters)
+        info["dropped_clusters"] = dropped
+    info["parts"] = len(ps)
     subs = None
     if a.subassemblies > 0:
         from everything2lego.subassemblies import split_by_y_bands
