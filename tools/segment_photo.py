@@ -132,6 +132,7 @@ def main() -> None:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--studs", type=int, default=24, help="voxel resolution (match sampler_demo --studs)")
     ap.add_argument("--view", default="auto", help="LAT,LON (deg) of the camera; 'auto' fits the view by silhouette-matching the photo's biggest mask (default); 0,0 is frontal +Z, model Y up")
+    ap.add_argument("--carve-min-iou", type=float, default=0.65, help="skip the photo-silhouette carve when the fitted view's IoU is below this (default 0.65); a mediocre fit mis-carves real voxels")
     ap.add_argument("--kind", default=None, help="main object kind (biggest mask gets this)")
     ap.add_argument("--kinds", default=None, help='comma-separated mask_id=kind pairs, e.g. "0=road_vehicle,1=object"')
     ap.add_argument("--sam", default=DEFAULT_SAM, help="SAM checkpoint (env SAM_CHECKPOINT, default ViT-B)")
@@ -148,6 +149,7 @@ def main() -> None:
         print(f"  fit view lat={view[0]:+.0f} lon={view[1]:+.0f} (silhouette IoU {iou:.2f})", flush=True)
     else:
         view = tuple(float(v) for v in a.view.split(","))
+        iou = 1.0                                                    # user-asserted view
     W, H = photo.size
     face_mask = _face_to_mask(mesh, masks, view, W, H)
     # mask id per cluster: split faces with same mask id into connected components,
@@ -210,7 +212,11 @@ def main() -> None:
     carve = np.zeros(occ.shape, bool)
     carve[ys, xs, zs] = ~biggest[py, px]
     frac = float(carve.sum()) / max(1, int(occ.sum()))
-    if frac > 0.5:
+    if iou < a.carve_min_iou:
+        print(f"  carve skipped: view-fit IoU {iou:.2f} below --carve-min-iou {a.carve_min_iou}; "
+              f"would have dropped {frac:.0%}", flush=True)
+        carve[:] = False
+    elif frac > 0.5:
         print(f"  carve skipped: biggest SAM mask excludes {frac:.0%} of mesh — probably not the subject", flush=True)
         carve[:] = False
     else:
