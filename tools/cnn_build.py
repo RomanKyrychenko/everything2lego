@@ -258,6 +258,8 @@ def main() -> None:
     ap.add_argument("--mask-pct", type=float, default=0.1,
                     help="fraction of placements to remove per refinement round")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--measure", action="store_true",
+                    help="run sampler.sample(iters=0, warmup=0) on the CNN output to report full quality metrics (KL, outline, unsupported, ...)")
     a = ap.parse_args()
 
     a.out.mkdir(parents=True, exist_ok=True)
@@ -265,6 +267,18 @@ def main() -> None:
     placements = cnn_greedy(target, a.model, n_special=a.n_special, prefer_length=a.prefer_length,
                              refine_rounds=a.refine, mask_pct=a.mask_pct, seed=a.seed)
     write_ldr(placements, a.out / "model.ldr")
+    if a.measure:
+        from everything2lego.sampler import sample as _sample
+        from sampler_demo import load_models
+        import json
+        models = load_models()
+        print("measuring metrics via sampler (iters=0, warmup=0)...", flush=True)
+        _, info = _sample(target, models, iters=0, warmup=0, init_placements=placements)
+        keep = {k: info.get(k) for k in ("parts", "pairs", "kl", "kl_paths", "fidelity", "outline",
+                                           "bad_cells", "unsupported", "bare_side_connectors",
+                                           "content_loss", "style_loss", "dens", "cnt", "vocabulary")}
+        print(json.dumps(keep, indent=2))
+        (a.out / "metrics.json").write_text(json.dumps(keep, indent=2))
     subprocess.run([sys.executable, str(ROOT / "tools/render_build.py"), str(a.out / "model.ldr"),
                     str(a.out / "render.png"), "--views", "30,120,210", "--size", "500"], check=False)
 
