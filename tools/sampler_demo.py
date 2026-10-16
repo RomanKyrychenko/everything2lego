@@ -170,6 +170,7 @@ def main() -> None:
     ap.add_argument("--segmentation", default=None, help="npz from tools/segment_mesh.py: per-voxel region_kind (overrides --regions)")
     ap.add_argument("--prune-unsupported", action="store_true", help="drop parts with no vertical supporter below from the final build (post-process)")
     ap.add_argument("--drop-small-clusters", type=int, default=0, help="post-process: drop connected clusters smaller than N parts (1-2 safe; larger values will drop SNOT-held structure since side connectors aren't considered as adjacency)")
+    ap.add_argument("--apply-templates", default=None, help="path to a regions.npz (from classify_regions.py) — post-process: swap each part for a same-footprint one in a region-preferred shape family (roof->slope, wall->brick, ...)")
     ap.add_argument("--depth-carve", default=None, help="npz from tools/depth_carve.py: carve mask OR-ed into --segmentation's carve")
     ap.add_argument("--tile-boost", type=float, default=0.0, help="log-bonus on every tile option at proposal time; real sets use 15-23%% tiles vs our 11%%, +1 to +2 is a reasonable range")
     ap.add_argument("--snot-boost", type=float, default=0.0, help="log-bonus on every SNOT option (brickS/plateS/tileS) at proposal time; real sets use 17-32%% SNOT vs our ~0%%")
@@ -210,6 +211,11 @@ def main() -> None:
         from everything2lego.supports import drop_isolated_clusters
         ps, dropped = drop_isolated_clusters(list(ps), min_cluster=a.drop_small_clusters)
         info["dropped_clusters"] = dropped
+    if a.apply_templates:
+        d = np.load(a.apply_templates, allow_pickle=True)
+        from everything2lego.region_templates import apply as apply_region_templates
+        ps, swaps = apply_region_templates(list(ps), d["label"])
+        info["template_swaps"] = swaps
     info["parts"] = len(ps)
     subs = None
     if a.subassemblies > 0:
