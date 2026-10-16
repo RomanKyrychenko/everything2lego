@@ -101,16 +101,20 @@ class OMRDataset(Dataset):
 
 
 def _collate(batch):
-    """Pad placement sequences to the longest in the batch."""
+    """Pad placement sequences to the longest in the batch.  Returns
+    chunk_id = Y-layer of each placement (-1 for padding) so the model
+    can attend only within the same layer."""
     voxels, poss, toks, kinds = zip(*batch)
-    v = torch.stack(voxels, 0)                                        # (B, G, G, G)
+    v = torch.stack(voxels, 0)
     L = max(len(t) for t in toks)
     pos_pad = torch.zeros(len(batch), L, 3, dtype=torch.long)
-    tok_pad = torch.full((len(batch), L), -1, dtype=torch.long)       # -1 = ignored
+    tok_pad = torch.full((len(batch), L), -1, dtype=torch.long)
+    chunk_pad = torch.full((len(batch), L), -1, dtype=torch.long)
     for i, (p, t) in enumerate(zip(poss, toks)):
         pos_pad[i, :len(p)] = p
         tok_pad[i, :len(t)] = t
-    return v, pos_pad, tok_pad, torch.tensor(kinds, dtype=torch.long)
+        chunk_pad[i, :len(p)] = p[:, 0]                               # Y-layer id = chunk id
+    return v, pos_pad, tok_pad, torch.tensor(kinds, dtype=torch.long), chunk_pad
 
 
 class Model(nn.Module):
@@ -122,13 +126,14 @@ class Model(nn.Module):
     dataset size.  Attention is a next-session item on GPU."""
 
     def __init__(self, n_tokens: int, n_kinds: int, grid: int = 16, ch: int = 32,
-                 d_head: int = 128):
+                 d_head: int = 128, chunk_attn: bool = True):
+        """`chunk_attn=True` runs a 1-layer self-attention over placements
+        WITHIN the same Y-layer (chunks are typically 10-50 placements, so
+        attention stays O(50^2) per layer, CPU-practical).  Attention is
+        shaped by a chunk mask passed in forward."""
         super().__init__()
         self.grid = grid
         self.ch = ch
-        # original CPU-practical architecture (what trained successfully).
-        # scaling (64/128 ch, transformer decoder) proved too slow on CPU
-        # for this dataset size; next-session work on GPU.
         self.encoder = nn.Sequential(
             nn.Conv3d(1, 16, 3, padding=1), nn.ReLU(),
             nn.Conv3d(16, ch, 3, padding=1), nn.ReLU(),
@@ -138,13 +143,22 @@ class Model(nn.Module):
         self.state_emb = nn.Embedding(n_tokens + 2, 16)
         self.pos_emb = nn.Embedding(grid, 16)
         self.n_tokens = n_tokens
-        d_in = ch + 16 + 16 + 48                                      # feat + kind + state + 3*pos
+        d_in = ch + 16 + 16 + 48
+        self.proj = nn.Linear(d_in, d_head)
+        self.chunk_attn = chunk_attn
+        if chunk_attn:
+            layer = nn.TransformerEncoderLayer(d_model=d_head, nhead=4,
+                                                 dim_feedforward=d_head * 2,
+                                                 batch_first=True, dropout=0.0)
+            self.attn = nn.TransformerEncoder(layer, num_layers=1)
         self.head = nn.Sequential(
-            nn.Linear(d_in, d_head), nn.ReLU(),
+            nn.Linear(d_head, d_head), nn.ReLU(),
             nn.Linear(d_head, n_tokens + 1),
         )
 
-    def forward(self, voxels, pos, prev_tok, kind):
+    def forward(self, voxels, pos, prev_tok, kind, chunk_id=None):
+        """chunk_id (B, L): same-id positions attend to each other (within
+        the same Y-layer).  When None, falls back to per-cell independence."""
         f = self.encoder(voxels.unsqueeze(1))
         B, ch, G, _, _ = f.shape
         y, x, z = pos[..., 0], pos[..., 1], pos[..., 2]
@@ -157,6 +171,22 @@ class Model(nn.Module):
                             self.pos_emb(x.clamp(0, G - 1)),
                             self.pos_emb(z.clamp(0, G - 1))], dim=-1)
         h = torch.cat([gather, k_emb, s_emb, p_emb], dim=-1)
+        h = self.proj(h)
+        if self.chunk_attn and chunk_id is not None:
+            # True = ignore in torch attention mask.  Allow attention
+            # only within the same chunk id (= Y-layer).  Always keep
+            # the diagonal unmasked so padding rows don't softmax-NaN.
+            valid = chunk_id >= 0
+            same = chunk_id.unsqueeze(-1) == chunk_id.unsqueeze(-2)
+            mask = ~(same & valid.unsqueeze(-1) & valid.unsqueeze(-2))
+            L = mask.size(-1)
+            diag = torch.eye(L, dtype=torch.bool, device=mask.device)
+            mask = mask & ~diag                                       # self-attention always allowed
+            # (B, L, L) src_mask isn't supported in torch 2.2, so loop
+            out = torch.zeros_like(h)
+            for b in range(B):
+                out[b:b+1] = self.attn(h[b:b+1], mask=mask[b])
+            h = out
         return self.head(h)
 
 
@@ -181,12 +211,11 @@ def train(epochs: int = 5, batch: int = 4, lr: float = 1e-3, grid: int = 16, lim
         m.train()
         t0 = time.time()
         total = n_tokens = 0.0
-        for v, pos, tok, kind in dl_tr:
-            v, pos, tok, kind = v.to(device), pos.to(device), tok.to(device), kind.to(device)
-            # teacher-forced previous token: shift right, use "empty" (n_tokens+1) at step 0
+        for v, pos, tok, kind, chunk in dl_tr:
+            v, pos, tok, kind, chunk = v.to(device), pos.to(device), tok.to(device), kind.to(device), chunk.to(device)
             prev = torch.full_like(tok, len(ds.tokens) + 1)
             prev[:, 1:] = tok[:, :-1].clamp(0, len(ds.tokens))
-            logits = m(v, pos, prev, kind)                            # (B, L, n_tokens+1)
+            logits = m(v, pos, prev, kind, chunk_id=chunk)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), tok.view(-1), ignore_index=-1)
             opt.zero_grad(); loss.backward(); opt.step()
             n_valid = (tok != -1).sum().item()
@@ -195,11 +224,11 @@ def train(epochs: int = 5, batch: int = 4, lr: float = 1e-3, grid: int = 16, lim
         m.eval()
         with torch.no_grad():
             total = n_tokens = correct = top5 = 0.0
-            for v, pos, tok, kind in dl_v:
-                v, pos, tok, kind = v.to(device), pos.to(device), tok.to(device), kind.to(device)
+            for v, pos, tok, kind, chunk in dl_v:
+                v, pos, tok, kind, chunk = v.to(device), pos.to(device), tok.to(device), kind.to(device), chunk.to(device)
                 prev = torch.full_like(tok, len(ds.tokens) + 1)
                 prev[:, 1:] = tok[:, :-1].clamp(0, len(ds.tokens))
-                logits = m(v, pos, prev, kind)
+                logits = m(v, pos, prev, kind, chunk_id=chunk)
                 loss = F.cross_entropy(logits.view(-1, logits.size(-1)), tok.view(-1), ignore_index=-1)
                 mask = tok != -1
                 nv = mask.sum().item()

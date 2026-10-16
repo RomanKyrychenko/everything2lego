@@ -128,8 +128,9 @@ def main() -> None:
         new_prev = prev_toks_seq + [n_tokens + 1]                      # "empty" at the new cell
         pos_t = torch.tensor(new_pos, device=device)[None]              # (1, L, 3)
         prev_t = torch.tensor(new_prev, device=device)[None]            # (1, L)
+        chunk_t = pos_t[..., 0]                                       # same-Y-layer chunking
         with torch.no_grad():
-            logits = m(v.unsqueeze(0), pos_t, prev_t, kind_t)[0, -1]    # last step's logits
+            logits = m(v.unsqueeze(0), pos_t, prev_t, kind_t, chunk_id=chunk_t)[0, -1]
             lp = logits - logits.max()
             lp = lp - torch.logsumexp(lp, dim=-1)
             lp = lp.cpu().numpy()
