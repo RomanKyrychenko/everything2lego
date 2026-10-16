@@ -60,10 +60,18 @@ def _best_colour(cell_cols: np.ndarray, allowed: set | None) -> int:
 
 
 def cnn_greedy(target, model_path, n_special: int = 160, prefer_length: float = 0.0,
+                refine_rounds: int = 0, mask_pct: float = 0.1, seed: int = 0,
                 verbose: bool = True) -> list[Placement]:
     """Run the CNN decoder greedily over the voxel target and return the list
     of Placements.  Reusable from sampler_demo (--init-from-cnn) or other
-    composition pipelines."""
+    composition pipelines.
+
+    `refine_rounds > 0` enables iterative refinement: after the initial greedy
+    pass, each round removes a random `mask_pct` fraction of placements and
+    re-runs the greedy decoder on the freed cells only.  The model now has
+    the full build as context (not just a growing prefix), so earlier choices
+    get a second chance.  Changes are kept only if they don't increase total
+    part count."""
     ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
     tokens, kinds = ckpt["tokens"], ckpt["kinds"]
     grid = ckpt["grid"]
@@ -119,73 +127,113 @@ def cnn_greedy(target, model_path, n_special: int = 160, prefer_length: float = 
     # greedy cell order (bottom-up)
     ys, xs, zs = np.nonzero(target.want)
     order = np.lexsort((zs, xs, ys))
-    cells = list(zip(ys[order].tolist(), xs[order].tolist(), zs[order].tolist()))
+    initial_cells = list(zip(ys[order].tolist(), xs[order].tolist(), zs[order].tolist()))
     if verbose:
-        print(f"cnn.generate: {len(cells)} cells, {len(opts)} options", flush=True)
+        print(f"cnn.generate: {len(initial_cells)} cells, {len(opts)} options", flush=True)
+
+    def run_greedy(cells, owner, placements, prev_toks_seq, pos_seq):
+        """Fill `cells` using the model; mutates owner/placements/prev_toks_seq/pos_seq in place."""
+        for cy, cx, cz in cells:
+            if owner[cy, cx, cz] >= 0:
+                continue
+            gy = int(cy * grid / max(1, H))
+            gx = int(cx * grid / max(1, X))
+            gz = int(cz * grid / max(1, Z))
+            gy, gx, gz = min(gy, grid - 1), min(gx, grid - 1), min(gz, grid - 1)
+            new_pos = pos_seq + [(gy, gx, gz)]
+            new_prev = prev_toks_seq + [n_tokens + 1]                   # "empty" at the new cell
+            pos_t = torch.tensor(new_pos, device=device)[None]
+            prev_t = torch.tensor(new_prev, device=device)[None]
+            chunk_t = pos_t[..., 0]
+            with torch.no_grad():
+                out = m(v.unsqueeze(0), pos_t, prev_t, kind_t, chunk_id=chunk_t)
+                if factored:
+                    lc, ls, ly = (o[0, -1] for o in out)
+                    lpc = (lc - lc.max() - torch.logsumexp(lc - lc.max(), dim=-1)).cpu().numpy()
+                    lps = (ls - ls.max() - torch.logsumexp(ls - ls.max(), dim=-1)).cpu().numpy()
+                    lpy = (ly - ly.max() - torch.logsumexp(ly - ly.max(), dim=-1)).cpu().numpy()
+                else:
+                    logits = out[0, -1]
+                    lp = (logits - logits.max() - torch.logsumexp(logits - logits.max(), dim=-1)).cpu().numpy()
+            valid = []
+            for k, opt in enumerate(opts):
+                if factored:
+                    h, W, D, cells_arr, part, colours, rot, cid, sid, yid = opt
+                else:
+                    h, W, D, cells_arr, part, colours, rot, tok = opt
+                if cy + h > H or cx + W > X or cz + D > Z:
+                    continue
+                abs_cells = cells_arr + np.array([cy, cx, cz])
+                if (owner[abs_cells[:, 0], abs_cells[:, 1], abs_cells[:, 2]] >= 0).any():
+                    continue
+                if not target.want[abs_cells[:, 0], abs_cells[:, 1], abs_cells[:, 2]].all():
+                    continue
+                if factored:
+                    score = float(lpc[cid]) + float(lps[sid]) + float(lpy[yid])
+                else:
+                    score = float(lp[tok])
+                score += prefer_length * (len(cells_arr) - 1)
+                valid.append((score, k))
+            if not valid:
+                continue
+            valid.sort(reverse=True)
+            best_k = valid[0][1]
+            opt = opts[best_k]
+            h, W, D, cells_arr, part, colours, rot = opt[:7]
+            tok = tok_idx.get(part.ldraw, n_tokens) if factored else opt[7]
+            abs_cells = cells_arr + np.array([cy, cx, cz])
+            allowed_codes = set(colours) if colours else None
+            colour = _best_colour(target.colour[abs_cells[:, 0], abs_cells[:, 1], abs_cells[:, 2]], allowed_codes)
+            owner[abs_cells[:, 0], abs_cells[:, 1], abs_cells[:, 2]] = len(placements)
+            placements.append(Placement(part, colour, cx, cz, cy, W, D, rot))
+            prev_toks_seq.append(tok)
+            pos_seq.append((gy, gx, gz))
 
     owner = np.full((H, X, Z), -1, dtype=np.int32)
     placements: list[Placement] = []
-    prev_toks_seq: list[int] = []                                      # tokens placed so far
-    pos_seq: list[tuple[int, int, int]] = []                           # (gy, gx, gz) in model grid
+    prev_toks_seq: list[int] = []
+    pos_seq: list[tuple[int, int, int]] = []
     t0 = time.time()
-    for cy, cx, cz in cells:
-        if owner[cy, cx, cz] >= 0:
+    run_greedy(initial_cells, owner, placements, prev_toks_seq, pos_seq)
+    if verbose:
+        print(f"initial: {len(placements)} placements, {int((owner >= 0).sum())}/{int(target.want.sum())} cells covered ({time.time()-t0:.1f}s)")
+
+    # iterative refinement: pick a spatial region, remove every placement whose root is in it,
+    # re-greedy that contiguous region as a block.  Random single-placement removal fragments
+    # free cells so the greedy fills with 1x1s; a contiguous region gives longer parts a chance.
+    rng = np.random.default_rng(seed)
+    region_r = max(2, int(round((len(initial_cells) * mask_pct) ** (1/3))))     # cube half-size tuned to mask_pct of volume
+    for r in range(refine_rounds):
+        t_r = time.time()
+        cy = int(rng.integers(0, H)); cx = int(rng.integers(0, X)); cz = int(rng.integers(0, Z))
+        y0, y1 = max(0, cy - region_r), min(H, cy + region_r + 1)
+        x0, x1 = max(0, cx - region_r), min(X, cx + region_r + 1)
+        z0, z1 = max(0, cz - region_r), min(Z, cz + region_r + 1)
+        remove_ids = set()
+        for i, p in enumerate(placements):
+            if y0 <= p.y_plate < y1 and x0 <= p.x_stud < x1 and z0 <= p.z_stud < z1:
+                remove_ids.add(i)
+        if not remove_ids:
+            if verbose:
+                print(f"  refine {r+1}: empty region, skipped ({time.time()-t_r:.1f}s)")
             continue
-        # map to model grid
-        gy = int(cy * grid / max(1, H))
-        gx = int(cx * grid / max(1, X))
-        gz = int(cz * grid / max(1, Z))
-        gy, gx, gz = min(gy, grid - 1), min(gx, grid - 1), min(gz, grid - 1)
-        # build sequence including this new step with "empty" prior
-        new_pos = pos_seq + [(gy, gx, gz)]
-        new_prev = prev_toks_seq + [n_tokens + 1]                      # "empty" at the new cell
-        pos_t = torch.tensor(new_pos, device=device)[None]              # (1, L, 3)
-        prev_t = torch.tensor(new_prev, device=device)[None]            # (1, L)
-        chunk_t = pos_t[..., 0]                                       # same-Y-layer chunking
-        with torch.no_grad():
-            out = m(v.unsqueeze(0), pos_t, prev_t, kind_t, chunk_id=chunk_t)
-            if factored:
-                lc, ls, ly = (o[0, -1] for o in out)
-                lpc = (lc - lc.max() - torch.logsumexp(lc - lc.max(), dim=-1)).cpu().numpy()
-                lps = (ls - ls.max() - torch.logsumexp(ls - ls.max(), dim=-1)).cpu().numpy()
-                lpy = (ly - ly.max() - torch.logsumexp(ly - ly.max(), dim=-1)).cpu().numpy()
-            else:
-                logits = out[0, -1]
-                lp = (logits - logits.max() - torch.logsumexp(logits - logits.max(), dim=-1)).cpu().numpy()
-        # collect valid options with (score, index)
-        valid = []
-        for k, opt in enumerate(opts):
-            if factored:
-                h, W, D, cells_arr, part, colours, rot, cid, sid, yid = opt
-            else:
-                h, W, D, cells_arr, part, colours, rot, tok = opt
-            if cy + h > H or cx + W > X or cz + D > Z:
-                continue
-            abs_cells = cells_arr + np.array([cy, cx, cz])
-            if (owner[abs_cells[:, 0], abs_cells[:, 1], abs_cells[:, 2]] >= 0).any():
-                continue
-            if not target.want[abs_cells[:, 0], abs_cells[:, 1], abs_cells[:, 2]].all():
-                continue
-            if factored:
-                score = float(lpc[cid]) + float(lps[sid]) + float(lpy[yid])
-            else:
-                score = float(lp[tok])
-            score += prefer_length * (len(cells_arr) - 1)
-            valid.append((score, k))
-        if not valid:
-            continue
-        valid.sort(reverse=True)
-        best_k = valid[0][1]
-        opt = opts[best_k]
-        h, W, D, cells_arr, part, colours, rot = opt[:7]
-        tok = tok_idx.get(part.ldraw, n_tokens) if factored else opt[7]  # state_emb still indexes by ldraw
-        abs_cells = cells_arr + np.array([cy, cx, cz])
-        allowed_codes = set(colours) if colours else None
-        colour = _best_colour(target.colour[abs_cells[:, 0], abs_cells[:, 1], abs_cells[:, 2]], allowed_codes)
-        owner[abs_cells[:, 0], abs_cells[:, 1], abs_cells[:, 2]] = len(placements)
-        placements.append(Placement(part, colour, cx, cz, cy, W, D, rot))
-        prev_toks_seq.append(tok)
-        pos_seq.append((gy, gx, gz))
+        kept_ids = [i for i in range(len(placements)) if i not in remove_ids]
+        new_placements = [placements[i] for i in kept_ids]
+        new_prev = [prev_toks_seq[i] for i in kept_ids]
+        new_pos = [pos_seq[i] for i in kept_ids]
+        new_owner = np.full_like(owner, -1)
+        for new_idx, old_idx in enumerate(kept_ids):
+            new_owner[owner == old_idx] = new_idx
+        freed = [tuple(c) for c in np.argwhere((new_owner < 0) & (target.want > 0))]
+        freed.sort()
+        pre_kept = len(new_placements)
+        run_greedy(freed, new_owner, new_placements, new_prev, new_pos)
+        if len(new_placements) <= len(placements):
+            if verbose:
+                print(f"  refine {r+1}: region [{y0}:{y1},{x0}:{x1},{z0}:{z1}] -{len(remove_ids)} +{len(new_placements) - pre_kept} = {len(new_placements)} parts ({time.time()-t_r:.1f}s)")
+            owner, placements, prev_toks_seq, pos_seq = new_owner, new_placements, new_prev, new_pos
+        elif verbose:
+            print(f"  refine {r+1}: no improvement ({len(new_placements)} > {len(placements)}, {len(remove_ids)} removed), kept original ({time.time()-t_r:.1f}s)")
 
     secs = time.time() - t0
     if verbose:
@@ -205,11 +253,17 @@ def main() -> None:
     ap.add_argument("--n-special", type=int, default=160)
     ap.add_argument("--prefer-length", type=float, default=0.0,
                     help="bonus per extra cell per option (merges toward longer parts; 0.5-1.5 is reasonable)")
+    ap.add_argument("--refine", type=int, default=0,
+                    help="iterative-refinement rounds: remove --mask-pct of placements and re-greedy on freed cells")
+    ap.add_argument("--mask-pct", type=float, default=0.1,
+                    help="fraction of placements to remove per refinement round")
+    ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
 
     a.out.mkdir(parents=True, exist_ok=True)
     target = target_from_mesh(a.mesh, a.studs, a.shell, a.kind)
-    placements = cnn_greedy(target, a.model, n_special=a.n_special, prefer_length=a.prefer_length)
+    placements = cnn_greedy(target, a.model, n_special=a.n_special, prefer_length=a.prefer_length,
+                             refine_rounds=a.refine, mask_pct=a.mask_pct, seed=a.seed)
     write_ldr(placements, a.out / "model.ldr")
     subprocess.run([sys.executable, str(ROOT / "tools/render_build.py"), str(a.out / "model.ldr"),
                     str(a.out / "render.png"), "--views", "30,120,210", "--size", "500"], check=False)
