@@ -157,6 +157,7 @@ def main() -> None:
     ap.add_argument("--depth-carve", default=None, help="npz from tools/depth_carve.py: carve mask OR-ed into --segmentation's carve")
     ap.add_argument("--tile-boost", type=float, default=0.0, help="log-bonus on every tile option at proposal time; real sets use 15-23%% tiles vs our 11%%, +1 to +2 is a reasonable range")
     ap.add_argument("--snot-boost", type=float, default=0.0, help="log-bonus on every SNOT option (brickS/plateS/tileS) at proposal time; real sets use 17-32%% SNOT vs our ~0%%")
+    ap.add_argument("--subassemblies", type=int, default=0, help="group placements into N-part submodels in an MPD .ldr (real sets have 11-26 sub-assemblies; 25 is a reasonable target)")
     a = ap.parse_args()
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     regions = None
@@ -188,7 +189,12 @@ def main() -> None:
         ps, pruned = prune_unsupported(list(ps))
         info["pruned_unsupported"] = pruned
         info["parts"] = len(ps)
-    write_ldr(ps, out / "model.ldr")
+    subs = None
+    if a.subassemblies > 0:
+        from everything2lego.subassemblies import split_by_y_bands
+        subs = split_by_y_bands(list(ps), target_size=a.subassemblies)
+        info["subassemblies"] = [len(g) for g in subs]
+    write_ldr(ps, out / "model.ldr", subassemblies=subs)
     (out / "info.json").write_text(json.dumps({k: v for k, v in info.items()}, indent=1, default=float))
     print(json.dumps({k: v for k, v in info.items() if k != "history"}, default=float))
     subprocess.run([sys.executable, str(ROOT / "tools/render_build.py"), str(out / "model.ldr"),
