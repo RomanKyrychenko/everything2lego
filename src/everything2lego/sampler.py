@@ -740,29 +740,33 @@ class State:
 # ---------------------------------------------------------------------------
 
 def option_logprior(vocab: tuple[VPart, ...], stats: Stats, kind: Optional[str],
-                     tile_boost: float = 0.0) -> np.ndarray:
+                     tile_boost: float = 0.0, snot_boost: float = 0.0) -> np.ndarray:
     """Per (part, yaw), in vocabulary order: log P(its token) in the
     references, plus log its lift for the kind of object, plus a pull to
-    larger parts (fewer, as sets are).  `tile_boost` adds a log-bonus to
-    every tile option — a direct lever on tile fraction without touching
-    the energy or needing a refit."""
+    larger parts (fewer, as sets are).  `tile_boost` / `snot_boost` add
+    a log-bonus to every tile / SNOT (brickS, plateS, tileS) option —
+    direct levers on tile and SNOT fraction without touching the energy
+    or needing a refit."""
     a_tot = stats.a_tot
     z = sum(a_tot.values()) or 1.0
+    snot_shapes = {"brickS", "plateS", "tileS"}
     return np.array([
         math.log((a_tot.get(v.token, 0) + 1.0) / z)
         + (math.log(max(1e-3, v.kinds.get(kind, {}).get("lift", 0.0) or 1e-3)) if kind else 0.0)
         + 0.6 * math.log(float(o.o.sum()))
         + (tile_boost if _box_kind(v) == "tile" else 0.0)
+        + (snot_boost if v.part.shape in snot_shapes else 0.0)
         for v in vocab for o in v.orients])
 
 
 def net_tables(net: "proposals.Net", vocab: tuple[VPart, ...], kind: Optional[str],
-               tile_boost: float = 0.0):
+               tile_boost: float = 0.0, snot_boost: float = 0.0):
     """Per (part, yaw), in vocabulary order: the network's output for its
     token, and log P(part | token) — how widely sets of this kind (or all
     sets) use it among the parts of its token; and the object's index.
-    `tile_boost` adds a log-bonus to the log P(part | token) of every tile
-    option, biasing both engines' network-driven proposals toward tiles."""
+    `tile_boost` / `snot_boost` add a log-bonus to log P(part | token) of
+    every tile / SNOT option, biasing both engines' network-driven
+    proposals toward them."""
     out, use = [], []
     for v in vocab:
         for _ in v.orients:
@@ -774,6 +778,10 @@ def net_tables(net: "proposals.Net", vocab: tuple[VPart, ...], kind: Optional[st
     if tile_boost:
         is_tile = np.array([_box_kind(v) == "tile" for v in vocab for _ in v.orients])
         lpart = lpart + tile_boost * is_tile
+    if snot_boost:
+        snot_shapes = {"brickS", "plateS", "tileS"}
+        is_snot = np.array([v.part.shape in snot_shapes for v in vocab for _ in v.orients])
+        lpart = lpart + snot_boost * is_snot
     return out, lpart, (net.object_index.get(kind, -1) if kind else -1)
 
 
@@ -784,16 +792,17 @@ class Filler:
     once against a window of the grid."""
 
     def __init__(self, state: State, rnd: random.Random, vocab: tuple[VPart, ...], kind: Optional[str],
-                 top_k: int = 12, net: bool = True, tile_boost: float = 0.0):
+                 top_k: int = 12, net: bool = True, tile_boost: float = 0.0, snot_boost: float = 0.0):
         self.st, self.rnd, self.vocab, self.top_k = state, rnd, vocab, top_k
         self.opts: list[tuple[VPart, Orient]] = [(v, o) for v in vocab for o in v.orients]
-        self.logprior = option_logprior(vocab, state.s, kind, tile_boost=tile_boost)
+        self.logprior = option_logprior(vocab, state.s, kind, tile_boost=tile_boost, snot_boost=snot_boost)
         self.net = state.net if net else None
         if self.net is not None:
             # P(part, yaw | cell) = P(token | context) * P(part | token): the network
             # proposes the token, the part within it goes by how widely sets of this
             # kind (or all sets) use it
-            self.opt_out, self.opt_lpart, self.obj = net_tables(self.net, vocab, kind, tile_boost=tile_boost)
+            self.opt_out, self.opt_lpart, self.obj = net_tables(self.net, vocab, kind,
+                                                                   tile_boost=tile_boost, snot_boost=snot_boost)
             self.static = proposals.static_context(state.t.fill)
         self.prior = self.logprior
         # the window every option is tested in: origin (y, x - FX, z - FZ) for a cell (y, x, z)
@@ -1118,7 +1127,7 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
            k_models: int = 50, n_special: int = 160, log_every: int = 2000,
            warmup: int = 200, top_k: int = 12, engine: str = "auto",
            net: bool = True, stats: Optional["Stats"] = None,
-           tile_boost: float = 0.0) -> tuple[list[Placement], dict]:
+           tile_boost: float = 0.0, snot_boost: float = 0.0) -> tuple[list[Placement], dict]:
     """The temperature comes from the data: the median energy change of
     `warmup` proposals (measured, then undone) is the scale; it anneals
     from `t_start_share` to `t_final_share` of it.  Monotony is the KL
@@ -1145,8 +1154,9 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
         got, info, history = native.run(
             target, stats, vocab, target.kind, weights, iters=iters, warmup=warmup, seed=seed,
             t_start_share=t_start_share, t_final_share=t_final_share, top_k=top_k, log_every=log_every,
-            opts_logprior=option_logprior(vocab, stats, target.kind, tile_boost=tile_boost), net=net,
-            tile_boost=tile_boost)
+            opts_logprior=option_logprior(vocab, stats, target.kind, tile_boost=tile_boost,
+                                           snot_boost=snot_boost), net=net,
+            tile_boost=tile_boost, snot_boost=snot_boost)
         placements = [Placement(v.part, c, x, z, y, o.size[1], o.size[2], o.rot) for v, o, c, y, x, z in got]
         used = Counter(v.category for v, *_ in got)
         n_ref = stats.density * float(target.fill.sum())
@@ -1158,7 +1168,7 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
         return placements, info
     rnd = random.Random(seed)
     st = State(target, stats, weights)
-    filler = Filler(st, rnd, vocab, target.kind, top_k, net, tile_boost=tile_boost)
+    filler = Filler(st, rnd, vocab, target.kind, top_k, net, tile_boost=tile_boost, snot_boost=snot_boost)
     ys, xs, zs = np.nonzero(target.want)
     filler.fill(list(zip(ys.tolist(), xs.tolist(), zs.tolist())))
     e = st.energy()

@@ -193,7 +193,7 @@ def snap_table(vocab, n_col: int) -> np.ndarray:
 
 def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: int,
         t_start_share: float, t_final_share: float, top_k: int, log_every: int, opts_logprior,
-        net: bool = True, tile_boost: float = 0.0):
+        net: bool = True, tile_boost: float = 0.0, snot_boost: float = 0.0):
     """Run the native sampler.  Returns ([(vpart, orient, colour, y, x, z)], info, history)."""
     lib = library()
     if lib is None:
@@ -318,7 +318,7 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
     from .style import kind_of
     nn = proposals.load() if net else None
     if nn is not None:
-        out_t, lpart, obj = net_tables(nn, vocab, kind, tile_boost=tile_boost)
+        out_t, lpart, obj = net_tables(nn, vocab, kind, tile_boost=tile_boost, snot_boost=snot_boost)
         okind = [nn.kind_index.get(kind_of(v.token), len(nn.kinds)) for v, _ in opts]
         p.use_net, p.net_in, p.net_h, p.net_c = 1, nn.W1.shape[0], nn.W1.shape[1], nn.W2.shape[1]
         p.net_kinds, p.net_objects, p.net_object = len(nn.kinds), len(nn.objects), obj
