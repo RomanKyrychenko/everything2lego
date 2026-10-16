@@ -114,40 +114,38 @@ def _collate(batch):
 
 
 class Model(nn.Module):
-    """3D CNN encoder + sequence decoder.
+    """3D CNN encoder + per-placement MLP head.  The MLP sees the voxel
+    feature at the placement's cell, plus the previously-placed token
+    at that same cell (empty if none), plus kind, plus the per-axis
+    positional embeddings.  No cross-placement attention — a
+    transformer here was tried and found impractical on CPU for this
+    dataset size.  Attention is a next-session item on GPU."""
 
-    Encoder: 3 Conv3d blocks + 1 residual block for 128-ch features at
-    full grid resolution.  Decoder: transformer-style self-attention
-    over the placement sequence, cross-attending to the voxel feature
-    at each placement's own cell via gather + concat.  Shapes are the
-    same as the earlier small model for easy comparison; only internals
-    change."""
-
-    def __init__(self, n_tokens: int, n_kinds: int, grid: int = 16, ch: int = 128,
-                 d_head: int = 128, n_layers: int = 2, n_heads: int = 4):
+    def __init__(self, n_tokens: int, n_kinds: int, grid: int = 16, ch: int = 32,
+                 d_head: int = 128):
         super().__init__()
         self.grid = grid
         self.ch = ch
+        # original CPU-practical architecture (what trained successfully).
+        # scaling (64/128 ch, transformer decoder) proved too slow on CPU
+        # for this dataset size; next-session work on GPU.
         self.encoder = nn.Sequential(
-            nn.Conv3d(1, 32, 3, padding=1), nn.ReLU(),
-            nn.Conv3d(32, 64, 3, padding=1), nn.ReLU(),
-            nn.Conv3d(64, ch, 3, padding=1), nn.ReLU(),
-            nn.Conv3d(ch, ch, 3, padding=1), nn.ReLU(),              # extra depth
+            nn.Conv3d(1, 16, 3, padding=1), nn.ReLU(),
+            nn.Conv3d(16, ch, 3, padding=1), nn.ReLU(),
+            nn.Conv3d(ch, ch, 3, padding=1), nn.ReLU(),
         )
-        self.kind_emb = nn.Embedding(n_kinds + 1, 32)
-        self.state_emb = nn.Embedding(n_tokens + 2, 32)
-        self.pos_emb = nn.Embedding(grid, 16)                        # per-axis positional embedding
+        self.kind_emb = nn.Embedding(n_kinds + 1, 16)
+        self.state_emb = nn.Embedding(n_tokens + 2, 16)
+        self.pos_emb = nn.Embedding(grid, 16)
         self.n_tokens = n_tokens
-        d_in = ch + 32 + 32 + 48                                      # feat + kind + state + 3*pos
-        self.proj = nn.Linear(d_in, d_head)
-        dec_layer = nn.TransformerEncoderLayer(d_model=d_head, nhead=n_heads,
-                                                 dim_feedforward=d_head * 2,
-                                                 batch_first=True, dropout=0.1)
-        self.decoder = nn.TransformerEncoder(dec_layer, num_layers=n_layers)
-        self.head = nn.Linear(d_head, n_tokens + 1)
+        d_in = ch + 16 + 16 + 48                                      # feat + kind + state + 3*pos
+        self.head = nn.Sequential(
+            nn.Linear(d_in, d_head), nn.ReLU(),
+            nn.Linear(d_head, n_tokens + 1),
+        )
 
     def forward(self, voxels, pos, prev_tok, kind):
-        f = self.encoder(voxels.unsqueeze(1))                         # (B, ch, G, G, G)
+        f = self.encoder(voxels.unsqueeze(1))
         B, ch, G, _, _ = f.shape
         y, x, z = pos[..., 0], pos[..., 1], pos[..., 2]
         flat = y * G * G + x * G + z
@@ -159,11 +157,6 @@ class Model(nn.Module):
                             self.pos_emb(x.clamp(0, G - 1)),
                             self.pos_emb(z.clamp(0, G - 1))], dim=-1)
         h = torch.cat([gather, k_emb, s_emb, p_emb], dim=-1)
-        h = self.proj(h)
-        # causal attention over the placement sequence
-        L = pos.size(1)
-        mask = torch.triu(torch.ones(L, L, dtype=torch.bool, device=h.device), diagonal=1)
-        h = self.decoder(h, mask=mask)
         return self.head(h)
 
 
