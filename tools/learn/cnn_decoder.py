@@ -47,7 +47,8 @@ MODEL_PATH = Path("/Volumes/PRO-G40/lego_data/analysis/cnn_decoder.pt")
 MODEL_PATH_FACTORED = Path("/Volumes/PRO-G40/lego_data/analysis/cnn_decoder_factored.pt")
 
 
-def _model_path(factored: bool, unet: bool, sched_sampling: float = 0.0, ch: int = 32) -> Path:
+def _model_path(factored: bool, unet: bool, sched_sampling: float = 0.0,
+                ch: int = 32, augment: bool = False) -> Path:
     base = "cnn_decoder"
     if unet:
         base += "_unet"
@@ -57,6 +58,8 @@ def _model_path(factored: bool, unet: bool, sched_sampling: float = 0.0, ch: int
         base += f"_sched{int(sched_sampling*100):02d}"
     if ch != 32:
         base += f"_ch{ch}"
+    if augment:
+        base += "_aug"
     return Path(f"/Volumes/PRO-G40/lego_data/analysis/{base}.pt")
 KNOWN_KINDS = ("building", "road_vehicle", "creature", "object", "figure", "scenery", "mechanism", "train")
 
@@ -89,15 +92,20 @@ class OMRDataset(Dataset):
     kind id).  In factored mode also returns cat_id, size_id, yaw_id per
     placement."""
 
-    def __init__(self, grid: int = 16, max_placements: int = 300, factored: bool = False):
+    def __init__(self, grid: int = 16, max_placements: int = 300, factored: bool = False,
+                 augment: bool = False):
         self.grid = grid
         self.max_placements = max_placements
         self.factored = factored
+        self.augment = augment
         self.tokens, self.kinds = _tokens_and_kinds()
         self.tok_idx = {t: i for i, t in enumerate(self.tokens)}
         self.kind_idx = {k: i for i, k in enumerate(self.kinds)}
         if factored:
             self.cats, self.sizes, self.cat_of, self.size_of = _factorization()
+        if augment:                                                        # map ldraw -> set of valid yaw rotations
+            from everything2lego.sampler import vocabulary
+            self.valid_yaws = {v.part.ldraw: frozenset(o.rot for o in v.orients) for v in vocabulary()}
         self.files = sorted(f for f in DATASET_DIR.glob("*.npz") if not f.name.startswith("._"))
 
     def __len__(self):
@@ -106,17 +114,32 @@ class OMRDataset(Dataset):
     def __getitem__(self, i):
         d = np.load(self.files[i], allow_pickle=True)
         voxels = d["voxels"].astype(np.float32)
-        y, x, z = d["y"], d["x"], d["z"]
+        y, x, z = d["y"].astype(np.int64), d["x"].astype(np.int64), d["z"].astype(np.int64)
         ldraws = d["opt_ldraw"]
         kind = str(d["kind"])
         kind_i = self.kind_idx.get(kind, len(self.kinds))
         tok_ids = np.array([self.tok_idx.get(str(l), len(self.tokens)) for l in ldraws], np.int64)
+        if self.factored or self.augment:
+            w = d["w"].astype(np.int64); h3 = d["h"].astype(np.int64); dd = d["d"].astype(np.int64)
+            yaw = d["opt_yaw"].astype(np.int64)                            # degrees: 0/90/180/270
+        if self.augment and np.random.random() < 0.5:
+            # 180 degree rotation around Y: flip x and z of voxels + placements.
+            # Footprint (h,w,d) unchanged; new yaw = yaw+180 if valid for the part,
+            # else keep (part is 180-symmetric and the vocab omits the redundant yaw).
+            voxels = voxels[:, ::-1, ::-1].copy()
+            W_v, D_v = voxels.shape[1], voxels.shape[2]
+            x = W_v - x - w
+            z = D_v - z - dd
+            new_yaw = (yaw + 180) % 360
+            for j, l in enumerate(ldraws):
+                if new_yaw[j] not in self.valid_yaws.get(str(l), {0}):
+                    new_yaw[j] = yaw[j]
+            yaw = new_yaw
         if self.factored:
-            w, h3, dd = d["w"], d["h"], d["d"]                             # dataset uses (h,w,d) convention
-            yaw = d["opt_yaw"].astype(np.int64) & 3
             cat = np.array([self.cat_of.get(str(l), len(self.cats)) for l in ldraws], np.int64)
             sz = np.array([self.size_of.get((int(h3[j]), int(w[j]), int(dd[j])), len(self.sizes))
                             for j in range(len(ldraws))], np.int64)
+            yaw_lab = (yaw // 90) & 3                                      # 0/90/180/270 -> 0..3
         # resize voxel grid to (grid, grid, grid) via torch interpolate
         v = torch.from_numpy(voxels)[None, None]  # (1, 1, H, X, Z)
         v = F.interpolate(v, size=(self.grid, self.grid, self.grid), mode="trilinear", align_corners=False)
@@ -131,14 +154,14 @@ class OMRDataset(Dataset):
             idx = np.random.permutation(len(tok_ids))[:self.max_placements]
             pos = pos[idx]; tok_ids = tok_ids[idx]
             if self.factored:
-                cat = cat[idx]; sz = sz[idx]; yaw = yaw[idx]
+                cat = cat[idx]; sz = sz[idx]; yaw_lab = yaw_lab[idx]
         # sort bottom-up for teacher forcing
         order = np.lexsort((pos[:, 2], pos[:, 1], pos[:, 0]))
         pos = pos[order]; tok_ids = tok_ids[order]
         if self.factored:
-            cat = cat[order]; sz = sz[order]; yaw = yaw[order]
+            cat = cat[order]; sz = sz[order]; yaw_lab = yaw_lab[order]
             return (v, torch.from_numpy(pos), torch.from_numpy(tok_ids), kind_i,
-                    torch.from_numpy(cat), torch.from_numpy(sz), torch.from_numpy(yaw))
+                    torch.from_numpy(cat), torch.from_numpy(sz), torch.from_numpy(yaw_lab))
         return v, torch.from_numpy(pos), torch.from_numpy(tok_ids), kind_i
 
 
@@ -295,7 +318,7 @@ class Model(nn.Module):
 
 def train(epochs: int = 5, batch: int = 4, lr: float = 1e-3, grid: int = 16, limit: int = 0,
           resume: bool = False, factored: bool = False, unet: bool = False,
-          sched_sampling: float = 0.0, ch: int = 32):
+          sched_sampling: float = 0.0, ch: int = 32, augment: bool = False):
     """`sched_sampling` is the final mix probability (linearly ramped 0->p
     across epochs).  Each training step then runs a 2nd forward pass with
     the model's own argmax from the first pass substituted into prev at
@@ -304,7 +327,7 @@ def train(epochs: int = 5, batch: int = 4, lr: float = 1e-3, grid: int = 16, lim
     factored head doesn't predict ldraw directly."""
     if sched_sampling > 0 and factored:
         raise SystemExit("--sched-sampling currently supported only without --factored")
-    ds = OMRDataset(grid=grid, factored=factored)
+    ds = OMRDataset(grid=grid, factored=factored, augment=augment)
     if limit:
         ds.files = ds.files[:limit]
     n = len(ds)
@@ -322,7 +345,7 @@ def train(epochs: int = 5, batch: int = 4, lr: float = 1e-3, grid: int = 16, lim
     m = Model(len(ds.tokens), len(ds.kinds), grid=grid, ch=ch, factored=factored, unet=unet, **mkw).to(device)
     n_params = sum(p.numel() for p in m.parameters())
     print(f"model params: {n_params/1e6:.2f}M, ch={ch}, unet={unet}", flush=True)
-    out_path = _model_path(factored, unet, sched_sampling, ch)
+    out_path = _model_path(factored, unet, sched_sampling, ch, augment)
     if resume and out_path.exists():
         prev = torch.load(out_path, map_location=device, weights_only=False)
         m.load_state_dict(prev["state_dict"])
@@ -426,9 +449,11 @@ if __name__ == "__main__":
     ap.add_argument("--unet", action="store_true", help="UNet3D encoder (16->8->4 downsample with skips) instead of a flat 3-conv encoder")
     ap.add_argument("--sched-sampling", type=float, default=0.0, help="final probability (ramped 0->p across epochs) of substituting the model's own argmax for ground-truth prev at a position; non-factored only")
     ap.add_argument("--ch", type=int, default=32, help="encoder channel width (also scales UNet width at every level)")
+    ap.add_argument("--augment", action="store_true", help="180 degree rotation around Y with 50% probability per sample (2x effective dataset)")
     a = ap.parse_args()
     if a.cmd == "train":
         train(epochs=a.epochs, batch=a.batch, lr=a.lr, grid=a.grid, limit=a.limit,
-               resume=a.resume, factored=a.factored, unet=a.unet, sched_sampling=a.sched_sampling, ch=a.ch)
+               resume=a.resume, factored=a.factored, unet=a.unet, sched_sampling=a.sched_sampling,
+               ch=a.ch, augment=a.augment)
     else:
         print("eval not implemented yet; load the model and run inference directly")
