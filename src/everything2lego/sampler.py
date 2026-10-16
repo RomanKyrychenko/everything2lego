@@ -739,23 +739,30 @@ class State:
 # proposals
 # ---------------------------------------------------------------------------
 
-def option_logprior(vocab: tuple[VPart, ...], stats: Stats, kind: Optional[str]) -> np.ndarray:
+def option_logprior(vocab: tuple[VPart, ...], stats: Stats, kind: Optional[str],
+                     tile_boost: float = 0.0) -> np.ndarray:
     """Per (part, yaw), in vocabulary order: log P(its token) in the
     references, plus log its lift for the kind of object, plus a pull to
-    larger parts (fewer, as sets are)."""
+    larger parts (fewer, as sets are).  `tile_boost` adds a log-bonus to
+    every tile option — a direct lever on tile fraction without touching
+    the energy or needing a refit."""
     a_tot = stats.a_tot
     z = sum(a_tot.values()) or 1.0
     return np.array([
         math.log((a_tot.get(v.token, 0) + 1.0) / z)
         + (math.log(max(1e-3, v.kinds.get(kind, {}).get("lift", 0.0) or 1e-3)) if kind else 0.0)
         + 0.6 * math.log(float(o.o.sum()))
+        + (tile_boost if _box_kind(v) == "tile" else 0.0)
         for v in vocab for o in v.orients])
 
 
-def net_tables(net: "proposals.Net", vocab: tuple[VPart, ...], kind: Optional[str]):
+def net_tables(net: "proposals.Net", vocab: tuple[VPart, ...], kind: Optional[str],
+               tile_boost: float = 0.0):
     """Per (part, yaw), in vocabulary order: the network's output for its
     token, and log P(part | token) — how widely sets of this kind (or all
-    sets) use it among the parts of its token; and the object's index."""
+    sets) use it among the parts of its token; and the object's index.
+    `tile_boost` adds a log-bonus to the log P(part | token) of every tile
+    option, biasing both engines' network-driven proposals toward tiles."""
     out, use = [], []
     for v in vocab:
         for _ in v.orients:
@@ -763,7 +770,11 @@ def net_tables(net: "proposals.Net", vocab: tuple[VPart, ...], kind: Optional[st
             use.append((v.kinds.get(kind, {}).get("sets", 0) if kind else v.n_sets) + 1.0)
     out, use = np.array(out), np.array(use)
     tot = np.bincount(out, weights=use, minlength=net.other() + 1)
-    return out, np.log(use / tot[out]), (net.object_index.get(kind, -1) if kind else -1)
+    lpart = np.log(use / tot[out])
+    if tile_boost:
+        is_tile = np.array([_box_kind(v) == "tile" for v in vocab for _ in v.orients])
+        lpart = lpart + tile_boost * is_tile
+    return out, lpart, (net.object_index.get(kind, -1) if kind else -1)
 
 
 class Filler:
@@ -773,16 +784,16 @@ class Filler:
     once against a window of the grid."""
 
     def __init__(self, state: State, rnd: random.Random, vocab: tuple[VPart, ...], kind: Optional[str],
-                 top_k: int = 12, net: bool = True):
+                 top_k: int = 12, net: bool = True, tile_boost: float = 0.0):
         self.st, self.rnd, self.vocab, self.top_k = state, rnd, vocab, top_k
         self.opts: list[tuple[VPart, Orient]] = [(v, o) for v in vocab for o in v.orients]
-        self.logprior = option_logprior(vocab, state.s, kind)
+        self.logprior = option_logprior(vocab, state.s, kind, tile_boost=tile_boost)
         self.net = state.net if net else None
         if self.net is not None:
             # P(part, yaw | cell) = P(token | context) * P(part | token): the network
             # proposes the token, the part within it goes by how widely sets of this
             # kind (or all sets) use it
-            self.opt_out, self.opt_lpart, self.obj = net_tables(self.net, vocab, kind)
+            self.opt_out, self.opt_lpart, self.obj = net_tables(self.net, vocab, kind, tile_boost=tile_boost)
             self.static = proposals.static_context(state.t.fill)
         self.prior = self.logprior
         # the window every option is tested in: origin (y, x - FX, z - FZ) for a cell (y, x, z)
@@ -1106,7 +1117,8 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
            weights: Optional[Weights] = None, t_start_share: float = 0.05, t_final_share: float = 0.002,
            k_models: int = 50, n_special: int = 160, log_every: int = 2000,
            warmup: int = 200, top_k: int = 12, engine: str = "auto",
-           net: bool = True, stats: Optional["Stats"] = None) -> tuple[list[Placement], dict]:
+           net: bool = True, stats: Optional["Stats"] = None,
+           tile_boost: float = 0.0) -> tuple[list[Placement], dict]:
     """The temperature comes from the data: the median energy change of
     `warmup` proposals (measured, then undone) is the scale; it anneals
     from `t_start_share` to `t_final_share` of it.  Monotony is the KL
@@ -1133,7 +1145,8 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
         got, info, history = native.run(
             target, stats, vocab, target.kind, weights, iters=iters, warmup=warmup, seed=seed,
             t_start_share=t_start_share, t_final_share=t_final_share, top_k=top_k, log_every=log_every,
-            opts_logprior=option_logprior(vocab, stats, target.kind), net=net)
+            opts_logprior=option_logprior(vocab, stats, target.kind, tile_boost=tile_boost), net=net,
+            tile_boost=tile_boost)
         placements = [Placement(v.part, c, x, z, y, o.size[1], o.size[2], o.rot) for v, o, c, y, x, z in got]
         used = Counter(v.category for v, *_ in got)
         n_ref = stats.density * float(target.fill.sum())
@@ -1145,7 +1158,7 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
         return placements, info
     rnd = random.Random(seed)
     st = State(target, stats, weights)
-    filler = Filler(st, rnd, vocab, target.kind, top_k, net)
+    filler = Filler(st, rnd, vocab, target.kind, top_k, net, tile_boost=tile_boost)
     ys, xs, zs = np.nonzero(target.want)
     filler.fill(list(zip(ys.tolist(), xs.tolist(), zs.tolist())))
     e = st.energy()

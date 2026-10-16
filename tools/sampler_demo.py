@@ -155,6 +155,7 @@ def main() -> None:
     ap.add_argument("--segmentation", default=None, help="npz from tools/segment_mesh.py: per-voxel region_kind (overrides --regions)")
     ap.add_argument("--prune-unsupported", action="store_true", help="drop parts with no vertical supporter below from the final build (post-process)")
     ap.add_argument("--depth-carve", default=None, help="npz from tools/depth_carve.py: carve mask OR-ed into --segmentation's carve")
+    ap.add_argument("--tile-boost", type=float, default=0.0, help="log-bonus on every tile option at proposal time; real sets use 15-23%% tiles vs our 11%%, +1 to +2 is a reasonable range")
     a = ap.parse_args()
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     regions = None
@@ -177,7 +178,8 @@ def main() -> None:
     t0 = time.time()
     from everything2lego.sampler import Weights
     iters = a.iters if a.iters > 0 else max(20000, 40 * int(target.want.sum()))
-    ps, info = sample(target, models, iters=iters, seed=a.seed, weights=Weights(style=a.style))
+    ps, info = sample(target, models, iters=iters, seed=a.seed, weights=Weights(style=a.style),
+                      tile_boost=a.tile_boost)
     info["iters"] = iters
     info["seconds"] = round(time.time() - t0, 1)
     if a.prune_unsupported:
