@@ -109,12 +109,15 @@ def dataset() -> None:
 
 
 def train(hidden: int = 128, epochs: int = 6, batch: int = 512, lr: float = 1e-3, seed: int = 0,
-          lam: float = 0.5, resume: bool = False) -> None:
+          lam: float = 0.5, resume: bool = False, freq_reweight: bool = False) -> None:
     """Maximum likelihood on the official placements, plus — when
     negatives.py has run — unlikelihood on the sampler's over-used choices:
     -w log(1 - p(token | context)), w how much more our builds use it.
     `resume=True`: start from the previously saved network (compounds
-    across iterate.sh rounds instead of restarting weights each round)."""
+    across iterate.sh rounds instead of restarting weights each round).
+    `freq_reweight=True`: scale each sample's loss by 1/sqrt(token freq)
+    so rare architecturally meaningful placements (hinges, SNOT, arches)
+    aren't drowned out by common plate stacks."""
     neg = np.load(NEG) if NEG.exists() else None
     d = np.load(DS)
     X, Y, V = d["X"].astype(np.float32), d["Y"].astype(np.int64), d["val"]
@@ -152,16 +155,24 @@ def train(hidden: int = 128, epochs: int = 6, batch: int = 512, lr: float = 1e-3
     freq = np.bincount(Yt, minlength=C) + 1.0
     lf = np.log(freq / freq.sum())
     print(f"frequency baseline: val nll {-lf[Yv].mean():.3f}, top-1 {(Yv == lf.argmax()).mean():.3f}")
+    if freq_reweight:
+        token_w = 1.0 / np.sqrt(freq)
+        token_w /= token_w.mean()                                    # normalise so overall scale matches
+        print(f"freq-reweight on: weight range {token_w.min():.2f}..{token_w.max():.2f}")
+    else:
+        token_w = np.ones(C, dtype=np.float32)
     for ep in range(epochs):
         perm = rnd.permutation(len(Yt))
         for i in range(0, len(perm), batch):
             j = perm[i:i + batch]
             x, y = Xt[j], Yt[j]
+            w = token_w[y].astype(np.float32)
             xn = (x - mu) / sd
             h, lp = forward(x)
             g = np.exp(lp)
             g[np.arange(len(y)), y] -= 1
-            g /= len(y)
+            g *= w[:, None]
+            g /= max(1e-6, w.sum())
             if neg is not None:                            # and push the over-used choices down
                 jn = rnd.integers(0, len(neg["Y"]), batch)
                 xq, yq, wq = neg["X"][jn].astype(np.float32), neg["Y"][jn].astype(np.int64), neg["W"][jn]
@@ -188,4 +199,6 @@ def train(hidden: int = 128, epochs: int = 6, batch: int = 512, lr: float = 1e-3
 
 
 if __name__ == "__main__":
-    {"dataset": dataset, "train": lambda: train(resume="--resume" in sys.argv)}[sys.argv[1]]()
+    {"dataset": dataset,
+     "train": lambda: train(resume="--resume" in sys.argv,
+                             freq_reweight="--freq-reweight" in sys.argv)}[sys.argv[1]]()
