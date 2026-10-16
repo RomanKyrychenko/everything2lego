@@ -36,8 +36,10 @@ HINGE_PAIRS_PATH = Path(os.environ.get(
 
 @lru_cache(maxsize=1)
 def load_pairs() -> tuple[dict, ...]:
-    """Each pair: {a_ldraw, b_ldraw, dy_s, dx_s, dz_s, yaw_s, models}.
-    Empty if the JSON isn't where we expect."""
+    """Hinge pairs from the dedicated JSON.  Each pair:
+    {a_ldraw, a_yaw, b_ldraw, yaw_s, dy_s, dx_s, dz_s, stacked, models}.
+    Hinge pairs always have a_yaw=0 (hinge geometry is captured relative
+    to the base part's identity transform)."""
     if not HINGE_PAIRS_PATH.exists():
         return ()
     rows = json.loads(HINGE_PAIRS_PATH.read_text())
@@ -49,18 +51,35 @@ def load_pairs() -> tuple[dict, ...]:
         dy_ldraw, dx_ldraw, dz_ldraw = int(r["dy"]), int(r["dx"]), int(r["dz"])
         stacked = (yaw_ldraw == 0 and dy_ldraw == 0 and dx_ldraw == 0 and dz_ldraw == 0)
         out.append({
-            "a_ldraw": a_ldraw, "b_ldraw": b_ldraw,
-            "stacked": stacked,                                       # fill y_B from a.h at use time
-            "yaw_s": yaw_ldraw,
+            "a_ldraw": a_ldraw, "a_yaw": 0,
+            "b_ldraw": b_ldraw, "yaw_s": yaw_ldraw,
             "dy_s": dy_ldraw, "dx_s": dx_ldraw, "dz_s": dz_ldraw,
+            "stacked": stacked,
             "models": int(r.get("models", 0)),
         })
     return tuple(out)
 
 
+def load_all_pairs() -> tuple[dict, ...]:
+    """Hinge pairs + top catalogue pairs (if the catalogue is present).
+    See catalogue.load_pairs for the limit (default 500 by model count)."""
+    from . import catalogue
+    return load_pairs() + catalogue.load_pairs()
+
+
+def by_a_yaw() -> dict[tuple[str, int], list[dict]]:
+    """(ldraw, yaw) of A -> list of pair entries.  Combined index over
+    the hinge catalogue and the mined pattern catalogue."""
+    out: dict[tuple[str, int], list[dict]] = {}
+    for p in load_all_pairs():
+        out.setdefault((p["a_ldraw"], p["a_yaw"]), []).append(p)
+    return out
+
+
+# backwards-compatible alias (hinge_swap used this once); callers should
+# prefer by_a_yaw now
 def by_a_ldraw() -> dict[str, list[dict]]:
-    """ldraw name of A -> list of pair entries where A appears first."""
     out: dict[str, list[dict]] = {}
-    for p in load_pairs():
+    for p in load_all_pairs():
         out.setdefault(p["a_ldraw"], []).append(p)
     return out

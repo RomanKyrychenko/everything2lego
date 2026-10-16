@@ -362,8 +362,8 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
     for k, (v_, o_) in enumerate(opts):
         opt_by_ldraw_yaw.setdefault((v_.part.ldraw, o_.rot), k)
     hinge_rows: list[int] = []
-    for pair in _hinges.load_pairs():
-        a_opt = opt_by_ldraw_yaw.get((pair["a_ldraw"], 0))
+    for pair in _hinges.load_all_pairs():
+        a_opt = opt_by_ldraw_yaw.get((pair["a_ldraw"], pair["a_yaw"]))
         if a_opt is None:
             continue
         b_opt = opt_by_ldraw_yaw.get((pair["b_ldraw"], pair["yaw_s"]))

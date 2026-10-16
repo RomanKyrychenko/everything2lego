@@ -815,10 +815,15 @@ class Filler:
         self.opts: list[tuple[VPart, Orient]] = [(v, o) for v in vocab for o in v.orients]
         self.logprior = option_logprior(vocab, state.s, kind, tile_boost=tile_boost, snot_boost=snot_boost)
         from . import hinges as _hinges
-        vocab_ldraws = {v.part.ldraw for v in vocab}
-        self.hinge_by_a = {a: [p for p in ps if p["b_ldraw"] in vocab_ldraws]
-                            for a, ps in _hinges.by_a_ldraw().items() if a in vocab_ldraws}
-        self.hinge_by_a = {a: ps for a, ps in self.hinge_by_a.items() if ps}
+        vocab_opts = {(v.part.ldraw, o.rot) for v in vocab for o in v.orients}
+        # (ldraw_a, yaw_a) -> list of pairs; filtered to pairs whose B is placeable too
+        self.pair_by_a = {}
+        for key, ps in _hinges.by_a_yaw().items():
+            if key not in vocab_opts:
+                continue
+            kept = [p for p in ps if (p["b_ldraw"], p["yaw_s"]) in vocab_opts]
+            if kept:
+                self.pair_by_a[key] = kept
         self.net = state.net if net else None
         if self.net is not None:
             # P(part, yaw | cell) = P(token | context) * P(part | token): the network
@@ -1237,22 +1242,24 @@ def masonry_shift(state: "State", filler: "Filler", rnd: random.Random):
 
 
 def hinge_swap(state: "State", filler: "Filler", rnd: random.Random):
-    """Attach B at its canonical pose to an existing A in the state, drawn
-    from the hinge-pair catalogue (tools/partsdb/hinges.py).  Fails
-    silently when no A is placed, the target B isn't in the vocabulary,
+    """Attach B at a catalogued pose to an existing A in the state.
+    Pair sources: hinges.load_pairs (step 4A/B of the hinge feature) and
+    catalogue.load_pairs (top mined pair patterns from OMR).  Fails
+    silently when no (ldraw, yaw) match, target B isn't in vocabulary,
     or any target cell is already filled by a different part.  Metropolis
     accepts when the pair improves style/support/outline over the
     previous occupant (if any) at B's cells."""
-    pairs_by_a = filler.hinge_by_a
+    pairs_by_a = filler.pair_by_a
     if not pairs_by_a or not state.items:
         return None
-    # pick an existing item whose ldraw is an "A" in some pair
-    candidates = [i for i, it in state.items.items() if it.vp.part.ldraw in pairs_by_a]
+    # pick an existing item whose (ldraw, yaw) matches a pair's A side
+    candidates = [i for i, it in state.items.items()
+                   if (it.vp.part.ldraw, it.ori.rot) in pairs_by_a]
     if not candidates:
         return None
     i = rnd.choice(candidates)
     a = state.items[i]
-    pair = rnd.choice(pairs_by_a[a.vp.part.ldraw])
+    pair = rnd.choice(pairs_by_a[(a.vp.part.ldraw, a.ori.rot)])
     # find a VPart for B's ldraw name
     b_vp = next((v for v in filler.vocab if v.part.ldraw == pair["b_ldraw"]), None)
     if b_vp is None:
