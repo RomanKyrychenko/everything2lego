@@ -92,37 +92,45 @@ def dataset() -> None:
     objects = _object_kinds()
     files = sorted(F.OMR.glob("*.mpd")) + sorted(F.OMR.glob("*.ldr"))
     args = [(f, objects.get(f.stem) or objects.get(f.stem.split("_")[0])) for f in files]
-    Xs, Ys, val = [], [], []
+    Xs, Ys, val, mids = [], [], [], []
     with Pool(max(1, (os.cpu_count() or 2) - 1), initializer=F._init, maxtasksperchild=50) as pool:
         for k, got in enumerate(pool.imap_unordered(model_samples, args, chunksize=2)):
             if got and len(got[2]):
                 Xs.append(got[1])
                 Ys.append(got[2])
                 val.append(np.full(len(got[2]), held_out(got[0])))
+                mids.append(np.full(len(got[2]), k, np.int32))        # per-sample model id for sequence/composition losses
             if k % 200 == 0:
                 print(f"  {k}/{len(args)}", flush=True)
     X, Y, V = np.concatenate(Xs), np.concatenate(Ys), np.concatenate(val)
+    M = np.concatenate(mids)
     assert X.shape[1] == n_inputs(len(KINDS), len(OBJECTS))
-    np.savez(DS, X=X, Y=Y, val=V)
+    np.savez(DS, X=X, Y=Y, val=V, model_id=M)
     print(f"dataset: {len(Y)} samples ({V.sum()} held out), {X.shape[1]} inputs, "
           f"{(Y < len(TOKENS)).mean():.1%} in the vocabulary -> {DS}")
 
 
 def train(hidden: int = 128, epochs: int = 6, batch: int = 512, lr: float = 1e-3, seed: int = 0,
-          lam: float = 0.5, resume: bool = False, freq_reweight: bool = False) -> None:
+          lam: float = 0.5, resume: bool = False, freq_reweight: bool = False,
+          composition: float = 0.0, by_model: bool = False) -> None:
     """Maximum likelihood on the official placements, plus — when
-    negatives.py has run — unlikelihood on the sampler's over-used choices:
-    -w log(1 - p(token | context)), w how much more our builds use it.
-    `resume=True`: start from the previously saved network (compounds
-    across iterate.sh rounds instead of restarting weights each round).
-    `freq_reweight=True`: scale each sample's loss by 1/sqrt(token freq)
-    so rare architecturally meaningful placements (hinges, SNOT, arches)
-    aren't drowned out by common plate stacks."""
+    negatives.py has run — unlikelihood on the sampler's over-used choices.
+    `resume=True`: start from the previously saved network.
+    `freq_reweight=True`: scale each sample's loss by 1/sqrt(token freq).
+    `composition=w > 0`: auxiliary KL between the net's mean predicted
+        distribution over a batch and the batch's empirical label
+        distribution — a whole-batch signal that pulls the net toward
+        the right overall composition, not just per-cell correctness.
+    `by_model=True`: batch samples by model (one model's placements per
+        step) so the composition loss sees a real set's composition
+        rather than a random cell mix.  Needs model_id in the dataset."""
     neg = np.load(NEG) if NEG.exists() else None
     d = np.load(DS)
     X, Y, V = d["X"].astype(np.float32), d["Y"].astype(np.int64), d["val"]
+    M = d["model_id"].astype(np.int64) if "model_id" in d.files else np.zeros(len(Y), np.int64)
     C = len(TOKENS) + 1
     Xt, Yt, Xv, Yv = X[~V], Y[~V], X[V], Y[V]
+    Mt = M[~V]
     mu, sd = Xt.mean(0), Xt.std(0) + 1e-3
     rnd = np.random.default_rng(seed)
     if resume and OUT.exists():
@@ -161,10 +169,30 @@ def train(hidden: int = 128, epochs: int = 6, batch: int = 512, lr: float = 1e-3
         print(f"freq-reweight on: weight range {token_w.min():.2f}..{token_w.max():.2f}")
     else:
         token_w = np.ones(C, dtype=np.float32)
+    def _model_batches():
+        """Yield (indices,) batches grouped by model_id — each batch is a
+        single model's placements (so composition loss sees a real set)."""
+        order = rnd.permutation(np.unique(Mt))
+        buf: list[int] = []
+        for m in order:
+            idxs = np.flatnonzero(Mt == m)
+            if len(idxs) == 0:
+                continue
+            if len(buf) + len(idxs) > batch and buf:
+                yield np.array(buf, np.int64); buf = []
+            buf.extend(idxs.tolist())
+            if len(buf) >= batch:
+                yield np.array(buf[:batch], np.int64); buf = buf[batch:]
+        if buf:
+            yield np.array(buf, np.int64)
+
     for ep in range(epochs):
-        perm = rnd.permutation(len(Yt))
-        for i in range(0, len(perm), batch):
-            j = perm[i:i + batch]
+        if by_model:
+            batches = list(_model_batches())
+        else:
+            perm = rnd.permutation(len(Yt))
+            batches = [perm[i:i + batch] for i in range(0, len(perm), batch)]
+        for j in batches:
             x, y = Xt[j], Yt[j]
             w = token_w[y].astype(np.float32)
             xn = (x - mu) / sd
@@ -173,6 +201,17 @@ def train(hidden: int = 128, epochs: int = 6, batch: int = 512, lr: float = 1e-3
             g[np.arange(len(y)), y] -= 1
             g *= w[:, None]
             g /= max(1e-6, w.sum())
+            # composition loss: pull the batch-mean predicted distribution toward
+            # the empirical label distribution.  Grad on logits = w * (q_mean - q_true)
+            # where q_mean = exp(lp).mean(0), q_true = empirical_one_hot(y).mean(0).
+            if composition > 0:
+                p_mean = np.exp(lp).mean(0)
+                q_emp = np.bincount(y, minlength=C) / max(1, len(y))
+                comp_grad = (p_mean - q_emp)                         # (C,)
+                # distribute over samples: each sample contributes 1/N to p_mean
+                g_comp = np.broadcast_to(comp_grad[None, :], lp.shape).copy()
+                g_comp = g_comp * np.exp(lp) / max(1, len(y))         # chain through softmax
+                g = g + composition * g_comp
             if neg is not None:                            # and push the over-used choices down
                 jn = rnd.integers(0, len(neg["Y"]), batch)
                 xq, yq, wq = neg["X"][jn].astype(np.float32), neg["Y"][jn].astype(np.int64), neg["W"][jn]
@@ -199,6 +238,14 @@ def train(hidden: int = 128, epochs: int = 6, batch: int = 512, lr: float = 1e-3
 
 
 if __name__ == "__main__":
+    def _f(flag, default=0.0):
+        """Parse --flag=VALUE from argv, else default."""
+        for a in sys.argv:
+            if a.startswith(f"--{flag}="):
+                return float(a.split("=", 1)[1])
+        return default
     {"dataset": dataset,
      "train": lambda: train(resume="--resume" in sys.argv,
-                             freq_reweight="--freq-reweight" in sys.argv)}[sys.argv[1]]()
+                             freq_reweight="--freq-reweight" in sys.argv,
+                             composition=_f("composition", 0.0),
+                             by_model="--by-model" in sys.argv)}[sys.argv[1]]()

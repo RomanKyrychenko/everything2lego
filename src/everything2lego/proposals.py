@@ -37,6 +37,12 @@ BEFORE = ((_d[:, 0] < 0) | ((_d[:, 0] == 0) & ((_d[:, 1] < 0) | ((_d[:, 1] == 0)
 
 BLOCK = (3, 4, 4)                               # the wider view's blocks: (plates, studs, studs)
 BLOCKS = [(by, bx, bz) for by in (-3, 0, 3) for bx in (-6, -2, 2) for bz in (-6, -2, 2)]
+# longer-range blocks for whole-target context: object-scale footprint samples
+# at ±12 studs, ±9 plates.  Set via E2L_WIDE_CONTEXT=1 to enable (requires
+# a from-scratch retrain since n_inputs changes).
+import os as _os
+if _os.environ.get("E2L_WIDE_CONTEXT") == "1":
+    BLOCKS = BLOCKS + [(by, bx, bz) for by in (-9, 9) for bx in (-12, 12) for bz in (-12, 12)]
 NSTATIC = len(BLOCKS) + 2
 
 
