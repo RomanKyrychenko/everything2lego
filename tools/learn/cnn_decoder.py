@@ -47,7 +47,7 @@ MODEL_PATH = Path("/Volumes/PRO-G40/lego_data/analysis/cnn_decoder.pt")
 MODEL_PATH_FACTORED = Path("/Volumes/PRO-G40/lego_data/analysis/cnn_decoder_factored.pt")
 
 
-def _model_path(factored: bool, unet: bool, sched_sampling: float = 0.0) -> Path:
+def _model_path(factored: bool, unet: bool, sched_sampling: float = 0.0, ch: int = 32) -> Path:
     base = "cnn_decoder"
     if unet:
         base += "_unet"
@@ -55,6 +55,8 @@ def _model_path(factored: bool, unet: bool, sched_sampling: float = 0.0) -> Path
         base += "_factored"
     if sched_sampling > 0:
         base += f"_sched{int(sched_sampling*100):02d}"
+    if ch != 32:
+        base += f"_ch{ch}"
     return Path(f"/Volumes/PRO-G40/lego_data/analysis/{base}.pt")
 KNOWN_KINDS = ("building", "road_vehicle", "creature", "object", "figure", "scenery", "mechanism", "train")
 
@@ -293,7 +295,7 @@ class Model(nn.Module):
 
 def train(epochs: int = 5, batch: int = 4, lr: float = 1e-3, grid: int = 16, limit: int = 0,
           resume: bool = False, factored: bool = False, unet: bool = False,
-          sched_sampling: float = 0.0):
+          sched_sampling: float = 0.0, ch: int = 32):
     """`sched_sampling` is the final mix probability (linearly ramped 0->p
     across epochs).  Each training step then runs a 2nd forward pass with
     the model's own argmax from the first pass substituted into prev at
@@ -317,10 +319,10 @@ def train(epochs: int = 5, batch: int = 4, lr: float = 1e-3, grid: int = 16, lim
     device = "cpu"                                                     # Conv3D not supported on MPS (torch 2.2)
     print(f"device: {device} (Conv3D not supported on MPS)", flush=True)
     mkw = {"n_cats": len(ds.cats), "n_sizes": len(ds.sizes)} if factored else {}
-    m = Model(len(ds.tokens), len(ds.kinds), grid=grid, factored=factored, unet=unet, **mkw).to(device)
+    m = Model(len(ds.tokens), len(ds.kinds), grid=grid, ch=ch, factored=factored, unet=unet, **mkw).to(device)
     n_params = sum(p.numel() for p in m.parameters())
-    print(f"model params: {n_params/1e6:.2f}M, unet={unet}", flush=True)
-    out_path = _model_path(factored, unet, sched_sampling)
+    print(f"model params: {n_params/1e6:.2f}M, ch={ch}, unet={unet}", flush=True)
+    out_path = _model_path(factored, unet, sched_sampling, ch)
     if resume and out_path.exists():
         prev = torch.load(out_path, map_location=device, weights_only=False)
         m.load_state_dict(prev["state_dict"])
@@ -403,7 +405,7 @@ def train(epochs: int = 5, batch: int = 4, lr: float = 1e-3, grid: int = 16, lim
                       f"({time.time()-t0:.1f}s)", flush=True)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     ckpt = {"state_dict": m.state_dict(), "n_tokens": len(ds.tokens), "n_kinds": len(ds.kinds),
-            "tokens": ds.tokens, "kinds": ds.kinds, "grid": grid, "factored": factored, "unet": unet}
+            "tokens": ds.tokens, "kinds": ds.kinds, "grid": grid, "factored": factored, "unet": unet, "ch": ch}
     if factored:
         ckpt["cats"] = ds.cats
         ckpt["sizes"] = [list(s) for s in ds.sizes]
@@ -423,9 +425,10 @@ if __name__ == "__main__":
     ap.add_argument("--factored", action="store_true", help="three heads (category, footprint, yaw) instead of one n_tokens-way softmax")
     ap.add_argument("--unet", action="store_true", help="UNet3D encoder (16->8->4 downsample with skips) instead of a flat 3-conv encoder")
     ap.add_argument("--sched-sampling", type=float, default=0.0, help="final probability (ramped 0->p across epochs) of substituting the model's own argmax for ground-truth prev at a position; non-factored only")
+    ap.add_argument("--ch", type=int, default=32, help="encoder channel width (also scales UNet width at every level)")
     a = ap.parse_args()
     if a.cmd == "train":
         train(epochs=a.epochs, batch=a.batch, lr=a.lr, grid=a.grid, limit=a.limit,
-               resume=a.resume, factored=a.factored, unet=a.unet, sched_sampling=a.sched_sampling)
+               resume=a.resume, factored=a.factored, unet=a.unet, sched_sampling=a.sched_sampling, ch=a.ch)
     else:
         print("eval not implemented yet; load the model and run inference directly")
