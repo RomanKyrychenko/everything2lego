@@ -141,7 +141,8 @@ def target_from_mesh(path: str, studs: int, shell: int, kind: str | None = None,
         region_kind = np.full(want.shape, "", dtype=object)
         for rid, k in seg_kind_of.items():
             region_kind[seg_label == int(rid)] = k
-    return Target(want=want, colour=colour, visible=visible, bits=bits, kind=kind, region_kind=region_kind)
+    return Target(want=want, colour=colour, visible=visible, bits=bits, kind=kind,
+                   region_kind=region_kind, region_label=seg_label if seg_label is not None else None)
 
 
 def load_models() -> list[dict]:

@@ -331,6 +331,7 @@ class Target:
     bits: Optional[np.ndarray] = None  # (H, X, Z) uint64: each cell's shape, 4x4x4 (default: want, full)
     kind: Optional[str] = None        # building, road_vehicle, creature, ... (vocabulary.json kinds)
     region_kind: Optional[np.ndarray] = None   # (H, X, Z) str, per-cell kind; overrides `kind` where set
+    region_label: Optional[np.ndarray] = None  # (H, X, Z) int, per-cell architectural label (classify_regions.LABEL); used by masonry_shift and future pattern moves
 
     def __post_init__(self):
         if self.bits is None:
@@ -1174,6 +1175,67 @@ def _place_init(st: "State", vocab: tuple["VPart", ...], placements: list[Placem
     return placed
 
 
+def masonry_shift(state: "State", filler: "Filler", rnd: random.Random):
+    """When a long rectangular wall-region part has its horizontal seams
+    aligned with the part directly above (same (x_stud, z_stud, w, d)),
+    shift this part by 1 stud along its long axis to stagger the seam
+    (brick-course masonry pattern).  Requires target.region_label to be
+    set (classify_regions.LABEL): only fires when the item's cells are
+    dominantly wall (label 1).  Metropolis accepts when the shift
+    doesn't hurt energy."""
+    region = state.t.region_label
+    if region is None or not state.items:
+        return None
+    H, X, Z = state.owner.shape
+    i = rnd.choice(list(state.items))
+    a = state.items[i]
+    # must be a long rectangular box part
+    if a.W + a.D < 3 or a.W * a.D > 8:
+        return None
+    cy, cx, cz = a.cells()
+    sub = region[cy, cx, cz]
+    vals = sub[sub >= 0]
+    if not len(vals) or int(np.bincount(vals).argmax()) != 1:   # 1 = wall
+        return None
+    # find a part B above whose cells overlap A's top face at the same (x, z)
+    y_top = a.y + a.h
+    if y_top >= H:
+        return None
+    above = {int(state.owner[y_top, x, z]) for x in range(a.x, a.x + a.W) for z in range(a.z, a.z + a.D)}
+    above.discard(-1)
+    if not above:
+        return None
+    j = next(iter(above))
+    b = state.items[j]
+    if (b.y != y_top or b.x != a.x or b.z != a.z or b.W != a.W or b.D != a.D):
+        return None                                    # seam not aligned
+    # pick the long axis and a direction to shift
+    along_x = a.W >= a.D
+    for d in (1, -1):
+        nx = a.x + (d if along_x else 0)
+        nz = a.z + (0 if along_x else d)
+        # new cells
+        ncy = a.ori.cells[:, 0] + a.y
+        ncx = a.ori.cells[:, 1] + nx
+        ncz = a.ori.cells[:, 2] + nz
+        if (ncx < 0).any() or (ncx >= X).any() or (ncz < 0).any() or (ncz >= Z).any():
+            continue
+        # cells must be free (ignoring a's own) and in want
+        owner_cells = state.owner[ncy, ncx, ncz]
+        if not ((owner_cells == -1) | (owner_cells == i)).all():
+            continue
+        if not state.t.want[ncy, ncx, ncz].all():
+            continue
+        ra = state.remove(i)
+        k = state.add(Item(a.vp, a.ori, a.colour, a.y, nx, nz))
+
+        def undo(k=k, ra=ra):
+            state.remove(k)
+            state.add(ra)
+        return undo
+    return None
+
+
 def hinge_swap(state: "State", filler: "Filler", rnd: random.Random):
     """Attach B at its canonical pose to an existing A in the state, drawn
     from the hinge-pair catalogue (tools/partsdb/hinges.py).  Fails
@@ -1309,7 +1371,8 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
     deltas = []
     for _ in range(warmup):                         # measure the scale, change nothing
         r = rnd.random()
-        move = hinge_swap if r < 0.03 else swap if r < 0.1 else merge if r < 0.55 else retile
+        move = (masonry_shift if r < 0.02 else hinge_swap if r < 0.05
+                 else swap if r < 0.12 else merge if r < 0.57 else retile)
         undo = move(st, filler, rnd)
         if undo is None:
             continue
@@ -1321,7 +1384,8 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
     for it in range(iters):
         T = t_start * (t_final / t_start) ** (it / max(1, iters - 1))
         r = rnd.random()
-        move = hinge_swap if r < 0.03 else swap if r < 0.1 else merge if r < 0.55 else retile
+        move = (masonry_shift if r < 0.02 else hinge_swap if r < 0.05
+                 else swap if r < 0.12 else merge if r < 0.57 else retile)
         undo = move(st, filler, rnd)
         if undo is None:
             continue

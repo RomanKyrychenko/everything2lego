@@ -76,6 +76,7 @@ class Problem(C.Structure):
         ("n_init", C.c_int32),
         ("init_opt", _P(C.c_int32)), ("init_colour", _P(C.c_int32)),
         ("init_y", _P(C.c_int32)), ("init_x", _P(C.c_int32)), ("init_z", _P(C.c_int32)),
+        ("region_label", _P(C.c_int32)),
         ("t_start_share", C.c_double), ("t_final_share", C.c_double),
         ("iters", C.c_int64), ("warmup", C.c_int64), ("seed", C.c_uint64),
         ("top_k", C.c_int32), ("log_every", C.c_int64),
@@ -342,6 +343,8 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         else:
             region = np.full(target.want.shape, -1, dtype=np.int32)
         p.region_object = _ptr(arr(region, np.int32), C.c_int32)
+    if target.region_label is not None:
+        p.region_label = _ptr(arr(target.region_label.astype(np.int32), np.int32), C.c_int32)
     # swap variants: same box kind, size, AND cells positions (so halo matches)
     from .sampler import _box_kind
     group_id = {}

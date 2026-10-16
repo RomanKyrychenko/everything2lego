@@ -125,6 +125,9 @@ pub struct Problem {
     pub init_y: *const i32,       // n_init
     pub init_x: *const i32,       // n_init
     pub init_z: *const i32,       // n_init
+    // per-cell architectural region label (classify_regions.LABEL); -1 absent.
+    // masonry_shift keys on label==1 (wall).
+    pub region_label: *const i32, // H*X*Z or null
     pub t_start_share: f64,
     pub t_final_share: f64,
     pub iters: i64,
@@ -270,6 +273,7 @@ struct Data {
     hinge_b: Vec<usize>,
     hinge_pose: Vec<[i32; 3]>, // (dy, dx, dz)
     hinge_by_a: std::collections::HashMap<usize, Vec<usize>>, // opt_a -> indices into hinge_a/b/pose
+    region_label: Vec<i32>,    // H*X*Z or empty
 }
 
 unsafe fn v<T: Copy>(p: *const T, n: usize) -> Vec<T> {
@@ -422,6 +426,8 @@ impl Data {
             hinge_b: Vec::new(),
             hinge_pose: Vec::new(),
             hinge_by_a: std::collections::HashMap::new(),
+            region_label: if p.region_label.is_null() { Vec::new() }
+                          else { v(p.region_label, n) },
         };
         let n_hinge = p.n_hinge.max(0) as usize;
         if n_hinge > 0 {
@@ -1334,6 +1340,7 @@ enum Undo {
     Merge { k: usize, a: Item, b: Item },
     Swap { k: usize, a: Item },
     Hinge { k: usize, evicted: Option<Item> },
+    MasonryShift { k: usize, a: Item },
 }
 
 fn undo(st: &mut State, u: Undo) {
@@ -1360,6 +1367,10 @@ fn undo(st: &mut State, u: Undo) {
             if let Some(it) = evicted {
                 st.add(it);
             }
+        }
+        Undo::MasonryShift { k, a } => {
+            st.remove(k);
+            st.add(a);
         }
     }
 }
@@ -1569,11 +1580,88 @@ fn hinge_swap(st: &mut State, rng: &mut Rng) -> Option<Undo> {
     Some(Undo::Hinge { k, evicted })
 }
 
+/// Shift a wall-region long rectangular part by 1 stud along its long axis
+/// to break vertically-aligned seams with the part directly above.
+/// Mirrors sampler.masonry_shift.
+fn masonry_shift(st: &mut State, rng: &mut Rng) -> Option<Undo> {
+    let d = st.d;
+    if d.region_label.is_empty() || st.live.is_empty() {
+        return None;
+    }
+    let i = st.live[rng.below(st.live.len())];
+    let a = *st.item(i);
+    let o = &d.opts[a.opt];
+    // long rectangular box
+    if o.w + o.d < 3 || o.w * o.d > 8 {
+        return None;
+    }
+    // dominant region of A's cells must be wall (label 1)
+    let mut counts = [0i32; 8];
+    for &(cy, cx, cz, _, _) in &o.cells {
+        let r = d.region_label[d.idx(a.y + cy, a.x + cx, a.z + cz)];
+        if r >= 0 && (r as usize) < counts.len() {
+            counts[r as usize] += 1;
+        }
+    }
+    let dom = counts.iter().enumerate().max_by_key(|(_, &c)| c).map(|(i, _)| i).unwrap_or(0);
+    if dom != 1 {
+        return None;
+    }
+    // part B above with same (x_stud, z_stud, W, D) at y_top?
+    let y_top = a.y + o.h;
+    if y_top >= d.h {
+        return None;
+    }
+    let mut above: i32 = -1;
+    'find: for x in a.x..a.x + o.w {
+        for z in a.z..a.z + o.d {
+            let j = st.owner[d.idx(y_top, x, z)];
+            if j >= 0 {
+                above = j;
+                break 'find;
+            }
+        }
+    }
+    if above < 0 {
+        return None;
+    }
+    let b = *st.item(above as usize);
+    let bo = &d.opts[b.opt];
+    if b.y != y_top || b.x != a.x || b.z != a.z || bo.w != o.w || bo.d != o.d {
+        return None;
+    }
+    // shift along the long axis
+    let along_x = o.w >= o.d;
+    for &dir in &[1i32, -1i32] {
+        let nx = a.x + if along_x { dir } else { 0 };
+        let nz = a.z + if along_x { 0 } else { dir };
+        // in-bounds + cells free (ignoring self) + in want
+        let ok = o.cells.iter().all(|&(cy, cx, cz, _, _)| {
+            let yy = a.y + cy;
+            let xx = nx + cx;
+            let zz = nz + cz;
+            if yy < 0 || yy >= d.h || xx < 0 || xx >= d.x || zz < 0 || zz >= d.z {
+                return false;
+            }
+            let idx = d.idx(yy, xx, zz);
+            d.want[idx] && (st.owner[idx] == -1 || st.owner[idx] == i as i32)
+        });
+        if !ok {
+            continue;
+        }
+        let ra = st.remove(i);
+        let k = st.add(Item { opt: a.opt, colour: a.colour, y: a.y, x: nx, z: nz });
+        return Some(Undo::MasonryShift { k, a: ra });
+    }
+    None
+}
+
 fn propose(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
     let r = rng.f64();
-    if r < 0.03 { hinge_swap(st, rng) }
-    else if r < 0.1 { swap(st, rng) }
-    else if r < 0.55 { merge(st, rng) }
+    if r < 0.02 { masonry_shift(st, rng) }
+    else if r < 0.05 { hinge_swap(st, rng) }
+    else if r < 0.12 { swap(st, rng) }
+    else if r < 0.57 { merge(st, rng) }
     else { retile(st, filler, rng) }
 }
 
