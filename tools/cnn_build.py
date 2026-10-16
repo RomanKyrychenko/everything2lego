@@ -61,7 +61,7 @@ def _best_colour(cell_cols: np.ndarray, allowed: set | None) -> int:
 
 def cnn_greedy(target, model_path, n_special: int = 160, prefer_length: float = 0.0,
                 refine_rounds: int = 0, mask_pct: float = 0.1, seed: int = 0,
-                verbose: bool = True) -> list[Placement]:
+                support_penalty: float = 0.0, verbose: bool = True) -> list[Placement]:
     """Run the CNN decoder greedily over the voxel target and return the list
     of Placements.  Reusable from sampler_demo (--init-from-cnn) or other
     composition pipelines.
@@ -173,6 +173,11 @@ def cnn_greedy(target, model_path, n_special: int = 160, prefer_length: float = 
                 else:
                     score = float(lp[tok])
                 score += prefer_length * (len(cells_arr) - 1)
+                if support_penalty > 0 and cy > 0:
+                    bottom = abs_cells[abs_cells[:, 0] == cy]              # cells at this part's base (y = cy)
+                    n_unsup = int((owner[cy - 1, bottom[:, 1], bottom[:, 2]] < 0).sum())
+                    if n_unsup > 0:
+                        score -= support_penalty * n_unsup
                 valid.append((score, k))
             if not valid:
                 continue
@@ -258,6 +263,8 @@ def main() -> None:
     ap.add_argument("--mask-pct", type=float, default=0.1,
                     help="fraction of placements to remove per refinement round")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--support-penalty", type=float, default=0.0,
+                    help="penalty per unsupported bottom cell in each candidate option (0 disables; 1-5 soft, 1e6 effectively hard)")
     ap.add_argument("--measure", action="store_true",
                     help="run sampler.sample(iters=0, warmup=0) on the CNN output to report full quality metrics (KL, outline, unsupported, ...)")
     a = ap.parse_args()
@@ -265,7 +272,8 @@ def main() -> None:
     a.out.mkdir(parents=True, exist_ok=True)
     target = target_from_mesh(a.mesh, a.studs, a.shell, a.kind)
     placements = cnn_greedy(target, a.model, n_special=a.n_special, prefer_length=a.prefer_length,
-                             refine_rounds=a.refine, mask_pct=a.mask_pct, seed=a.seed)
+                             refine_rounds=a.refine, mask_pct=a.mask_pct, seed=a.seed,
+                             support_penalty=a.support_penalty)
     write_ldr(placements, a.out / "model.ldr")
     if a.measure:
         from everything2lego.sampler import sample as _sample
