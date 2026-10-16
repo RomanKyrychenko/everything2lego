@@ -154,6 +154,7 @@ def main() -> None:
     ap.add_argument("--regions", default=None, help='JSON file mapping palette codes to kinds, e.g. {"0":"road_vehicle","4":"object"} — gives different sampler weights per colour region')
     ap.add_argument("--segmentation", default=None, help="npz from tools/segment_mesh.py: per-voxel region_kind (overrides --regions)")
     ap.add_argument("--prune-unsupported", action="store_true", help="drop parts with no vertical supporter below from the final build (post-process)")
+    ap.add_argument("--depth-carve", default=None, help="npz from tools/depth_carve.py: carve mask OR-ed into --segmentation's carve")
     a = ap.parse_args()
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     regions = None
@@ -166,6 +167,10 @@ def main() -> None:
         seg_kind_of = {int(k): v for k, v in d["kind_of"]}
         if "carve" in d.files:
             carve = d["carve"]
+    if a.depth_carve:
+        d = np.load(a.depth_carve, allow_pickle=True)
+        extra = d["carve"]
+        carve = extra if carve is None else (carve | extra)
     target = target_from_mesh(a.mesh, a.studs, a.shell, a.kind, stand=a.stand, regions=regions,
                               seg_label=seg_label, seg_kind_of=seg_kind_of, carve=carve)
     models = load_models()
