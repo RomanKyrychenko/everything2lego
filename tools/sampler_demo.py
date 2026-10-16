@@ -145,7 +145,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("mesh"); ap.add_argument("out")
     ap.add_argument("--studs", type=int, default=24)
-    ap.add_argument("--iters", type=int, default=20000)
+    ap.add_argument("--iters", type=int, default=0, help="sampler iterations; 0 (default) scales with target volume (~40 per occupied cell, min 20k)")
     ap.add_argument("--shell", type=int, default=2)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--kind", default=None)
@@ -171,7 +171,9 @@ def main() -> None:
     models = load_models()
     t0 = time.time()
     from everything2lego.sampler import Weights
-    ps, info = sample(target, models, iters=a.iters, seed=a.seed, weights=Weights(style=a.style))
+    iters = a.iters if a.iters > 0 else max(20000, 40 * int(target.want.sum()))
+    ps, info = sample(target, models, iters=iters, seed=a.seed, weights=Weights(style=a.style))
+    info["iters"] = iters
     info["seconds"] = round(time.time() - t0, 1)
     if a.prune_unsupported:
         from everything2lego.supports import prune_unsupported
