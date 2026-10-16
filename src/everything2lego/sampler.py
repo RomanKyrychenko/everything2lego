@@ -1322,7 +1322,8 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
            warmup: int = 200, top_k: int = 12, engine: str = "auto",
            net: bool = True, stats: Optional["Stats"] = None,
            tile_boost: float = 0.0, snot_boost: float = 0.0,
-           init_placements: Optional[list[Placement]] = None) -> tuple[list[Placement], dict]:
+           init_placements: Optional[list[Placement]] = None,
+           opt_bias: Optional[np.ndarray] = None) -> tuple[list[Placement], dict]:
     """The temperature comes from the data: the median energy change of
     `warmup` proposals (measured, then undone) is the scale; it anneals
     from `t_start_share` to `t_final_share` of it.  Monotony is the KL
@@ -1351,8 +1352,9 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
             target, stats, vocab, target.kind, weights, iters=iters, warmup=warmup, seed=seed,
             t_start_share=t_start_share, t_final_share=t_final_share, top_k=top_k, log_every=log_every,
             opts_logprior=option_logprior(vocab, stats, target.kind, tile_boost=tile_boost,
-                                           snot_boost=snot_boost), net=net,
-            tile_boost=tile_boost, snot_boost=snot_boost,
+                                           snot_boost=snot_boost)
+                           + (opt_bias if opt_bias is not None else 0.0),
+            net=net, tile_boost=tile_boost, snot_boost=snot_boost,
             init_placements=init_placements)
         placements = [Placement(v.part, c, x, z, y, o.size[1], o.size[2], o.rot) for v, o, c, y, x, z in got]
         used = Counter(v.category for v, *_ in got)

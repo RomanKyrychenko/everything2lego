@@ -175,6 +175,7 @@ def main() -> None:
     ap.add_argument("--depth-carve", default=None, help="npz from tools/depth_carve.py: carve mask OR-ed into --segmentation's carve")
     ap.add_argument("--tile-boost", type=float, default=0.0, help="log-bonus on every tile option at proposal time; real sets use 15-23%% tiles vs our 11%%, +1 to +2 is a reasonable range")
     ap.add_argument("--snot-boost", type=float, default=0.0, help="log-bonus on every SNOT option (brickS/plateS/tileS) at proposal time; real sets use 17-32%% SNOT vs our ~0%%")
+    ap.add_argument("--cnn-prior", default=None, help="path to a per-option bias .npy from tools/cnn_prior.py (whole-target CNN score, added to each option's logprior)")
     ap.add_argument("--subassemblies", type=int, default=0, help="group placements into N-part submodels in an MPD .ldr (real sets have 11-26 sub-assemblies; 25 is a reasonable target)")
     ap.add_argument("--smooth", type=int, default=0, help="apply N iterations of Taubin smoothing to the mesh before voxelising (reduces 1-stud surface noise; 5-10 is a reasonable range)")
     a = ap.parse_args()
@@ -200,8 +201,9 @@ def main() -> None:
     t0 = time.time()
     from everything2lego.sampler import Weights
     iters = a.iters if a.iters > 0 else max(20000, 40 * int(target.want.sum()))
+    opt_bias = np.load(a.cnn_prior) if a.cnn_prior else None
     ps, info = sample(target, models, iters=iters, seed=a.seed, weights=Weights(style=a.style),
-                      tile_boost=a.tile_boost, snot_boost=a.snot_boost)
+                      tile_boost=a.tile_boost, snot_boost=a.snot_boost, opt_bias=opt_bias)
     info["iters"] = iters
     info["seconds"] = round(time.time() - t0, 1)
     if a.prune_unsupported:

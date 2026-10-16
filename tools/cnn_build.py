@@ -69,6 +69,8 @@ def main() -> None:
     ap.add_argument("--model", type=Path,
                      default=Path("/Volumes/PRO-G40/lego_data/analysis/cnn_decoder.pt"))
     ap.add_argument("--n-special", type=int, default=160)
+    ap.add_argument("--prefer-length", type=float, default=0.0,
+                    help="bonus per extra cell per option (merges toward longer parts; 0.5-1.5 is reasonable)")
     a = ap.parse_args()
 
     a.out.mkdir(parents=True, exist_ok=True)
@@ -134,8 +136,8 @@ def main() -> None:
             lp = logits - logits.max()
             lp = lp - torch.logsumexp(lp, dim=-1)
             lp = lp.cpu().numpy()
-        # pick best fitting option
-        best_k, best_score = -1, -np.inf
+        # collect valid options with (score, index)
+        valid = []
         for k, (h, W, D, cells_arr, part, colours, rot, tok) in enumerate(opts):
             if cy + h > H or cx + W > X or cz + D > Z:
                 continue
@@ -144,11 +146,12 @@ def main() -> None:
                 continue
             if not target.want[abs_cells[:, 0], abs_cells[:, 1], abs_cells[:, 2]].all():
                 continue
-            score = float(lp[tok])
-            if score > best_score:
-                best_score, best_k = score, k
-        if best_k < 0:
+            score = float(lp[tok]) + a.prefer_length * (len(cells_arr) - 1)
+            valid.append((score, k))
+        if not valid:
             continue
+        valid.sort(reverse=True)
+        best_k = valid[0][1]
         h, W, D, cells_arr, part, colours, rot, tok = opts[best_k]
         abs_cells = cells_arr + np.array([cy, cx, cz])
         allowed_codes = set(colours) if colours else None
