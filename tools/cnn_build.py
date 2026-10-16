@@ -81,6 +81,7 @@ def main() -> None:
     tok_idx = {t: i for i, t in enumerate(tokens)}
     kind_idx = {k: i for i, k in enumerate(kinds)}
     factored = bool(ckpt.get("factored"))
+    unet = bool(ckpt.get("unet"))
 
     target = target_from_mesh(a.mesh, a.studs, a.shell, a.kind)
     vocab = select_vocabulary(target.kind, a.n_special)
@@ -106,10 +107,10 @@ def main() -> None:
     H, X, Z = target.want.shape
 
     device = "cpu"                                                    # Conv3D not supported on MPS in torch 2.2
-    print(f"device: {device}, grid: {grid}, factored: {factored}", flush=True)
+    print(f"device: {device}, grid: {grid}, factored: {factored}, unet: {unet}", flush=True)
 
     mkw = {"n_cats": n_cats, "n_sizes": n_sizes} if factored else {}
-    m = Model(n_tokens=n_tokens, n_kinds=n_kinds, grid=grid, factored=factored, **mkw).to(device)
+    m = Model(n_tokens=n_tokens, n_kinds=n_kinds, grid=grid, factored=factored, unet=unet, **mkw).to(device)
     m.load_state_dict(ckpt["state_dict"])
     m.eval()
 

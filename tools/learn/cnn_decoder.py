@@ -45,6 +45,15 @@ from everything2lego.style import kind_of  # noqa: E402
 DATASET_DIR = Path("/Volumes/PRO-G40/lego_data/analysis/omr_dataset")
 MODEL_PATH = Path("/Volumes/PRO-G40/lego_data/analysis/cnn_decoder.pt")
 MODEL_PATH_FACTORED = Path("/Volumes/PRO-G40/lego_data/analysis/cnn_decoder_factored.pt")
+
+
+def _model_path(factored: bool, unet: bool) -> Path:
+    base = "cnn_decoder"
+    if unet:
+        base += "_unet"
+    if factored:
+        base += "_factored"
+    return Path(f"/Volumes/PRO-G40/lego_data/analysis/{base}.pt")
 KNOWN_KINDS = ("building", "road_vehicle", "creature", "object", "figure", "scenery", "mechanism", "train")
 
 
@@ -158,6 +167,36 @@ def _collate(batch):
             cat_pad, size_pad, yaw_pad)
 
 
+class _UNet3D(nn.Module):
+    """3D UNet: 16->8->4 encoder, 4->8->16 decoder with skip concats.
+    Output has `ch` channels at full input resolution so Model.forward's
+    per-cell gather stays unchanged."""
+
+    def __init__(self, ch: int = 32):
+        super().__init__()
+        c1, c2, c3 = ch, ch * 2, ch * 4
+        def blk(ic, oc):
+            return nn.Sequential(nn.Conv3d(ic, oc, 3, padding=1), nn.ReLU(),
+                                  nn.Conv3d(oc, oc, 3, padding=1), nn.ReLU())
+        self.enc1 = blk(1, c1)
+        self.pool1 = nn.MaxPool3d(2)
+        self.enc2 = blk(c1, c2)
+        self.pool2 = nn.MaxPool3d(2)
+        self.bot = blk(c2, c3)
+        self.up2 = nn.ConvTranspose3d(c3, c2, 2, stride=2)
+        self.dec2 = blk(c3, c2)                                          # cat with e2 doubles input ch
+        self.up1 = nn.ConvTranspose3d(c2, c1, 2, stride=2)
+        self.dec1 = blk(c2, c1)                                          # cat with e1
+
+    def forward(self, x):
+        e1 = self.enc1(x)
+        e2 = self.enc2(self.pool1(e1))
+        b = self.bot(self.pool2(e2))
+        d2 = self.dec2(torch.cat([self.up2(b), e2], dim=1))
+        d1 = self.dec1(torch.cat([self.up1(d2), e1], dim=1))
+        return d1
+
+
 class Model(nn.Module):
     """3D CNN encoder + per-placement MLP head.  The MLP sees the voxel
     feature at the placement's cell, plus the previously-placed token
@@ -168,20 +207,26 @@ class Model(nn.Module):
 
     def __init__(self, n_tokens: int, n_kinds: int, grid: int = 16, ch: int = 32,
                  d_head: int = 128, chunk_attn: bool = True, factored: bool = False,
-                 n_cats: int = 0, n_sizes: int = 0):
+                 n_cats: int = 0, n_sizes: int = 0, unet: bool = False):
         """`chunk_attn=True` runs a 1-layer self-attention over placements
         WITHIN the same Y-layer (chunks are typically 10-50 placements, so
         attention stays O(50^2) per layer, CPU-practical).  `factored=True`
         swaps the single n_tokens-way head for three smaller heads over
-        (category, footprint, yaw) — denser training signal per class."""
+        (category, footprint, yaw) — denser training signal per class.
+        `unet=True` swaps the flat 3-conv encoder for a UNet with 2 down
+        steps + skips, so each cell's feature carries whole-shape context."""
         super().__init__()
         self.grid = grid
         self.ch = ch
-        self.encoder = nn.Sequential(
-            nn.Conv3d(1, 16, 3, padding=1), nn.ReLU(),
-            nn.Conv3d(16, ch, 3, padding=1), nn.ReLU(),
-            nn.Conv3d(ch, ch, 3, padding=1), nn.ReLU(),
-        )
+        self.unet = unet
+        if unet:
+            self.encoder = _UNet3D(ch=ch)
+        else:
+            self.encoder = nn.Sequential(
+                nn.Conv3d(1, 16, 3, padding=1), nn.ReLU(),
+                nn.Conv3d(16, ch, 3, padding=1), nn.ReLU(),
+                nn.Conv3d(ch, ch, 3, padding=1), nn.ReLU(),
+            )
         self.kind_emb = nn.Embedding(n_kinds + 1, 16)
         self.state_emb = nn.Embedding(n_tokens + 2, 16)
         self.pos_emb = nn.Embedding(grid, 16)
@@ -245,7 +290,7 @@ class Model(nn.Module):
 
 
 def train(epochs: int = 5, batch: int = 4, lr: float = 1e-3, grid: int = 16, limit: int = 0,
-          resume: bool = False, factored: bool = False):
+          resume: bool = False, factored: bool = False, unet: bool = False):
     ds = OMRDataset(grid=grid, factored=factored)
     if limit:
         ds.files = ds.files[:limit]
@@ -261,8 +306,10 @@ def train(epochs: int = 5, batch: int = 4, lr: float = 1e-3, grid: int = 16, lim
     device = "cpu"                                                     # Conv3D not supported on MPS (torch 2.2)
     print(f"device: {device} (Conv3D not supported on MPS)", flush=True)
     mkw = {"n_cats": len(ds.cats), "n_sizes": len(ds.sizes)} if factored else {}
-    m = Model(len(ds.tokens), len(ds.kinds), grid=grid, factored=factored, **mkw).to(device)
-    out_path = MODEL_PATH_FACTORED if factored else MODEL_PATH
+    m = Model(len(ds.tokens), len(ds.kinds), grid=grid, factored=factored, unet=unet, **mkw).to(device)
+    n_params = sum(p.numel() for p in m.parameters())
+    print(f"model params: {n_params/1e6:.2f}M, unet={unet}", flush=True)
+    out_path = _model_path(factored, unet)
     if resume and out_path.exists():
         prev = torch.load(out_path, map_location=device, weights_only=False)
         m.load_state_dict(prev["state_dict"])
@@ -335,7 +382,7 @@ def train(epochs: int = 5, batch: int = 4, lr: float = 1e-3, grid: int = 16, lim
                       f"({time.time()-t0:.1f}s)", flush=True)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     ckpt = {"state_dict": m.state_dict(), "n_tokens": len(ds.tokens), "n_kinds": len(ds.kinds),
-            "tokens": ds.tokens, "kinds": ds.kinds, "grid": grid, "factored": factored}
+            "tokens": ds.tokens, "kinds": ds.kinds, "grid": grid, "factored": factored, "unet": unet}
     if factored:
         ckpt["cats"] = ds.cats
         ckpt["sizes"] = [list(s) for s in ds.sizes]
@@ -353,9 +400,10 @@ if __name__ == "__main__":
     ap.add_argument("--limit", type=int, default=0, help="use only first N dataset files (quick test)")
     ap.add_argument("--resume", action="store_true", help="load weights from existing cnn_decoder.pt before training")
     ap.add_argument("--factored", action="store_true", help="three heads (category, footprint, yaw) instead of one n_tokens-way softmax")
+    ap.add_argument("--unet", action="store_true", help="UNet3D encoder (16->8->4 downsample with skips) instead of a flat 3-conv encoder")
     a = ap.parse_args()
     if a.cmd == "train":
         train(epochs=a.epochs, batch=a.batch, lr=a.lr, grid=a.grid, limit=a.limit,
-               resume=a.resume, factored=a.factored)
+               resume=a.resume, factored=a.factored, unet=a.unet)
     else:
         print("eval not implemented yet; load the model and run inference directly")
