@@ -47,12 +47,14 @@ MODEL_PATH = Path("/Volumes/PRO-G40/lego_data/analysis/cnn_decoder.pt")
 MODEL_PATH_FACTORED = Path("/Volumes/PRO-G40/lego_data/analysis/cnn_decoder_factored.pt")
 
 
-def _model_path(factored: bool, unet: bool) -> Path:
+def _model_path(factored: bool, unet: bool, sched_sampling: float = 0.0) -> Path:
     base = "cnn_decoder"
     if unet:
         base += "_unet"
     if factored:
         base += "_factored"
+    if sched_sampling > 0:
+        base += f"_sched{int(sched_sampling*100):02d}"
     return Path(f"/Volumes/PRO-G40/lego_data/analysis/{base}.pt")
 KNOWN_KINDS = ("building", "road_vehicle", "creature", "object", "figure", "scenery", "mechanism", "train")
 
@@ -290,7 +292,16 @@ class Model(nn.Module):
 
 
 def train(epochs: int = 5, batch: int = 4, lr: float = 1e-3, grid: int = 16, limit: int = 0,
-          resume: bool = False, factored: bool = False, unet: bool = False):
+          resume: bool = False, factored: bool = False, unet: bool = False,
+          sched_sampling: float = 0.0):
+    """`sched_sampling` is the final mix probability (linearly ramped 0->p
+    across epochs).  Each training step then runs a 2nd forward pass with
+    the model's own argmax from the first pass substituted into prev at
+    randomly chosen positions, so the model learns to tolerate its own
+    (wrong) history instead of only ground truth.  Non-factored only — the
+    factored head doesn't predict ldraw directly."""
+    if sched_sampling > 0 and factored:
+        raise SystemExit("--sched-sampling currently supported only without --factored")
     ds = OMRDataset(grid=grid, factored=factored)
     if limit:
         ds.files = ds.files[:limit]
@@ -309,7 +320,7 @@ def train(epochs: int = 5, batch: int = 4, lr: float = 1e-3, grid: int = 16, lim
     m = Model(len(ds.tokens), len(ds.kinds), grid=grid, factored=factored, unet=unet, **mkw).to(device)
     n_params = sum(p.numel() for p in m.parameters())
     print(f"model params: {n_params/1e6:.2f}M, unet={unet}", flush=True)
-    out_path = _model_path(factored, unet)
+    out_path = _model_path(factored, unet, sched_sampling)
     if resume and out_path.exists():
         prev = torch.load(out_path, map_location=device, weights_only=False)
         m.load_state_dict(prev["state_dict"])
@@ -319,6 +330,7 @@ def train(epochs: int = 5, batch: int = 4, lr: float = 1e-3, grid: int = 16, lim
         m.train()
         t0 = time.time()
         total = n_tokens = 0.0
+        p_sched = sched_sampling * ep / max(1, epochs - 1)                 # linear ramp 0 -> sched_sampling
         for batch_data in dl_tr:
             if factored:
                 v, pos, tok, kind, chunk, cat, sz, yaw = (b.to(device) for b in batch_data)
@@ -326,7 +338,16 @@ def train(epochs: int = 5, batch: int = 4, lr: float = 1e-3, grid: int = 16, lim
                 v, pos, tok, kind, chunk = (b.to(device) for b in batch_data)
             prev = torch.full_like(tok, len(ds.tokens) + 1)
             prev[:, 1:] = tok[:, :-1].clamp(0, len(ds.tokens))
-            out = m(v, pos, prev, kind, chunk_id=chunk)
+            if p_sched > 0 and not factored:
+                with torch.no_grad():
+                    tf_logits = m(v, pos, prev, kind, chunk_id=chunk)
+                    pred = tf_logits.argmax(-1).clamp(0, len(ds.tokens))     # model's own guess per position
+                mix = torch.rand_like(tok, dtype=torch.float) < p_sched
+                prev_mix = prev.clone()
+                prev_mix[:, 1:] = torch.where(mix[:, 1:], pred[:, :-1], prev[:, 1:])
+                out = m(v, pos, prev_mix, kind, chunk_id=chunk)
+            else:
+                out = m(v, pos, prev, kind, chunk_id=chunk)
             if factored:
                 lc, ls, ly = out
                 loss = (F.cross_entropy(lc.view(-1, lc.size(-1)), cat.view(-1), ignore_index=-1)
@@ -401,9 +422,10 @@ if __name__ == "__main__":
     ap.add_argument("--resume", action="store_true", help="load weights from existing cnn_decoder.pt before training")
     ap.add_argument("--factored", action="store_true", help="three heads (category, footprint, yaw) instead of one n_tokens-way softmax")
     ap.add_argument("--unet", action="store_true", help="UNet3D encoder (16->8->4 downsample with skips) instead of a flat 3-conv encoder")
+    ap.add_argument("--sched-sampling", type=float, default=0.0, help="final probability (ramped 0->p across epochs) of substituting the model's own argmax for ground-truth prev at a position; non-factored only")
     a = ap.parse_args()
     if a.cmd == "train":
         train(epochs=a.epochs, batch=a.batch, lr=a.lr, grid=a.grid, limit=a.limit,
-               resume=a.resume, factored=a.factored, unet=a.unet)
+               resume=a.resume, factored=a.factored, unet=a.unet, sched_sampling=a.sched_sampling)
     else:
         print("eval not implemented yet; load the model and run inference directly")
