@@ -87,6 +87,8 @@ def main() -> None:
     n_tokens, n_kinds = len(tokens), len(kinds)
     tok_idx = {t: i for i, t in enumerate(tokens)}
     kind_idx = {k: i for i, k in enumerate(kinds)}
+    unet = bool(ckpt.get("unet"))
+    ch = int(ckpt.get("ch", 32))
 
     target = target_from_mesh(a.mesh, a.studs, a.shell, a.kind)
     vocab = select_vocabulary(target.kind, a.n_special)
@@ -96,7 +98,8 @@ def main() -> None:
     H, X, Z = target.want.shape
 
     device = "cpu"
-    m = Model(n_tokens=n_tokens, n_kinds=n_kinds, grid=grid).to(device)
+    print(f"device: {device}, grid: {grid}, unet: {unet}, ch: {ch}", flush=True)
+    m = Model(n_tokens=n_tokens, n_kinds=n_kinds, grid=grid, ch=ch, unet=unet).to(device)
     m.load_state_dict(ckpt["state_dict"])
     m.eval()
     v = torch.from_numpy((target.want > 0).astype(np.float32))[None, None]

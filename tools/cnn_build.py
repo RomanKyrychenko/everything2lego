@@ -59,22 +59,12 @@ def _best_colour(cell_cols: np.ndarray, allowed: set | None) -> int:
     return c
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("mesh")
-    ap.add_argument("out", type=Path)
-    ap.add_argument("--studs", type=int, default=32)
-    ap.add_argument("--shell", type=int, default=2)
-    ap.add_argument("--kind", default=None)
-    ap.add_argument("--model", type=Path,
-                     default=Path("/Volumes/PRO-G40/lego_data/analysis/cnn_decoder.pt"))
-    ap.add_argument("--n-special", type=int, default=160)
-    ap.add_argument("--prefer-length", type=float, default=0.0,
-                    help="bonus per extra cell per option (merges toward longer parts; 0.5-1.5 is reasonable)")
-    a = ap.parse_args()
-
-    a.out.mkdir(parents=True, exist_ok=True)
-    ckpt = torch.load(a.model, map_location="cpu", weights_only=False)
+def cnn_greedy(target, model_path, n_special: int = 160, prefer_length: float = 0.0,
+                verbose: bool = True) -> list[Placement]:
+    """Run the CNN decoder greedily over the voxel target and return the list
+    of Placements.  Reusable from sampler_demo (--init-from-cnn) or other
+    composition pipelines."""
+    ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
     tokens, kinds = ckpt["tokens"], ckpt["kinds"]
     grid = ckpt["grid"]
     n_tokens, n_kinds = len(tokens), len(kinds)
@@ -84,8 +74,7 @@ def main() -> None:
     unet = bool(ckpt.get("unet"))
     ch = int(ckpt.get("ch", 32))
 
-    target = target_from_mesh(a.mesh, a.studs, a.shell, a.kind)
-    vocab = select_vocabulary(target.kind, a.n_special)
+    vocab = select_vocabulary(target.kind, n_special)
     if factored:
         cats = ckpt["cats"]
         sizes = [tuple(s) for s in ckpt["sizes"]]
@@ -108,7 +97,8 @@ def main() -> None:
     H, X, Z = target.want.shape
 
     device = "cpu"                                                    # Conv3D not supported on MPS in torch 2.2
-    print(f"device: {device}, grid: {grid}, factored: {factored}, unet: {unet}", flush=True)
+    if verbose:
+        print(f"device: {device}, grid: {grid}, factored: {factored}, unet: {unet}", flush=True)
 
     mkw = {"n_cats": n_cats, "n_sizes": n_sizes} if factored else {}
     m = Model(n_tokens=n_tokens, n_kinds=n_kinds, grid=grid, ch=ch, factored=factored, unet=unet, **mkw).to(device)
@@ -130,7 +120,8 @@ def main() -> None:
     ys, xs, zs = np.nonzero(target.want)
     order = np.lexsort((zs, xs, ys))
     cells = list(zip(ys[order].tolist(), xs[order].tolist(), zs[order].tolist()))
-    print(f"cnn.generate @ {a.studs} studs, {len(cells)} cells, {len(opts)} options", flush=True)
+    if verbose:
+        print(f"cnn.generate: {len(cells)} cells, {len(opts)} options", flush=True)
 
     owner = np.full((H, X, Z), -1, dtype=np.int32)
     placements: list[Placement] = []
@@ -179,7 +170,7 @@ def main() -> None:
                 score = float(lpc[cid]) + float(lps[sid]) + float(lpy[yid])
             else:
                 score = float(lp[tok])
-            score += a.prefer_length * (len(cells_arr) - 1)
+            score += prefer_length * (len(cells_arr) - 1)
             valid.append((score, k))
         if not valid:
             continue
@@ -197,7 +188,28 @@ def main() -> None:
         pos_seq.append((gy, gx, gz))
 
     secs = time.time() - t0
-    print(f"generated {len(placements)} placements, {int((owner >= 0).sum())}/{int(target.want.sum())} cells covered ({secs:.1f}s)")
+    if verbose:
+        print(f"generated {len(placements)} placements, {int((owner >= 0).sum())}/{int(target.want.sum())} cells covered ({secs:.1f}s)")
+    return placements
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("mesh")
+    ap.add_argument("out", type=Path)
+    ap.add_argument("--studs", type=int, default=32)
+    ap.add_argument("--shell", type=int, default=2)
+    ap.add_argument("--kind", default=None)
+    ap.add_argument("--model", type=Path,
+                     default=Path("/Volumes/PRO-G40/lego_data/analysis/cnn_decoder.pt"))
+    ap.add_argument("--n-special", type=int, default=160)
+    ap.add_argument("--prefer-length", type=float, default=0.0,
+                    help="bonus per extra cell per option (merges toward longer parts; 0.5-1.5 is reasonable)")
+    a = ap.parse_args()
+
+    a.out.mkdir(parents=True, exist_ok=True)
+    target = target_from_mesh(a.mesh, a.studs, a.shell, a.kind)
+    placements = cnn_greedy(target, a.model, n_special=a.n_special, prefer_length=a.prefer_length)
     write_ldr(placements, a.out / "model.ldr")
     subprocess.run([sys.executable, str(ROOT / "tools/render_build.py"), str(a.out / "model.ldr"),
                     str(a.out / "render.png"), "--views", "30,120,210", "--size", "500"], check=False)
