@@ -73,6 +73,9 @@ class Problem(C.Structure):
         ("opt_variants", _P(C.c_int32)),  # n_opt: swap-group id (-1 none)
         ("net_static", C.c_int32), ("static", _P(C.c_float)),
         ("n_hinge", C.c_int32), ("hinge_data", _P(C.c_int32)),  # n_hinge*5: (opt_a, opt_b, dy, dx, dz)
+        ("n_init", C.c_int32),
+        ("init_opt", _P(C.c_int32)), ("init_colour", _P(C.c_int32)),
+        ("init_y", _P(C.c_int32)), ("init_x", _P(C.c_int32)), ("init_z", _P(C.c_int32)),
         ("t_start_share", C.c_double), ("t_final_share", C.c_double),
         ("iters", C.c_int64), ("warmup", C.c_int64), ("seed", C.c_uint64),
         ("top_k", C.c_int32), ("log_every", C.c_int64),
@@ -194,7 +197,8 @@ def snap_table(vocab, n_col: int) -> np.ndarray:
 
 def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: int,
         t_start_share: float, t_final_share: float, top_k: int, log_every: int, opts_logprior,
-        net: bool = True, tile_boost: float = 0.0, snot_boost: float = 0.0):
+        net: bool = True, tile_boost: float = 0.0, snot_boost: float = 0.0,
+        init_placements=None):
     """Run the native sampler.  Returns ([(vpart, orient, colour, y, x, z)], info, history)."""
     lib = library()
     if lib is None:
@@ -372,6 +376,29 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         p.hinge_data = _ptr(arr(np.array(hinge_rows, np.int32), np.int32), C.c_int32)
     else:
         p.n_hinge = 0
+    # multi-scale warm-start: resolve each Placement to an opt index
+    if init_placements:
+        opt_by_ldraw_yaw: dict[tuple[str, int], int] = {}
+        for k_, (v_, o_) in enumerate(opts):
+            opt_by_ldraw_yaw.setdefault((v_.part.ldraw, o_.rot), k_)
+        init_opt_arr, init_c_arr, init_y_arr, init_x_arr, init_z_arr = [], [], [], [], []
+        for pl in init_placements:
+            k_ = opt_by_ldraw_yaw.get((pl.part.ldraw, pl.rotation_deg))
+            if k_ is None:
+                continue
+            init_opt_arr.append(k_); init_c_arr.append(pl.color_idx)
+            init_y_arr.append(pl.y_plate); init_x_arr.append(pl.x_stud); init_z_arr.append(pl.z_stud)
+        if init_opt_arr:
+            p.n_init = len(init_opt_arr)
+            p.init_opt = _ptr(arr(np.array(init_opt_arr, np.int32), np.int32), C.c_int32)
+            p.init_colour = _ptr(arr(np.array(init_c_arr, np.int32), np.int32), C.c_int32)
+            p.init_y = _ptr(arr(np.array(init_y_arr, np.int32), np.int32), C.c_int32)
+            p.init_x = _ptr(arr(np.array(init_x_arr, np.int32), np.int32), C.c_int32)
+            p.init_z = _ptr(arr(np.array(init_z_arr, np.int32), np.int32), C.c_int32)
+        else:
+            p.n_init = 0
+    else:
+        p.n_init = 0
     rc = lib.e2l_sample(C.byref(p))
     if rc == 1:
         raise RuntimeError("native sampler panicked")

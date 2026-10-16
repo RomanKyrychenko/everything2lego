@@ -1144,6 +1144,36 @@ def _dens(pairs: float, n_ref: float, sd: float) -> float:
     return math.log(pairs / n_ref) ** 2 / (2 * sd ** 2) if pairs > 0 else 0.0
 
 
+def _place_init(st: "State", vocab: tuple["VPart", ...], placements: list[Placement]) -> int:
+    """Pre-populate `st` with placements before sampling (multi-scale
+    warm-start).  Returns the count actually placed; skips a placement
+    whose part isn't in `vocab`, whose cells go out of bounds, whose
+    cells aren't in `target.want`, or whose cells are already owned."""
+    by_ldraw: dict[str, VPart] = {}
+    for v in vocab:
+        by_ldraw.setdefault(v.part.ldraw, v)
+    H, X, Z = st.owner.shape
+    placed = 0
+    for p in placements:
+        v = by_ldraw.get(p.part.ldraw)
+        if v is None:
+            continue
+        ori = next((o for o in v.orients if o.rot == p.rotation_deg), None)
+        if ori is None:
+            continue
+        cy = ori.cells[:, 0] + p.y_plate
+        cx = ori.cells[:, 1] + p.x_stud
+        cz = ori.cells[:, 2] + p.z_stud
+        if (cy < 0).any() or (cy >= H).any() or (cx < 0).any() or (cx >= X).any() \
+           or (cz < 0).any() or (cz >= Z).any():
+            continue
+        if (st.owner[cy, cx, cz] >= 0).any() or not st.t.want[cy, cx, cz].all():
+            continue
+        st.add(Item(v, ori, p.color_idx, p.y_plate, p.x_stud, p.z_stud))
+        placed += 1
+    return placed
+
+
 def hinge_swap(state: "State", filler: "Filler", rnd: random.Random):
     """Attach B at its canonical pose to an existing A in the state, drawn
     from the hinge-pair catalogue (tools/partsdb/hinges.py).  Fails
@@ -1222,7 +1252,8 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
            k_models: int = 50, n_special: int = 160, log_every: int = 2000,
            warmup: int = 200, top_k: int = 12, engine: str = "auto",
            net: bool = True, stats: Optional["Stats"] = None,
-           tile_boost: float = 0.0, snot_boost: float = 0.0) -> tuple[list[Placement], dict]:
+           tile_boost: float = 0.0, snot_boost: float = 0.0,
+           init_placements: Optional[list[Placement]] = None) -> tuple[list[Placement], dict]:
     """The temperature comes from the data: the median energy change of
     `warmup` proposals (measured, then undone) is the scale; it anneals
     from `t_start_share` to `t_final_share` of it.  Monotony is the KL
@@ -1252,7 +1283,8 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
             t_start_share=t_start_share, t_final_share=t_final_share, top_k=top_k, log_every=log_every,
             opts_logprior=option_logprior(vocab, stats, target.kind, tile_boost=tile_boost,
                                            snot_boost=snot_boost), net=net,
-            tile_boost=tile_boost, snot_boost=snot_boost)
+            tile_boost=tile_boost, snot_boost=snot_boost,
+            init_placements=init_placements)
         placements = [Placement(v.part, c, x, z, y, o.size[1], o.size[2], o.rot) for v, o, c, y, x, z in got]
         used = Counter(v.category for v, *_ in got)
         n_ref = stats.density * float(target.fill.sum())
@@ -1265,8 +1297,13 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
     rnd = random.Random(seed)
     st = State(target, stats, weights)
     filler = Filler(st, rnd, vocab, target.kind, top_k, net, tile_boost=tile_boost, snot_boost=snot_boost)
+    # pre-populate state with warm-start placements (multi-scale: scaled-up coarse)
+    if init_placements:
+        _place_init(st, vocab, init_placements)
     ys, xs, zs = np.nonzero(target.want)
-    filler.fill(list(zip(ys.tolist(), xs.tolist(), zs.tolist())))
+    cells = [(y, x, z) for y, x, z in zip(ys.tolist(), xs.tolist(), zs.tolist())
+             if st.owner[y, x, z] < 0]
+    filler.fill(cells)
     e = st.energy()
     history = [e]
     deltas = []

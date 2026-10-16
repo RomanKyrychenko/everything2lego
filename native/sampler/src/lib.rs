@@ -117,6 +117,14 @@ pub struct Problem {
     // into the opts array.  See hinge_swap() for how the pose is applied.
     pub n_hinge: i32,
     pub hinge_data: *const i32,   // n_hinge*5: (opt_a, opt_b, dy, dx, dz)
+    // multi-scale warm-start (sampler._place_init / tools/multi_scale.py):
+    // placements from a coarse pass that pre-populate the state before filler.
+    pub n_init: i32,
+    pub init_opt: *const i32,     // n_init
+    pub init_colour: *const i32,  // n_init
+    pub init_y: *const i32,       // n_init
+    pub init_x: *const i32,       // n_init
+    pub init_z: *const i32,       // n_init
     pub t_start_share: f64,
     pub t_final_share: f64,
     pub iters: i64,
@@ -1578,6 +1586,34 @@ unsafe fn run(p: &Problem) -> i32 {
     let mut st = State::new(&d);
     let mut rng = Rng::new(p.seed);
     let mut filler = Filler { colour_counts: vec![0; d.n_col.max(1)] };
+    // multi-scale warm-start: pre-populate state with coarse placements
+    let n_init = p.n_init.max(0) as usize;
+    if n_init > 0 {
+        let init_opt = v(p.init_opt, n_init);
+        let init_colour = v(p.init_colour, n_init);
+        let init_y = v(p.init_y, n_init);
+        let init_x = v(p.init_x, n_init);
+        let init_z = v(p.init_z, n_init);
+        for i in 0..n_init {
+            let opt = init_opt[i] as usize;
+            if opt >= d.opts.len() {
+                continue;
+            }
+            let o = &d.opts[opt];
+            let (y, x, z) = (init_y[i], init_x[i], init_z[i]);
+            let ok = o.cells.iter().all(|&(cy, cx, cz, _, _)| {
+                let yy = y + cy;
+                let xx = x + cx;
+                let zz = z + cz;
+                yy >= 0 && yy < d.h && xx >= 0 && xx < d.x && zz >= 0 && zz < d.z
+                    && d.want[d.idx(yy, xx, zz)]
+                    && st.owner[d.idx(yy, xx, zz)] < 0
+            });
+            if ok {
+                st.add(Item { opt, colour: init_colour[i], y, x, z });
+            }
+        }
+    }
     let cells: Vec<(i32, i32, i32)> = d
         .want_cells
         .iter()
@@ -1585,6 +1621,7 @@ unsafe fn run(p: &Problem) -> i32 {
             let c = c as i32;
             (c / (d.x * d.z), (c / d.z) % d.x, c % d.z)
         })
+        .filter(|&(y, x, z)| st.owner[d.idx(y, x, z)] < 0)
         .collect();
     filler.fill(&mut st, &mut rng, cells);
     let mut e = st.energy();
