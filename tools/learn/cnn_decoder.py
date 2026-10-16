@@ -190,7 +190,8 @@ class Model(nn.Module):
         return self.head(h)
 
 
-def train(epochs: int = 5, batch: int = 4, lr: float = 1e-3, grid: int = 16, limit: int = 0):
+def train(epochs: int = 5, batch: int = 4, lr: float = 1e-3, grid: int = 16, limit: int = 0,
+          resume: bool = False):
     ds = OMRDataset(grid=grid)
     if limit:
         ds.files = ds.files[:limit]
@@ -206,6 +207,10 @@ def train(epochs: int = 5, batch: int = 4, lr: float = 1e-3, grid: int = 16, lim
     device = "cpu"
     print(f"device: {device} (Conv3D not supported on MPS)", flush=True)
     m = Model(len(ds.tokens), len(ds.kinds), grid=grid).to(device)
+    if resume and MODEL_PATH.exists():
+        prev = torch.load(MODEL_PATH, map_location=device, weights_only=False)
+        m.load_state_dict(prev["state_dict"])
+        print(f"resumed from {MODEL_PATH.name}", flush=True)
     opt = torch.optim.AdamW(m.parameters(), lr=lr)
     for ep in range(epochs):
         m.train()
@@ -255,8 +260,10 @@ if __name__ == "__main__":
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--grid", type=int, default=16)
     ap.add_argument("--limit", type=int, default=0, help="use only first N dataset files (quick test)")
+    ap.add_argument("--resume", action="store_true", help="load weights from existing cnn_decoder.pt before training")
     a = ap.parse_args()
     if a.cmd == "train":
-        train(epochs=a.epochs, batch=a.batch, lr=a.lr, grid=a.grid, limit=a.limit)
+        train(epochs=a.epochs, batch=a.batch, lr=a.lr, grid=a.grid, limit=a.limit,
+               resume="--resume" in sys.argv)
     else:
         print("eval not implemented yet; load the model and run inference directly")
