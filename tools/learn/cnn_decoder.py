@@ -49,7 +49,8 @@ MODEL_PATH_FACTORED = Path("/Volumes/PRO-G40/lego_data/analysis/cnn_decoder_fact
 
 
 def _model_path(factored: bool, unet: bool, sched_sampling: float = 0.0,
-                ch: int = 32, augment: bool = False, dataset: str = "omr") -> Path:
+                ch: int = 32, augment: bool = False, dataset: str = "omr",
+                oversample: int = 0) -> Path:
     base = "cnn_decoder"
     if unet:
         base += "_unet"
@@ -63,6 +64,8 @@ def _model_path(factored: bool, unet: bool, sched_sampling: float = 0.0,
         base += "_aug"
     if dataset != "omr":
         base += f"_{dataset}"
+    if dataset == "hybrid" and oversample > 0:
+        base += f"_x{oversample}"
     return Path(f"/Volumes/PRO-G40/lego_data/analysis/{base}.pt")
 KNOWN_KINDS = ("building", "road_vehicle", "creature", "object", "figure", "scenery", "mechanism", "train")
 
@@ -322,7 +325,7 @@ class Model(nn.Module):
 def train(epochs: int = 5, batch: int = 4, lr: float = 1e-3, grid: int = 16, limit: int = 0,
           resume: bool = False, factored: bool = False, unet: bool = False,
           sched_sampling: float = 0.0, ch: int = 32, augment: bool = False,
-          dataset: str = "omr"):
+          dataset: str = "omr", oversample: int = 0):
     """`sched_sampling` is the final mix probability (linearly ramped 0->p
     across epochs).  Each training step then runs a 2nd forward pass with
     the model's own argmax from the first pass substituted into prev at
@@ -335,9 +338,9 @@ def train(epochs: int = 5, batch: int = 4, lr: float = 1e-3, grid: int = 16, lim
         # OMR for KL fidelity + oversampled distilled for structural priors
         ds = OMRDataset(grid=grid, factored=factored, augment=augment, dataset_dir=DATASET_DIR)
         dist_files = sorted(f for f in DISTILLED_DIR.glob("*.npz") if not f.name.startswith("._"))
-        oversample = max(1, len(ds.files) // max(1, len(dist_files)))
-        ds.files = ds.files + dist_files * oversample
-        print(f"hybrid dataset: {len(dist_files)} distilled x{oversample} + OMR = {len(ds.files)} entries", flush=True)
+        n_over = oversample if oversample > 0 else max(1, len(ds.files) // max(1, len(dist_files)))
+        ds.files = ds.files + dist_files * n_over
+        print(f"hybrid dataset: {len(dist_files)} distilled x{n_over} + OMR = {len(ds.files)} entries", flush=True)
     else:
         dataset_dir = {"omr": DATASET_DIR, "distilled": DISTILLED_DIR}[dataset]
         ds = OMRDataset(grid=grid, factored=factored, augment=augment, dataset_dir=dataset_dir)
@@ -358,7 +361,7 @@ def train(epochs: int = 5, batch: int = 4, lr: float = 1e-3, grid: int = 16, lim
     m = Model(len(ds.tokens), len(ds.kinds), grid=grid, ch=ch, factored=factored, unet=unet, **mkw).to(device)
     n_params = sum(p.numel() for p in m.parameters())
     print(f"model params: {n_params/1e6:.2f}M, ch={ch}, unet={unet}", flush=True)
-    out_path = _model_path(factored, unet, sched_sampling, ch, augment, dataset)
+    out_path = _model_path(factored, unet, sched_sampling, ch, augment, dataset, oversample)
     if resume and out_path.exists():
         prev = torch.load(out_path, map_location=device, weights_only=False)
         m.load_state_dict(prev["state_dict"])
@@ -464,10 +467,11 @@ if __name__ == "__main__":
     ap.add_argument("--ch", type=int, default=32, help="encoder channel width (also scales UNet width at every level)")
     ap.add_argument("--augment", action="store_true", help="180 degree rotation around Y with 50% probability per sample (2x effective dataset)")
     ap.add_argument("--dataset", choices=("omr", "distilled", "hybrid"), default="omr", help="dataset to train on: raw OMR, sampler-distilled, or hybrid (OMR + distilled oversampled to parity)")
+    ap.add_argument("--oversample", type=int, default=0, help="hybrid: distilled oversample factor (default auto = len(OMR)//len(distilled))")
     a = ap.parse_args()
     if a.cmd == "train":
         train(epochs=a.epochs, batch=a.batch, lr=a.lr, grid=a.grid, limit=a.limit,
                resume=a.resume, factored=a.factored, unet=a.unet, sched_sampling=a.sched_sampling,
-               ch=a.ch, augment=a.augment, dataset=a.dataset)
+               ch=a.ch, augment=a.augment, dataset=a.dataset, oversample=a.oversample)
     else:
         print("eval not implemented yet; load the model and run inference directly")
