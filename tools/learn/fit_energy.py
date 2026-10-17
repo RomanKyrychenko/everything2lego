@@ -53,8 +53,9 @@ from everything2lego import sampler  # noqa: E402
 from everything2lego.style import kl  # noqa: E402
 
 OUT = REPO / "src/everything2lego/data/energy_weights.json"
-FITTED = ("sil", "loc", "glob", "glob2", "dens", "cnt", "sup", "side")
-SCALE = {"sil": 0.05, "loc": 1.0, "glob": 0.5, "glob2": 0.5, "dens": 0.5, "cnt": 0.5, "sup": 0.02, "side": 0.02}
+FITTED = ("sil", "loc", "glob", "glob2", "glob3", "dens", "cnt", "sup", "side")
+SCALE = {"sil": 0.05, "loc": 1.0, "glob": 0.5, "glob2": 0.5, "glob3": 0.5,
+         "dens": 0.5, "cnt": 0.5, "sup": 0.02, "side": 0.02}
 DEGRADE = 0.15
 
 
@@ -67,7 +68,8 @@ def outline(bits_a: np.ndarray, bits_b: np.ndarray) -> float:
 
 def statistics(info: dict, parts: int, cells: float) -> dict[str, float]:
     """The energy's statistics of a build (sampler info)."""
-    return {"sil": info["outline"] / cells ** (2 / 3), "loc": info["local_per_pair"], "glob": info["kl"], "glob2": info["kl_paths"],
+    return {"sil": info["outline"] / cells ** (2 / 3), "loc": info["local_per_pair"],
+            "glob": info["kl"], "glob2": info["kl_paths"], "glob3": info.get("kl_paths4", 0.0),
             "dens": info["dens"], "cnt": info["cnt"], "sup": info["unsupported"] / max(1, parts),
             "side": info["bare_side_connectors"] / max(1, parts)}
 
@@ -78,11 +80,14 @@ def official_statistics(row: dict, stats: sampler.Stats, cells: float, vocab_tok
     sampler can use; its parts are all held and no side stud is bare."""
     pats = Counter({k: v for k, v in row["patterns"].items() if k[0] in vocab_tokens and k[1] in vocab_tokens})
     paths = Counter({k: v for k, v in row.get("paths", {}).items() if k[0] in vocab_tokens and k[1] in vocab_tokens})
+    paths4 = Counter({k: v for k, v in row.get("paths4", {}).items() if k[0] in vocab_tokens and k[1] in vocab_tokens})
     n = sum(pats.values()) or 1
     loc = sum(c * stats.nll(*k) for k, c in pats.items()) / n
     r = math.log(sum(row["patterns"].values()) / (stats.density * cells))
     rp = math.log(row["n_parts"] / (stats.part_density * cells))
+    glob3 = kl(paths4, stats.ref3) if stats.ref3 is not None and paths4 else 0.0
     return {"sil": sil / cells ** (2 / 3), "loc": loc, "glob": kl(pats, stats.ref), "glob2": kl(paths, stats.ref2),
+            "glob3": glob3,
             "dens": r * r / (2 * stats.density_sd ** 2), "cnt": rp * rp / (2 * stats.part_density_sd ** 2),
             "sup": 0.0, "side": 0.0}
 
@@ -127,6 +132,10 @@ def main() -> None:
     _G.update(others={m["model"]: [x for x in models if x["model"] != m["model"]] for m in pool},
               degree=sampler.token_degree(models), vocab_tokens=vocab_tokens, iters=a.iters)
     w = sampler.Weights() if a.kind is None else sampler.Weights.learned()   # a kind starts from the pooled fit
+    # Seed glob3 above zero so log(w) in the moment-match update doesn't blow up;
+    # the fit will then move it per the gradient.  0.3 is the hand-tuned starter.
+    if w.glob3 <= 0.0:
+        w.glob3 = 0.3
     log = []
     for rnd_i in range(a.rounds):
         diff = {k: 0.0 for k in FITTED}
@@ -145,7 +154,7 @@ def main() -> None:
             g = max(-1.0, min(1.0, a.rate * diff[k] / n))           # at most a factor e per round
             # content and style must each carry real weight: the fit can scale them
             # relative to each other but neither drops to the floor
-            lo = {"sil": 2.0, "loc": 0.3, "glob": 0.3, "glob2": 0.3,
+            lo = {"sil": 2.0, "loc": 0.3, "glob": 0.3, "glob2": 0.3, "glob3": 0.0,
                   "dens": 1.0, "cnt": 1.0, "sup": 20.0, "side": 2.0}[k]
             setattr(w, k, float(min(100.0, max(lo, getattr(w, k) * math.exp(g)))))
         mean = {k: (np.mean([r["ours"][k] for r in rows]), np.mean([r["official"][k] for r in rows])) for k in FITTED}

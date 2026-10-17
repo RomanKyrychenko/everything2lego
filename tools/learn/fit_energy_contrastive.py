@@ -140,7 +140,7 @@ def main() -> None:
     w_scale = w_logistic / sigma                                        # un-normalize
     w_energy = -w_scale                                                 # flip sign
     # Clamp: keep positive and in a reasonable range (same as fit_energy's lo bounds)
-    lo = {"sil": 2.0, "loc": 0.3, "glob": 0.3, "glob2": 0.3,
+    lo = {"sil": 2.0, "loc": 0.3, "glob": 0.3, "glob2": 0.3, "glob3": 0.0,
           "dens": 1.0, "cnt": 1.0, "sup": 20.0, "side": 2.0}
     out_weights = {k: float(max(lo[k], min(100.0, w_energy[i]))) if w_energy[i] > 0 else lo[k]
                      for i, k in enumerate(FITTED)}
