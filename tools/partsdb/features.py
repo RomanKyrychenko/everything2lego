@@ -6,6 +6,7 @@ read from what its parts are used for in official models.
 
     python tools/partsdb/features.py        # -> $LEGO_DATA/analysis/features.pkl
     python tools/partsdb/features.py paths  # adds each model's paths (needs the first)
+    python tools/partsdb/features.py paths4 # adds each model's 4-walks (needs paths)
 
 Tokens are coarse on purpose: exact parts at exact offsets are too sparse
 to compare models by (most of a real model's exact patterns occur nowhere
@@ -31,7 +32,9 @@ from build import DATA, DB, OMR, _ld_to_part  # noqa: E402
 from neighbours import held_out, model_parts, neighbour_pairs, part_classes  # noqa: E402
 
 sys.path.insert(0, str(HERE.parents[1] / "src"))
-from everything2lego.style import middle_weight, token_degree  # noqa: E402
+from everything2lego.style import kind_of, middle_weight, token_degree  # noqa: E402
+
+PATHS4_BUCKETS = 8                                                       # middle-kind pair hash buckets
 
 OUT = DATA / "analysis" / "features.pkl"
 
@@ -181,6 +184,199 @@ def paths(items, toks, adj, degree: dict[str, float]) -> Counter:
     return out
 
 
+def paths4_bucket(kind_a: str, kind_b: str) -> int:
+    """8-bucket hash of a sorted pair of middle kinds.  Keeps paths4 keys dense:
+    without this the key space would be O(n_tok^4), with it it's O(n_tok^2 * 3 * B)
+    like the paths term plus a factor B."""
+    pair = (kind_a, kind_b) if kind_a <= kind_b else (kind_b, kind_a)
+    return hash(pair) % PATHS4_BUCKETS
+
+
+def paths4(items, toks, adj, degree: dict[str, float]) -> Counter:
+    """4-walks a - b - c - d (a != c, d != b, a may equal d) through two
+    successive adjacencies.  Keyed by (token_a, token_d, where_d_from_a:bucket)
+    where bucket is an 8-way hash of the sorted pair of middle kinds
+    (kind_of(b), kind_of(c)) folded into the direction string.  Weight per walk
+    = middle_w(b) * middle_w(c) (product of inner-degree normalisations)."""
+    import numpy as np
+    lo = np.array([it[2][1] for it in items])
+    hi = np.array([it[3][1] for it in items])
+    kind_tok: dict[str, str] = {}
+    def kind_of_tok(t):
+        v = kind_tok.get(t)
+        if v is None:
+            v = kind_tok[t] = kind_of(t)
+        return v
+    # cache middle_weight per token
+    mw_cache: dict[str, float] = {}
+    def mw(t):
+        v = mw_cache.get(t)
+        if v is None:
+            v = mw_cache[t] = middle_weight(degree, t)
+        return v
+    names = ("up", "down", "level")
+    out: Counter = Counter()
+    # iterate directed middle edges (b, c): each walk a-b-c-d counted once
+    for b, nb_b in adj.items():
+        tb = toks[b]
+        wb = mw(tb)
+        kb = kind_of_tok(tb)
+        a_pool = list(nb_b)
+        if not a_pool:
+            continue
+        hib = hi[b]; lob = lo[b]
+        for c in nb_b:
+            if c == b:
+                continue
+            nb_c = adj.get(c)
+            if nb_c is None:
+                continue
+            tc = toks[c]
+            w = wb * mw(tc)
+            bucket = paths4_bucket(kb, kind_of_tok(tc))
+            # emit over (a, d) with a != c and d != b
+            for a in a_pool:
+                if a == c:
+                    continue
+                ta = toks[a]
+                hi_a = hi[a]; lo_a = lo[a]
+                for d in nb_c:
+                    if d == b:
+                        continue
+                    td = toks[d]
+                    hi_d = hi[d]; lo_d = lo[d]
+                    # vertical(a, d): d relative to a's grid y-range
+                    if lo_d >= hi_a - 0.1:
+                        direction = 0
+                    elif hi_d <= lo_a + 0.1:
+                        direction = 1
+                    else:
+                        direction = 2
+                    out[(ta, td, f"{names[direction]}:{bucket}")] += w
+    return out
+
+
+def triangles(items, toks, adj, degree: dict[str, float]) -> Counter:
+    """3-cliques: parts (i, j, k) that are pairwise adjacent.  Keyed by the
+    sorted token triple (as a 3-element tuple folded into the Reference's
+    expected 3-tuple schema: (token_lo, token_mid, "tri:token_hi")).  Weight
+    per triangle = 1 / (middle_w(j) * middle_w(k)) — but simpler: unit weight,
+    since triangles are rare and we count unique 3-cliques per model.
+
+    Walked once per triangle via i < j < k ordering to avoid 6x overcount."""
+    out: Counter = Counter()
+    for i, nbi in adj.items():
+        nbi_up = {j for j in nbi if j > i}
+        for j in nbi_up:
+            nbj = adj.get(j)
+            if nbj is None:
+                continue
+            for k in nbi_up:
+                if k > j and k in nbj:
+                    a, b, c = sorted((toks[i], toks[j], toks[k]))
+                    out[(a, b, f"tri:{c}")] += 1
+    return out
+
+
+def model_triangles(f: Path):
+    try:
+        items = model_parts(f, _CTX["ldmap"], _CTX["classes"])
+    except Exception:
+        return None
+    toks = [_CTX["token"].get(it[0], "other0x0h0") for it in items]
+    adj: dict[int, set] = {}
+    for i, j in neighbour_pairs(items):
+        adj.setdefault(i, set()).add(j)
+    return f.stem, triangles(items, toks, adj, _CTX["degree"])
+
+
+def add_triangles(limit: int | None = None, max_parts: int = 2000, workers: int = 4) -> None:
+    """Precompute per-model triangles.  Same pool infrastructure as add_paths4."""
+    print(f"loading {OUT}...", flush=True)
+    rows = pickle.load(open(OUT, "rb"))
+    print(f"loaded {len(rows)} rows; collecting degree + files", flush=True)
+    degree = token_degree([r for r in rows if not r["held_out"]])
+    by_model = {r["model"]: r for r in rows}
+    files = [f for f in sorted(OMR.glob("*.mpd")) + sorted(OMR.glob("*.ldr")) if f.stem in by_model]
+    files = [f for f in files if by_model[f.stem].get("n_parts", 0) <= max_parts
+             and "triangles" not in by_model[f.stem]]
+    if limit:
+        files = files[:limit]
+    print(f"{len(files)} files to process (max_parts={max_parts}, limit={limit}, workers={workers})", flush=True)
+    import time
+    t0 = time.time()
+    with Pool(workers, initializer=_init_paths, initargs=(degree,), maxtasksperchild=20) as pool:
+        for k, got in enumerate(pool.imap_unordered(model_triangles, files, chunksize=1)):
+            if got:
+                by_model[got[0]]["triangles"] = got[1]
+            if (k + 1) % 50 == 0:
+                elapsed = time.time() - t0
+                rate = (k + 1) / max(1, elapsed)
+                eta = (len(files) - k - 1) / max(0.1, rate)
+                print(f"  triangles {k+1}/{len(files)}  ({elapsed:.0f}s, {rate:.2f}/s, ETA {eta:.0f}s)", flush=True)
+            if (k + 1) % 500 == 0:
+                save(rows)
+                print(f"    [checkpoint saved]", flush=True)
+    save(rows)
+    print(f"triangles: {sum('triangles' in r for r in rows)} models -> {OUT}")
+
+
+def model_paths4(f: Path):
+    try:
+        items = model_parts(f, _CTX["ldmap"], _CTX["classes"])
+    except Exception:
+        return None
+    toks = [_CTX["token"].get(it[0], "other0x0h0") for it in items]
+    adj: dict[int, set] = {}
+    for i, j in neighbour_pairs(items):
+        adj.setdefault(i, set()).add(j)
+    return f.stem, paths4(items, toks, adj, _CTX["degree"])
+
+
+def add_paths4(limit: int | None = None, max_parts: int = 2000, workers: int = 4) -> None:
+    """Third stage (optional): every model's 4-walks, keyed by (token_a, token_d,
+    where, mid_bucket).  Requires `paths` precomputed first (shares the degree
+    weighting).  Store as `paths4` key in the per-model row.
+
+    Uses a Pool with conservative settings (small worker count, chunksize=1,
+    maxtasksperchild=20) to balance speed against the pool-crash sensitivity
+    we saw on earlier runs.  Checkpoints to disk every 500 completed models.
+
+    `limit`: if set, only process the first N models.
+    `max_parts`: skip models with more than this many parts.  The 4-walk count
+    scales as deg^3 per part, so baseplate-heavy mega-models dominate time
+    without adding signal to the reference.
+    `workers`: pool size.
+    """
+    print(f"loading {OUT}...", flush=True)
+    rows = pickle.load(open(OUT, "rb"))
+    print(f"loaded {len(rows)} rows; collecting degree + files", flush=True)
+    degree = token_degree([r for r in rows if not r["held_out"]])
+    by_model = {r["model"]: r for r in rows}
+    files = [f for f in sorted(OMR.glob("*.mpd")) + sorted(OMR.glob("*.ldr")) if f.stem in by_model]
+    files = [f for f in files if by_model[f.stem].get("n_parts", 0) <= max_parts
+             and "paths4" not in by_model[f.stem]]                     # resume: skip already-done
+    if limit:
+        files = files[:limit]
+    print(f"{len(files)} files to process (max_parts={max_parts}, limit={limit}, workers={workers})", flush=True)
+    import time
+    t0 = time.time()
+    with Pool(workers, initializer=_init_paths, initargs=(degree,), maxtasksperchild=20) as pool:
+        for k, got in enumerate(pool.imap_unordered(model_paths4, files, chunksize=1)):
+            if got:
+                by_model[got[0]]["paths4"] = got[1]
+            if (k + 1) % 50 == 0:
+                elapsed = time.time() - t0
+                rate = (k + 1) / max(1, elapsed)
+                eta = (len(files) - k - 1) / max(0.1, rate)
+                print(f"  paths4 {k+1}/{len(files)}  ({elapsed:.0f}s, {rate:.2f}/s, ETA {eta:.0f}s)", flush=True)
+            if (k + 1) % 500 == 0:
+                save(rows)
+                print(f"    [checkpoint saved]", flush=True)
+    save(rows)
+    print(f"paths4: {sum('paths4' in r for r in rows)} models -> {OUT}")
+
+
 def model_paths(f: Path):
     try:
         items = model_parts(f, _CTX["ldmap"], _CTX["classes"])
@@ -242,4 +438,37 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    add_paths() if sys.argv[1:] == ["paths"] else main()
+    argv = sys.argv[1:]
+    if argv == ["paths"]:
+        add_paths()
+    elif argv and argv[0] == "triangles":
+        limit = None; max_parts = 2000; workers = 4
+        i = 1
+        while i < len(argv):
+            if argv[i] == "--limit" and i + 1 < len(argv):
+                limit = int(argv[i + 1]); i += 2
+            elif argv[i] == "--max-parts" and i + 1 < len(argv):
+                max_parts = int(argv[i + 1]); i += 2
+            elif argv[i] == "--workers" and i + 1 < len(argv):
+                workers = int(argv[i + 1]); i += 2
+            else:
+                i += 1
+        add_triangles(limit=limit, max_parts=max_parts, workers=workers)
+    elif argv and argv[0] == "paths4":
+        # optional second positional argument: --limit N
+        limit = None
+        max_parts = 2000
+        i = 1
+        workers = 4
+        while i < len(argv):
+            if argv[i] == "--limit" and i + 1 < len(argv):
+                limit = int(argv[i + 1]); i += 2
+            elif argv[i] == "--max-parts" and i + 1 < len(argv):
+                max_parts = int(argv[i + 1]); i += 2
+            elif argv[i] == "--workers" and i + 1 < len(argv):
+                workers = int(argv[i + 1]); i += 2
+            else:
+                i += 1
+        add_paths4(limit=limit, max_parts=max_parts, workers=workers)
+    else:
+        main()

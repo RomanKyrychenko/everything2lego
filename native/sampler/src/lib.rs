@@ -79,6 +79,11 @@ pub struct Problem {
     pub w_glob2: f64,
     pub logp2: *const f64, // n_tok*n_tok*3: log p_ref of path patterns (a - b - c as (a, c, where))
     pub middle_w: *const f64, // n_tok: a path's weight through a part of this token
+    // 4-walk patterns a - b - c - d, keyed by (a_tok, d_tok, direction, mid_bucket)
+    // with mid_bucket an 8-way hash of the sorted pair of middle kinds.
+    pub w_glob3: f64,
+    pub logp3: *const f64,      // n_tok*n_tok*3*8 or null if disabled
+    pub mid_bucket: *const i32, // n_tok*n_tok or null: bucket for the middle pair (b, c)
     // each option's outline in the three axis views, sample pixels box-local:
     // along x (sy, sz), along y (sx, sz), along z (sy, sx)
     pub pixx_start: *const i32,
@@ -149,7 +154,8 @@ pub struct Problem {
     pub hist: *mut f64,
 }
 
-const INFO_LEN: usize = 16;
+const INFO_LEN: usize = 20;
+const PATHS4_BUCKETS: usize = 8;
 const NSAMP: f64 = 64.0;
 const SUB: i32 = 4;
 
@@ -263,6 +269,9 @@ struct Data {
     w_glob2: f64,
     logp2: Vec<f64>,
     middle_w: Vec<f64>,
+    w_glob3: f64,
+    logp3: Vec<f64>,       // n_tok*n_tok*3*8 or empty
+    mid_bucket: Vec<i32>,  // n_tok*n_tok or empty
     tsil: [Vec<bool>; 3],
     scols: [i32; 3], // columns of each view (rows are implied)
     n_conn: usize,
@@ -412,6 +421,11 @@ impl Data {
             w_glob2: p.w_glob2,
             logp2: v(p.logp2, n_tok * n_tok * 3),
             middle_w: v(p.middle_w, n_tok),
+            w_glob3: p.w_glob3,
+            logp3: if p.logp3.is_null() { Vec::new() }
+                     else { v(p.logp3, n_tok * n_tok * 3 * PATHS4_BUCKETS) },
+            mid_bucket: if p.mid_bucket.is_null() { Vec::new() }
+                          else { v(p.mid_bucket, n_tok * n_tok) },
             tsil: [
                 v(p.tsx, (p.h * SUB * p.z * SUB) as usize).iter().map(|&b| b != 0).collect(),
                 v(p.tsy, (p.x * SUB * p.z * SUB) as usize).iter().map(|&b| b != 0).collect(),
@@ -458,6 +472,28 @@ impl Data {
     #[inline]
     fn key(&self, a: usize, b: usize, d: u8) -> usize {
         (a * self.n_tok + b) * 3 + d as usize
+    }
+
+    /// 4-walk pattern key: (a_tok, d_tok, direction, mid_bucket) into a dense array.
+    #[inline]
+    fn key4(&self, a: usize, d_tok: usize, dir: u8, bucket: usize) -> usize {
+        ((a * self.n_tok + d_tok) * 3 + dir as usize) * PATHS4_BUCKETS + bucket
+    }
+
+    /// Bucket for a middle (b_tok, c_tok) pair.  Returns -1 (interpreted as
+    /// "disabled") when mid_bucket wasn't provided.
+    #[inline]
+    fn bucket(&self, b: usize, c: usize) -> i32 {
+        if self.mid_bucket.is_empty() {
+            -1
+        } else {
+            self.mid_bucket[b * self.n_tok + c]
+        }
+    }
+
+    #[inline]
+    fn paths4_enabled(&self) -> bool {
+        !self.logp3.is_empty() && !self.mid_bucket.is_empty()
     }
 
     /// Index into view `a` of an option's outline pixel (u, v) placed at (oy, ox, oz).
@@ -776,8 +812,10 @@ struct State<'a> {
     n_unsup: i64,
     kl1: Kl, // touching pairs
     kl2: Kl, // paths of two through a shared neighbour
+    kl3: Kl, // 4-walks a-b-c-d, keyed by (a_tok, d_tok, direction, mid_bucket)
     adj: Vec<Vec<(usize, u8)>>,
     path_queue: Vec<(usize, f64)>,
+    path4_queue: Vec<(usize, f64)>,
     csil: [Vec<i32>; 3], // parts covering each outline pixel
     kindgrid: Vec<i32>,  // the part kind built in each cell (-1 empty), the network's context
     sil: i64,            // outline pixels wrong
@@ -816,8 +854,10 @@ impl<'a> State<'a> {
             n_unsup: 0,
             kl1: Kl::new(d.n_tok * d.n_tok * 3),
             kl2: Kl::new(d.n_tok * d.n_tok * 3),
+            kl3: Kl::new(if d.paths4_enabled() { d.n_tok * d.n_tok * 3 * PATHS4_BUCKETS } else { 0 }),
             adj: Vec::new(),
             path_queue: Vec::new(),
+            path4_queue: Vec::new(),
             csil: [0, 1, 2].map(|a| vec![0; d.tsil[a].len()]),
             kindgrid: vec![-1; n],
             sil: d.tsil.iter().map(|t| t.iter().filter(|&&b| b).count() as i64).sum(),
@@ -1013,6 +1053,114 @@ impl<'a> State<'a> {
         self.path_queue = q;
     }
 
+    /// 4-walks a-b-c-d that i is in.  Four positional roles enumerated; closed
+    /// walks (a=d=i) counted only in position-1.  Must be called AFTER adj is
+    /// updated with i (so adj[c] / adj[b] see i for closed walks).  Mirror of
+    /// Python State._paths4 in src/everything2lego/sampler.py.
+    fn paths4(&mut self, i: usize, nb: &[(usize, u8)], sign: f64) {
+        if !self.d.paths4_enabled() {
+            return;
+        }
+        let d = self.d;
+        let ti = self.opt(i).token;
+        let wi = d.middle_w[ti];
+        // Collect i's token's view of neighbours
+        // position 2: i = b (middle-left).  middle edge (i, c), c in nb_i.
+        for &(c, _) in nb {
+            let tc = self.opt(c).token;
+            let bucket = d.bucket(ti, tc);
+            if bucket < 0 { continue; }
+            let w = sign * wi * d.middle_w[tc];
+            for k in 0..self.adj[c].len() {
+                let d_part = self.adj[c][k].0;
+                if d_part == i { continue; }                           // OMR excludes d == b (= i)
+                let td = self.opt(d_part).token;
+                for &(a, _) in nb {
+                    if a == c { continue; }                             // OMR excludes a == c
+                    let ta = self.opt(a).token;
+                    let key = d.key4(ta, td, self.where_(a, d_part), bucket as usize);
+                    self.path4_queue.push((key, w));
+                }
+            }
+        }
+        // position 3: i = c (middle-right).  middle edge (b, i), b in nb_i.
+        for &(b, _) in nb {
+            let tb = self.opt(b).token;
+            let bucket = d.bucket(tb, ti);
+            if bucket < 0 { continue; }
+            let w = sign * d.middle_w[tb] * wi;
+            for k in 0..self.adj[b].len() {
+                let a = self.adj[b][k].0;
+                if a == i { continue; }                                 // OMR excludes a == c (= i)
+                let ta = self.opt(a).token;
+                for &(d_part, _) in nb {
+                    if d_part == b { continue; }                        // OMR excludes d == b
+                    let td = self.opt(d_part).token;
+                    let key = d.key4(ta, td, self.where_(a, d_part), bucket as usize);
+                    self.path4_queue.push((key, w));
+                }
+            }
+        }
+        // position 1: i = a (walk starts at i).  Closed walks (d == i) counted here.
+        for &(b, _) in nb {
+            let tb = self.opt(b).token;
+            for k in 0..self.adj[b].len() {
+                let c = self.adj[b][k].0;
+                if c == i { continue; }                                 // c is position 2, not i (handled in position-2)
+                let tc = self.opt(c).token;
+                let bucket = d.bucket(tb, tc);
+                if bucket < 0 { continue; }
+                let w = sign * d.middle_w[tb] * d.middle_w[tc];
+                for m in 0..self.adj[c].len() {
+                    let d_part = self.adj[c][m].0;
+                    if d_part == b { continue; }                        // OMR excludes d == b
+                    let td = self.opt(d_part).token;
+                    let key = d.key4(ti, td, self.where_(i, d_part), bucket as usize);
+                    self.path4_queue.push((key, w));
+                }
+            }
+        }
+        // position 4: i = d (walk ends at i).  Exclude a == i (closed walks already in position 1).
+        for &(c, _) in nb {
+            let tc = self.opt(c).token;
+            for k in 0..self.adj[c].len() {
+                let b = self.adj[c][k].0;
+                if b == i { continue; }
+                let tb = self.opt(b).token;
+                let bucket = d.bucket(tb, tc);
+                if bucket < 0 { continue; }
+                let w = sign * d.middle_w[tb] * d.middle_w[tc];
+                for m in 0..self.adj[b].len() {
+                    let a = self.adj[b][m].0;
+                    if a == c || a == i { continue; }
+                    let ta = self.opt(a).token;
+                    let key = d.key4(ta, ti, self.where_(a, i), bucket as usize);
+                    self.path4_queue.push((key, w));
+                }
+            }
+        }
+        self.flush_paths4();
+    }
+
+    fn flush_paths4(&mut self) {
+        let mut q = std::mem::take(&mut self.path4_queue);
+        q.sort_unstable_by_key(|&(k, _)| k);
+        let mut i = 0;
+        while i < q.len() {
+            let key = q[i].0;
+            let mut dc = 0.0;
+            while i < q.len() && q[i].0 == key {
+                dc += q[i].1;
+                i += 1;
+            }
+            if dc != 0.0 {
+                self.kl3.add(key, dc, self.d.logp3[key]);
+            }
+        }
+        q.clear();
+        self.path4_queue = q;
+    }
+
     /// Change in outline pixels wrong from adding this option here.
     fn sil_delta(&self, o: &Opt, oy: i32, ox: i32, oz: i32) -> i64 {
         let mut dlt = 0;
@@ -1068,11 +1216,13 @@ impl<'a> State<'a> {
         let np = self.live.len() as f64;
         let rp = if np > 0.0 { (np / d.p_ref).ln() } else { 0.0 };
         let cnt = if np > 0.0 { d.w_cnt * rp * rp / (2.0 * d.cnt_sd * d.cnt_sd) } else { 0.0 };
+        let kl3_v = if d.paths4_enabled() { self.kl3.value() } else { 0.0 };
         d.style
             * d.n_ref
             * (d.w_loc * self.loc / n
                 + d.w_glob * self.kl1.value()
                 + d.w_glob2 * self.kl2.value()
+                + d.w_glob3 * kl3_v
                 + d.w_dens * r * r / (2.0 * d.dens_sd * d.dens_sd)
                 + cnt)
     }
@@ -1133,6 +1283,7 @@ impl<'a> State<'a> {
             self.adj[j].push((i, flip(dir)));
         }
         self.adj[i] = nb.clone();
+        self.paths4(i, &nb, 1.0);                                      // after adj update (closed walks need adj[c] to contain i)
         let mut ids: Vec<usize> = nb.iter().map(|&(j, _)| j).collect();
         ids.push(i);
         self.refresh_support(&ids);
@@ -1141,6 +1292,9 @@ impl<'a> State<'a> {
 
     fn remove(&mut self, i: usize) -> Item {
         let it = *self.item(i);
+        // Snapshot adj containing i for paths4 reverse-counting (closed walks).
+        let nb_live: Vec<(usize, u8)> = self.adj[i].clone();
+        self.paths4(i, &nb_live, -1.0);                                // before adj cleanup
         let nb = std::mem::take(&mut self.adj[i]);
         for &(j, _) in &nb {
             self.adj[j].retain(|&(k, _)| k != i);
@@ -1791,6 +1945,8 @@ unsafe fn run(p: &Problem) -> i32 {
         st.sil as f64 / (SUB * SUB) as f64,
         st.content(),
         st.style_loss(),
+        if d.paths4_enabled() { st.kl3.value() } else { 0.0 },
+        0.0, 0.0, 0.0,                                                 // reserved
     ];
     for (k, v) in info.iter().enumerate().take(INFO_LEN) {
         *p.info.add(k) = *v;
@@ -1819,5 +1975,5 @@ pub unsafe extern "C" fn e2l_sample(p: *const Problem) -> i32 {
 /// The layout version: Python checks it before calling.
 #[no_mangle]
 pub extern "C" fn e2l_abi() -> i32 {
-    12
+    13
 }

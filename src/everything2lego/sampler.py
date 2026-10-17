@@ -362,6 +362,11 @@ class Stats:
         self._refs = models
         self.ref = Reference.from_models(models)
         self.ref2 = Reference.from_models(models, key="paths")
+        # Optional: ref3 is 4-walks (features.paths4).  Only present when the models
+        # were precomputed with `features.py paths4`; else fall back to a tiny Reference
+        # so State.kl3 stays bounded (effectively unused when the walk never adds to it).
+        p4_rows = [m for m in models if "paths4" in m]
+        self.ref3 = Reference.from_models(p4_rows, key="paths4") if p4_rows else None
         self.density, self.density_sd = pair_density(models)
         self.part_density, self.part_density_sd = pair_density(models, default=0.3,
                                                                per=lambda m: m.get("n_parts", 0))
@@ -384,6 +389,14 @@ class Stats:
     def middle_w(self, token: str) -> float:
         """A path's weight through a part of this token (style.middle_weight)."""
         return middle_weight(self.degree, token)
+
+    @staticmethod
+    def middle_bucket(token_b: str, token_c: str) -> int:
+        """8-way hash of the sorted pair of middle kinds; matches features.paths4_bucket.
+        Keeps paths4 keys dense."""
+        kb, kc = kind_of(token_b), kind_of(token_c)
+        pair = (kb, kc) if kb <= kc else (kc, kb)
+        return hash(pair) % 8
 
     def nll(self, a: str, b: str, d: str) -> float:
         """-log P(B=b, where=d | A=a), smoothed exact -> kind -> uniform."""
@@ -484,6 +497,7 @@ class Weights:
     # style: the statistics of real sets, as a whole times `style`
     style: float = 1.0
     glob2: float = 1.0        # path patterns (the second scale)
+    glob3: float = 0.0        # 4-walk patterns (the third scale) -- opt-in; needs features.pkl with paths4
     col: float = 0.04
     loc: float = 1.0
     glob: float = 1.0
@@ -532,6 +546,9 @@ class State:
         # paths of two through a shared neighbour
         self.adj: dict[int, dict[int, str]] = {}
         self.kl2 = RunningKL(stats.ref2)
+        # 4-walks a-b-c-d, keyed by (token_a, token_d, direction:bucket).  Only
+        # active when stats.ref3 is present (i.e. features.pkl has `paths4`).
+        self.kl3 = RunningKL(stats.ref3) if stats.ref3 is not None else None
 
     # -- geometry -----------------------------------------------------------
     def neighbours(self, i: int) -> dict[int, str]:
@@ -651,6 +668,96 @@ class State:
                     self.kl2.add((it.vp.token, C.vp.token, self.where(it, C)), wb)
                     self.kl2.add((C.vp.token, it.vp.token, self.where(C, it)), wb)
 
+    def _paths4(self, i: int, nb: dict[int, str], sign: int) -> None:
+        """Add/remove the 4-walks a-b-c-d that i is in.  OMR counts walks per
+        middle edge (b, c) with a in nb_b \\ {c}, d in nb_c \\ {b}.  Key is
+        (token_a, token_d, "where_d_from_a:mid_bucket"), weight = mw(b)*mw(c).
+        Enumerate per position (a=i, b=i, c=i, d=i) and dedupe closed walks."""
+        if self.kl3 is None:
+            return
+        it = self.items[i]
+        mw = self.s.middle_w
+        mb = self.s.middle_bucket
+        ti = it.vp.token
+        wi = mw(ti)
+        kl3_add = self.kl3.add
+        # position 2: i = b (middle-left).  middle edge (i, c), c in nb_i.
+        for c in nb:
+            C = self.items[c]
+            tc = C.vp.token
+            wc = mw(tc)
+            w = sign * wi * wc
+            bucket = mb(ti, tc)
+            nb_c = self.adj[c]
+            for a in nb:
+                if a == c:
+                    continue
+                A = self.items[a]
+                for d in nb_c:
+                    if d == i:
+                        continue
+                    D = self.items[d]
+                    key = (A.vp.token, D.vp.token, f"{self.where(A, D)}:{bucket}")
+                    kl3_add(key, w)
+        # position 3: i = c (middle-right).  middle edge (b, i), b in nb_i.
+        for b in nb:
+            B = self.items[b]
+            tb = B.vp.token
+            wb = mw(tb)
+            w = sign * wb * wi
+            bucket = mb(tb, ti)
+            nb_b = self.adj[b]
+            for a in nb_b:
+                if a == i:
+                    continue
+                A = self.items[a]
+                for d in nb:
+                    if d == b:
+                        continue
+                    D = self.items[d]
+                    key = (A.vp.token, D.vp.token, f"{self.where(A, D)}:{bucket}")
+                    kl3_add(key, w)
+        # position 1: i = a (walk starts at i).  Allow d = i (closed walks counted once here).
+        for b in nb:
+            B = self.items[b]
+            tb = B.vp.token
+            wb = mw(tb)
+            nb_b = self.adj[b]
+            for c in nb_b:
+                if c == i:
+                    continue                                           # walk's position 2 can't be i (that's position-2 enum)
+                C = self.items[c]
+                tc = C.vp.token
+                w = sign * wb * mw(tc)
+                bucket = mb(tb, tc)
+                nb_c = self.adj[c]
+                for d in nb_c:
+                    if d == b:
+                        continue
+                    D = self.items[d]
+                    key = (ti, D.vp.token, f"{self.where(it, D)}:{bucket}")
+                    kl3_add(key, w)
+        # position 4: i = d (walk ends at i).  Exclude a = i (closed walks already in position 1).
+        for c in nb:
+            C = self.items[c]
+            tc = C.vp.token
+            wc = mw(tc)
+            nb_c = self.adj[c]
+            for b in nb_c:
+                if b == i:
+                    continue
+                B = self.items[b]
+                tb = B.vp.token
+                w = sign * mw(tb) * wc
+                bucket = mb(tb, tc)
+                nb_b = self.adj[b]
+                for a in nb_b:
+                    if a == c or a == i:
+                        continue
+                    A = self.items[a]
+                    key = (A.vp.token, ti, f"{self.where(A, it)}:{bucket}")
+                    kl3_add(key, w)
+
     def colour_cost(self, ys, xs, zs, o, colour: int) -> float:
         vis = self.t.visible[ys, xs, zs]
         if not vis.any():
@@ -680,7 +787,9 @@ class State:
     def energy(self) -> float:
         w = self.w
         n = self.kl.n
+        kl3_v = self.kl3.value() if self.kl3 is not None else 0.0
         style = (w.loc * self.loc / n + w.glob * self.kl.value() + w.glob2 * self.kl2.value()
+                 + w.glob3 * kl3_v
                  + w.dens * math.log(n / self.n_ref) ** 2 / (2 * self.s.density_sd ** 2)
                  + w.cnt * _dens(len(self.items), self.p_ref, self.s.part_density_sd)) if n > 0 else 0.0
         return (w.cov * self.fid + w.sil * self.sil / SUB ** 2 + w.col * self.col
@@ -714,11 +823,14 @@ class State:
         self.adj[i] = dict(nb)
         for j, d in nb.items():
             self.adj[j][i] = flip[d]
+        self._paths4(i, nb, +1)                                        # adj must include i first (closed walks i-b-c-i need adj[c] to list i)
         self._refresh_support([i] + list(nb))
         return i
 
     def remove(self, i: int) -> Item:
         it = self.items[i]
+        nb_live = dict(self.adj[i])                                    # i's neighbours while adj still intact
+        self._paths4(i, nb_live, -1)                                   # must undo while adj still lists i, mirrors add() order
         nb = self.adj.pop(i)
         for j in nb:
             del self.adj[j][i]
@@ -1408,7 +1520,9 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
             history.append(e)
     used = Counter(v.category for v in (i.vp for i in st.items.values()))
     info = {"energy": e, "accepted": accepted / max(1, iters), "parts": len(st.items), "t_start": t_start,
-            "kl": st.kl.value(), "kl_paths": st.kl2.value(), "local_per_pair": st.loc / max(1, st.kl.n),
+            "kl": st.kl.value(), "kl_paths": st.kl2.value(),
+            "kl_paths4": (st.kl3.value() if st.kl3 is not None else 0.0),
+            "local_per_pair": st.loc / max(1, st.kl.n),
             "fidelity": st.fid, "outline": st.sil / SUB ** 2,
             "content_loss": st.content_loss(), "style_loss": st.style_loss(),
             "bad_cells": st.bad_cells(), "unsupported": len(st.unsup), "bare_side_connectors": st.bare, "history": history,

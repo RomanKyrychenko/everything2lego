@@ -28,8 +28,9 @@ from typing import Optional
 
 import numpy as np
 
-ABI = 12
-INFO_LEN = 16
+ABI = 13
+INFO_LEN = 20
+PATHS4_BUCKETS = 8
 
 _P = C.POINTER
 
@@ -59,6 +60,7 @@ class Problem(C.Structure):
         ("p_ref", C.c_double), ("w_cnt", C.c_double), ("cnt_sd", C.c_double),
         ("w_sil", C.c_double), ("style", C.c_double), ("w_glob2", C.c_double), ("logp2", _P(C.c_double)),
         ("middle_w", _P(C.c_double)),
+        ("w_glob3", C.c_double), ("logp3", _P(C.c_double)), ("mid_bucket", _P(C.c_int32)),
         ("pixx_start", _P(C.c_int32)), ("pixx", _P(C.c_int32)),
         ("pixy_start", _P(C.c_int32)), ("pixy", _P(C.c_int32)),
         ("pixz_start", _P(C.c_int32)), ("pixz", _P(C.c_int32)),
@@ -232,6 +234,65 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
                 nll[a, b, k] = stats.nll(ta, tb, d)
                 logp[a, b, k] = math.log(stats.ref.p((ta, tb, d)))
                 logp2[a, b, k] = math.log(stats.ref2.p((ta, tb, d)))
+    # paths4 term: only wired when stats.ref3 is present AND weights.glob3 > 0.
+    # Vectorized logp3 build: scatter counts into dense (a, b, dir_bucket) tensors,
+    # then apply the smoothing formula with numpy.  Avoids 6M Python Counter lookups.
+    use_paths4 = getattr(stats, "ref3", None) is not None and getattr(weights, "glob3", 0.0) > 0.0
+    if use_paths4:
+        ref3 = stats.ref3
+        _total = max(1.0, ref3._total); _kind_total = max(1.0, ref3._kind_total); _vocab = ref3._vocab
+        l1, l2, l3 = ref3.lam
+        from .style import kind_of
+        tok_kind_idx: dict[str, int] = {}                              # unique kinds -> small index
+        kind_arr = np.empty(n_tok, np.int32)
+        for i, t in enumerate(toks):
+            k = kind_of(t)
+            if k not in tok_kind_idx:
+                tok_kind_idx[k] = len(tok_kind_idx)
+            kind_arr[i] = tok_kind_idx[k]
+        n_kind = len(tok_kind_idx)
+        n_dkey = 3 * PATHS4_BUCKETS
+        exact = np.zeros((n_tok, n_tok, n_dkey))
+        kind_count = np.zeros((n_kind, n_kind, n_dkey))
+        kind_spread_set: dict[tuple, set] = {}
+        dir_idx = {d: i for i, d in enumerate(dirs)}
+        for (a, b, dbk), n in ref3.counts.items():
+            ai = tid.get(a); bi = tid.get(b)
+            if ai is None or bi is None:
+                continue
+            if ":" not in dbk:
+                continue
+            d_str, bucket_str = dbk.rsplit(":", 1)
+            di = dir_idx.get(d_str)
+            if di is None:
+                continue
+            try:
+                bucket = int(bucket_str)
+            except ValueError:
+                continue
+            if not (0 <= bucket < PATHS4_BUCKETS):
+                continue
+            dkey = di * PATHS4_BUCKETS + bucket
+            exact[ai, bi, dkey] += n
+            # kind-level aggregation (shared across all exact keys with same kinds)
+            kai, kbi = kind_arr[ai], kind_arr[bi]
+            kind_count[kai, kbi, dkey] += n
+            kind_spread_set.setdefault((kai, kbi, dkey), set()).add((ai, bi))
+        kind_spread = np.ones((n_kind, n_kind, n_dkey), np.float64)      # +1 vs _kinds_of
+        for (ka, kb, dk), s in kind_spread_set.items():
+            kind_spread[ka, kb, dk] += len(s)
+        # Build logp3: l1 * exact/total + l2 * kind/kind_total/spread + l3/vocab
+        exact_p = exact / _total
+        # broadcast kind back to (n_tok, n_tok, n_dkey) via indexing
+        kind_p_tok = kind_count[kind_arr[:, None], kind_arr[None, :]] / _kind_total / kind_spread[kind_arr[:, None], kind_arr[None, :]]
+        logp3 = np.log(l1 * exact_p + l2 * kind_p_tok + l3 / _vocab)
+        logp3 = logp3.reshape(n_tok, n_tok, 3, PATHS4_BUCKETS)
+        # mid_bucket[a, b] = Stats.middle_bucket(tok_a, tok_b)
+        bucket_of = stats.middle_bucket
+        mid_bucket = np.array([[bucket_of(ta, tb) for tb in toks] for ta in toks], np.int32)
+    else:
+        logp3 = None
+        mid_bucket = None
     from .sampler import unpack
     fine = unpack(target.bits)
     tsil = (fine.any(axis=1), fine.any(axis=0), fine.any(axis=2))
@@ -306,6 +367,9 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         w_sil=weights.sil, style=weights.style, w_glob2=weights.glob2,
         logp2=_ptr(arr(logp2, np.float64), C.c_double),
         middle_w=_ptr(arr([stats.middle_w(t) for t in toks], np.float64), C.c_double),
+        w_glob3=(weights.glob3 if use_paths4 else 0.0),
+        logp3=(_ptr(arr(logp3, np.float64), C.c_double) if use_paths4 else _P(C.c_double)()),
+        mid_bucket=(_ptr(arr(mid_bucket, np.int32), C.c_int32) if use_paths4 else _P(C.c_int32)()),
         pixx_start=_ptr(arr(pstart[0], np.int32), C.c_int32), pixx=_ptr(arr(np.concatenate(pvals[0]), np.int32), C.c_int32),
         pixy_start=_ptr(arr(pstart[1], np.int32), C.c_int32), pixy=_ptr(arr(np.concatenate(pvals[1]), np.int32), C.c_int32),
         pixz_start=_ptr(arr(pstart[2], np.int32), C.c_int32), pixz=_ptr(arr(np.concatenate(pvals[2]), np.int32), C.c_int32),
@@ -412,7 +476,8 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
               int(out["y"][i]), int(out["x"][i]), int(out["z"][i])) for i in range(n)]
     keys = ("energy", "accepted", "t_start", "kl", "local_per_pair", "fidelity", "bad_cells",
             "unsupported", "bare_side_connectors", "parts", "pairs", "energy_recomputed",
-            "kl_paths", "outline", "content_loss", "style_loss")
+            "kl_paths", "outline", "content_loss", "style_loss",
+            "kl_paths4", "_reserved17", "_reserved18", "_reserved19")
     inf = {k: float(v) for k, v in zip(keys, info)}
     for k in ("bad_cells", "unsupported", "bare_side_connectors", "parts"):
         inf[k] = int(inf[k])
