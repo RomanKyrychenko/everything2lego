@@ -43,12 +43,13 @@ from everything2lego.sampler import vocabulary  # noqa: E402
 from everything2lego.style import kind_of  # noqa: E402
 
 DATASET_DIR = Path("/Volumes/PRO-G40/lego_data/analysis/omr_dataset")
+DISTILLED_DIR = Path("/Volumes/PRO-G40/lego_data/analysis/omr_distilled")
 MODEL_PATH = Path("/Volumes/PRO-G40/lego_data/analysis/cnn_decoder.pt")
 MODEL_PATH_FACTORED = Path("/Volumes/PRO-G40/lego_data/analysis/cnn_decoder_factored.pt")
 
 
 def _model_path(factored: bool, unet: bool, sched_sampling: float = 0.0,
-                ch: int = 32, augment: bool = False) -> Path:
+                ch: int = 32, augment: bool = False, dataset: str = "omr") -> Path:
     base = "cnn_decoder"
     if unet:
         base += "_unet"
@@ -60,6 +61,8 @@ def _model_path(factored: bool, unet: bool, sched_sampling: float = 0.0,
         base += f"_ch{ch}"
     if augment:
         base += "_aug"
+    if dataset != "omr":
+        base += f"_{dataset}"
     return Path(f"/Volumes/PRO-G40/lego_data/analysis/{base}.pt")
 KNOWN_KINDS = ("building", "road_vehicle", "creature", "object", "figure", "scenery", "mechanism", "train")
 
@@ -93,7 +96,7 @@ class OMRDataset(Dataset):
     placement."""
 
     def __init__(self, grid: int = 16, max_placements: int = 300, factored: bool = False,
-                 augment: bool = False):
+                 augment: bool = False, dataset_dir: Path = DATASET_DIR):
         self.grid = grid
         self.max_placements = max_placements
         self.factored = factored
@@ -106,7 +109,7 @@ class OMRDataset(Dataset):
         if augment:                                                        # map ldraw -> set of valid yaw rotations
             from everything2lego.sampler import vocabulary
             self.valid_yaws = {v.part.ldraw: frozenset(o.rot for o in v.orients) for v in vocabulary()}
-        self.files = sorted(f for f in DATASET_DIR.glob("*.npz") if not f.name.startswith("._"))
+        self.files = sorted(f for f in dataset_dir.glob("*.npz") if not f.name.startswith("._"))
 
     def __len__(self):
         return len(self.files)
@@ -318,7 +321,8 @@ class Model(nn.Module):
 
 def train(epochs: int = 5, batch: int = 4, lr: float = 1e-3, grid: int = 16, limit: int = 0,
           resume: bool = False, factored: bool = False, unet: bool = False,
-          sched_sampling: float = 0.0, ch: int = 32, augment: bool = False):
+          sched_sampling: float = 0.0, ch: int = 32, augment: bool = False,
+          dataset: str = "omr"):
     """`sched_sampling` is the final mix probability (linearly ramped 0->p
     across epochs).  Each training step then runs a 2nd forward pass with
     the model's own argmax from the first pass substituted into prev at
@@ -327,7 +331,8 @@ def train(epochs: int = 5, batch: int = 4, lr: float = 1e-3, grid: int = 16, lim
     factored head doesn't predict ldraw directly."""
     if sched_sampling > 0 and factored:
         raise SystemExit("--sched-sampling currently supported only without --factored")
-    ds = OMRDataset(grid=grid, factored=factored, augment=augment)
+    dataset_dir = {"omr": DATASET_DIR, "distilled": DISTILLED_DIR}[dataset]
+    ds = OMRDataset(grid=grid, factored=factored, augment=augment, dataset_dir=dataset_dir)
     if limit:
         ds.files = ds.files[:limit]
     n = len(ds)
@@ -345,7 +350,7 @@ def train(epochs: int = 5, batch: int = 4, lr: float = 1e-3, grid: int = 16, lim
     m = Model(len(ds.tokens), len(ds.kinds), grid=grid, ch=ch, factored=factored, unet=unet, **mkw).to(device)
     n_params = sum(p.numel() for p in m.parameters())
     print(f"model params: {n_params/1e6:.2f}M, ch={ch}, unet={unet}", flush=True)
-    out_path = _model_path(factored, unet, sched_sampling, ch, augment)
+    out_path = _model_path(factored, unet, sched_sampling, ch, augment, dataset)
     if resume and out_path.exists():
         prev = torch.load(out_path, map_location=device, weights_only=False)
         m.load_state_dict(prev["state_dict"])
@@ -450,10 +455,11 @@ if __name__ == "__main__":
     ap.add_argument("--sched-sampling", type=float, default=0.0, help="final probability (ramped 0->p across epochs) of substituting the model's own argmax for ground-truth prev at a position; non-factored only")
     ap.add_argument("--ch", type=int, default=32, help="encoder channel width (also scales UNet width at every level)")
     ap.add_argument("--augment", action="store_true", help="180 degree rotation around Y with 50% probability per sample (2x effective dataset)")
+    ap.add_argument("--dataset", choices=("omr", "distilled"), default="omr", help="dataset directory to train on: raw OMR gold sets or sampler-polished (self-distillation)")
     a = ap.parse_args()
     if a.cmd == "train":
         train(epochs=a.epochs, batch=a.batch, lr=a.lr, grid=a.grid, limit=a.limit,
                resume=a.resume, factored=a.factored, unet=a.unet, sched_sampling=a.sched_sampling,
-               ch=a.ch, augment=a.augment)
+               ch=a.ch, augment=a.augment, dataset=a.dataset)
     else:
         print("eval not implemented yet; load the model and run inference directly")
