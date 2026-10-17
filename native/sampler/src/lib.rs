@@ -84,6 +84,8 @@ pub struct Problem {
     pub w_glob3: f64,
     pub logp3: *const f64,      // n_tok*n_tok*3*8 or null if disabled
     pub mid_bucket: *const i32, // n_tok*n_tok or null: bucket for the middle pair (b, c)
+    pub max_deg_paths4: i32,    // degree cap: parts with more neighbours skip paths4 (0 = no cap)
+    pub paths4_sample_n: i32,   // deterministic subsample: keep walks where hash(a,b,c,d) % N == 0 (0/1 = all)
     // each option's outline in the three axis views, sample pixels box-local:
     // along x (sy, sz), along y (sx, sz), along z (sy, sx)
     pub pixx_start: *const i32,
@@ -272,6 +274,8 @@ struct Data {
     w_glob3: f64,
     logp3: Vec<f64>,       // n_tok*n_tok*3*8 or empty
     mid_bucket: Vec<i32>,  // n_tok*n_tok or empty
+    max_deg_paths4: i32,
+    paths4_sample_n: u32,
     tsil: [Vec<bool>; 3],
     scols: [i32; 3], // columns of each view (rows are implied)
     n_conn: usize,
@@ -426,6 +430,8 @@ impl Data {
                      else { v(p.logp3, n_tok * n_tok * 3 * PATHS4_BUCKETS) },
             mid_bucket: if p.mid_bucket.is_null() { Vec::new() }
                           else { v(p.mid_bucket, n_tok * n_tok) },
+            max_deg_paths4: p.max_deg_paths4,
+            paths4_sample_n: p.paths4_sample_n.max(1) as u32,
             tsil: [
                 v(p.tsx, (p.h * SUB * p.z * SUB) as usize).iter().map(|&b| b != 0).collect(),
                 v(p.tsy, (p.x * SUB * p.z * SUB) as usize).iter().map(|&b| b != 0).collect(),
@@ -1062,21 +1068,45 @@ impl<'a> State<'a> {
             return;
         }
         let d = self.d;
+        // Degree cap: parts whose live degree exceeds this skip their paths4 share.
+        // Applied to BOTH the central part i (via nb.len()) and each middle neighbour,
+        // so baseplates don't blow up the O(deg^3) enumeration.
+        let cap = d.max_deg_paths4;
+        if cap > 0 && nb.len() as i32 > cap {
+            return;
+        }
         let ti = self.opt(i).token;
         let wi = d.middle_w[ti];
+        // Subsample weight scalar: when sample_n > 1, each kept walk is reweighted
+        // by sample_n so the expected count matches the full enumeration.
+        let sample_n = d.paths4_sample_n;
+        let sample_scale = sample_n as f64;
         // Collect i's token's view of neighbours
+        // Deterministic walk-hash: identical for same directed (a, b, c, d) regardless
+        // of which position of i we're enumerating from.  Used for subsampling so add()
+        // and remove() keep the same walks.
+        let keep = |a: usize, b: usize, c: usize, dp: usize| -> bool {
+            if sample_n <= 1 { return true; }
+            let mut h = a as u64;
+            h = h.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(b as u64);
+            h = h.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(c as u64);
+            h = h.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(dp as u64);
+            (h % sample_n as u64) == 0
+        };
         // position 2: i = b (middle-left).  middle edge (i, c), c in nb_i.
         for &(c, _) in nb {
+            if cap > 0 && self.adj[c].len() as i32 > cap { continue; }
             let tc = self.opt(c).token;
             let bucket = d.bucket(ti, tc);
             if bucket < 0 { continue; }
-            let w = sign * wi * d.middle_w[tc];
+            let w = sign * wi * d.middle_w[tc] * sample_scale;
             for k in 0..self.adj[c].len() {
                 let d_part = self.adj[c][k].0;
-                if d_part == i { continue; }                           // OMR excludes d == b (= i)
+                if d_part == i { continue; }
                 let td = self.opt(d_part).token;
                 for &(a, _) in nb {
-                    if a == c { continue; }                             // OMR excludes a == c
+                    if a == c { continue; }
+                    if !keep(a, i, c, d_part) { continue; }
                     let ta = self.opt(a).token;
                     let key = d.key4(ta, td, self.where_(a, d_part), bucket as usize);
                     self.path4_queue.push((key, w));
@@ -1085,16 +1115,18 @@ impl<'a> State<'a> {
         }
         // position 3: i = c (middle-right).  middle edge (b, i), b in nb_i.
         for &(b, _) in nb {
+            if cap > 0 && self.adj[b].len() as i32 > cap { continue; }
             let tb = self.opt(b).token;
             let bucket = d.bucket(tb, ti);
             if bucket < 0 { continue; }
-            let w = sign * d.middle_w[tb] * wi;
+            let w = sign * d.middle_w[tb] * wi * sample_scale;
             for k in 0..self.adj[b].len() {
                 let a = self.adj[b][k].0;
-                if a == i { continue; }                                 // OMR excludes a == c (= i)
+                if a == i { continue; }
                 let ta = self.opt(a).token;
                 for &(d_part, _) in nb {
-                    if d_part == b { continue; }                        // OMR excludes d == b
+                    if d_part == b { continue; }
+                    if !keep(a, b, i, d_part) { continue; }
                     let td = self.opt(d_part).token;
                     let key = d.key4(ta, td, self.where_(a, d_part), bucket as usize);
                     self.path4_queue.push((key, w));
@@ -1103,17 +1135,20 @@ impl<'a> State<'a> {
         }
         // position 1: i = a (walk starts at i).  Closed walks (d == i) counted here.
         for &(b, _) in nb {
+            if cap > 0 && self.adj[b].len() as i32 > cap { continue; }
             let tb = self.opt(b).token;
             for k in 0..self.adj[b].len() {
                 let c = self.adj[b][k].0;
-                if c == i { continue; }                                 // c is position 2, not i (handled in position-2)
+                if c == i { continue; }
+                if cap > 0 && self.adj[c].len() as i32 > cap { continue; }
                 let tc = self.opt(c).token;
                 let bucket = d.bucket(tb, tc);
                 if bucket < 0 { continue; }
-                let w = sign * d.middle_w[tb] * d.middle_w[tc];
+                let w = sign * d.middle_w[tb] * d.middle_w[tc] * sample_scale;
                 for m in 0..self.adj[c].len() {
                     let d_part = self.adj[c][m].0;
-                    if d_part == b { continue; }                        // OMR excludes d == b
+                    if d_part == b { continue; }
+                    if !keep(i, b, c, d_part) { continue; }
                     let td = self.opt(d_part).token;
                     let key = d.key4(ti, td, self.where_(i, d_part), bucket as usize);
                     self.path4_queue.push((key, w));
@@ -1122,17 +1157,20 @@ impl<'a> State<'a> {
         }
         // position 4: i = d (walk ends at i).  Exclude a == i (closed walks already in position 1).
         for &(c, _) in nb {
+            if cap > 0 && self.adj[c].len() as i32 > cap { continue; }
             let tc = self.opt(c).token;
             for k in 0..self.adj[c].len() {
                 let b = self.adj[c][k].0;
                 if b == i { continue; }
+                if cap > 0 && self.adj[b].len() as i32 > cap { continue; }
                 let tb = self.opt(b).token;
                 let bucket = d.bucket(tb, tc);
                 if bucket < 0 { continue; }
-                let w = sign * d.middle_w[tb] * d.middle_w[tc];
+                let w = sign * d.middle_w[tb] * d.middle_w[tc] * sample_scale;
                 for m in 0..self.adj[b].len() {
                     let a = self.adj[b][m].0;
                     if a == c || a == i { continue; }
+                    if !keep(a, b, c, i) { continue; }
                     let ta = self.opt(a).token;
                     let key = d.key4(ta, ti, self.where_(a, i), bucket as usize);
                     self.path4_queue.push((key, w));
@@ -1975,5 +2013,5 @@ pub unsafe extern "C" fn e2l_sample(p: *const Problem) -> i32 {
 /// The layout version: Python checks it before calling.
 #[no_mangle]
 pub extern "C" fn e2l_abi() -> i32 {
-    13
+    14
 }

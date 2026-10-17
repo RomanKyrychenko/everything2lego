@@ -498,6 +498,8 @@ class Weights:
     style: float = 1.0
     glob2: float = 1.0        # path patterns (the second scale)
     glob3: float = 0.0        # 4-walk patterns (the third scale) -- opt-in; needs features.pkl with paths4
+    max_deg_paths4: int = 0   # degree cap for the paths4 enumeration (0 = no cap, 10-20 kills baseplate blow-up)
+    paths4_sample_n: int = 1  # 1 = all walks, N > 1 = keep ~1/N walks via deterministic hash + reweight
     col: float = 0.04
     loc: float = 1.0
     glob: float = 1.0
