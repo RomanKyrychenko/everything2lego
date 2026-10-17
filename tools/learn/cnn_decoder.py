@@ -331,8 +331,16 @@ def train(epochs: int = 5, batch: int = 4, lr: float = 1e-3, grid: int = 16, lim
     factored head doesn't predict ldraw directly."""
     if sched_sampling > 0 and factored:
         raise SystemExit("--sched-sampling currently supported only without --factored")
-    dataset_dir = {"omr": DATASET_DIR, "distilled": DISTILLED_DIR}[dataset]
-    ds = OMRDataset(grid=grid, factored=factored, augment=augment, dataset_dir=dataset_dir)
+    if dataset == "hybrid":
+        # OMR for KL fidelity + oversampled distilled for structural priors
+        ds = OMRDataset(grid=grid, factored=factored, augment=augment, dataset_dir=DATASET_DIR)
+        dist_files = sorted(f for f in DISTILLED_DIR.glob("*.npz") if not f.name.startswith("._"))
+        oversample = max(1, len(ds.files) // max(1, len(dist_files)))
+        ds.files = ds.files + dist_files * oversample
+        print(f"hybrid dataset: {len(dist_files)} distilled x{oversample} + OMR = {len(ds.files)} entries", flush=True)
+    else:
+        dataset_dir = {"omr": DATASET_DIR, "distilled": DISTILLED_DIR}[dataset]
+        ds = OMRDataset(grid=grid, factored=factored, augment=augment, dataset_dir=dataset_dir)
     if limit:
         ds.files = ds.files[:limit]
     n = len(ds)
@@ -455,7 +463,7 @@ if __name__ == "__main__":
     ap.add_argument("--sched-sampling", type=float, default=0.0, help="final probability (ramped 0->p across epochs) of substituting the model's own argmax for ground-truth prev at a position; non-factored only")
     ap.add_argument("--ch", type=int, default=32, help="encoder channel width (also scales UNet width at every level)")
     ap.add_argument("--augment", action="store_true", help="180 degree rotation around Y with 50% probability per sample (2x effective dataset)")
-    ap.add_argument("--dataset", choices=("omr", "distilled"), default="omr", help="dataset directory to train on: raw OMR gold sets or sampler-polished (self-distillation)")
+    ap.add_argument("--dataset", choices=("omr", "distilled", "hybrid"), default="omr", help="dataset to train on: raw OMR, sampler-distilled, or hybrid (OMR + distilled oversampled to parity)")
     a = ap.parse_args()
     if a.cmd == "train":
         train(epochs=a.epochs, batch=a.batch, lr=a.lr, grid=a.grid, limit=a.limit,
