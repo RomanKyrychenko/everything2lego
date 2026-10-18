@@ -325,7 +325,7 @@ class Model(nn.Module):
 def train(epochs: int = 5, batch: int = 4, lr: float = 1e-3, grid: int = 16, limit: int = 0,
           resume: bool = False, factored: bool = False, unet: bool = False,
           sched_sampling: float = 0.0, ch: int = 32, augment: bool = False,
-          dataset: str = "omr", oversample: int = 0):
+          dataset: str = "omr", oversample: int = 0, device: str = "cpu"):
     """`sched_sampling` is the final mix probability (linearly ramped 0->p
     across epochs).  Each training step then runs a 2nd forward pass with
     the model's own argmax from the first pass substituted into prev at
@@ -355,8 +355,14 @@ def train(epochs: int = 5, batch: int = 4, lr: float = 1e-3, grid: int = 16, lim
           f"tokens={len(ds.tokens)}, kinds={len(ds.kinds)}{extra}, factored={factored}", flush=True)
     dl_tr = DataLoader(train_set, batch_size=batch, shuffle=True, collate_fn=_collate, num_workers=0)
     dl_v = DataLoader(val_set, batch_size=batch, shuffle=False, collate_fn=_collate, num_workers=0)
-    device = "cpu"                                                     # Conv3D not supported on MPS (torch 2.2)
-    print(f"device: {device} (Conv3D not supported on MPS)", flush=True)
+    if device == "mps":
+        try:
+            from mps_conv3d import patch_conv3d                        # Metal Conv3D via mpsops/mps-conv3d
+            patch_conv3d()
+        except ImportError:
+            print("warn: mps-conv3d not installed; falling back to cpu", flush=True)
+            device = "cpu"
+    print(f"device: {device}", flush=True)
     mkw = {"n_cats": len(ds.cats), "n_sizes": len(ds.sizes)} if factored else {}
     m = Model(len(ds.tokens), len(ds.kinds), grid=grid, ch=ch, factored=factored, unet=unet, **mkw).to(device)
     n_params = sum(p.numel() for p in m.parameters())
@@ -468,10 +474,11 @@ if __name__ == "__main__":
     ap.add_argument("--augment", action="store_true", help="180 degree rotation around Y with 50% probability per sample (2x effective dataset)")
     ap.add_argument("--dataset", choices=("omr", "distilled", "hybrid"), default="omr", help="dataset to train on: raw OMR, sampler-distilled, or hybrid (OMR + distilled oversampled to parity)")
     ap.add_argument("--oversample", type=int, default=0, help="hybrid: distilled oversample factor (default auto = len(OMR)//len(distilled))")
+    ap.add_argument("--device", choices=("cpu", "mps"), default="cpu", help="training device; mps uses mpsops/mps-conv3d for Metal Conv3D (needs .venv-arm with torch 2.2)")
     a = ap.parse_args()
     if a.cmd == "train":
         train(epochs=a.epochs, batch=a.batch, lr=a.lr, grid=a.grid, limit=a.limit,
                resume=a.resume, factored=a.factored, unet=a.unet, sched_sampling=a.sched_sampling,
-               ch=a.ch, augment=a.augment, dataset=a.dataset, oversample=a.oversample)
+               ch=a.ch, augment=a.augment, dataset=a.dataset, oversample=a.oversample, device=a.device)
     else:
         print("eval not implemented yet; load the model and run inference directly")
