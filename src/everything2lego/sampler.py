@@ -886,6 +886,21 @@ class State:
         return [Placement(it.vp.part, it.colour, it.x, it.z, it.y, it.W, it.D, it.ori.rot)
                 for it in self.items.values()]
 
+    def placements_and_decorations(self) -> tuple[list[Placement], dict[Placement, list[SnotChild]]]:
+        """Placements plus per-placement SNOT children, keyed by the
+        exact Placement object (`id`-based lookup is also safe since
+        callers use the dict as `decorations.get(p, ())` with the
+        same object references)."""
+        ps: list[Placement] = []
+        deco: dict[Placement, list[SnotChild]] = {}
+        for i, it in self.items.items():
+            p = Placement(it.vp.part, it.colour, it.x, it.z, it.y, it.W, it.D, it.ori.rot)
+            ps.append(p)
+            kids = self.snot_children.get(i)
+            if kids:
+                deco[p] = list(kids)
+        return ps, deco
+
 
 # ---------------------------------------------------------------------------
 # proposals
@@ -958,6 +973,17 @@ class Filler:
             kept = [p for p in ps if (p["b_ldraw"], p["yaw_s"]) in vocab_opts]
             if kept:
                 self.pair_by_a[key] = kept
+        # SNOT templates: {a_ldraw -> list of templates}.  Filtered to anchors
+        # whose part is in the current vocab; B doesn't need to be in vocab (it
+        # renders as a decoration from its ldraw name).  Empty dict when
+        # snot_adj.json is absent or missing the enriched `rot` field.
+        from . import snot as _snot
+        vocab_ldraws = {v.part.ldraw for v in vocab}
+        self.snot_pair_by_a: dict[str, list[dict]] = {}
+        for a_ld, tmpls in _snot.by_a_ldraw().items():
+            if a_ld not in vocab_ldraws:
+                continue
+            self.snot_pair_by_a[a_ld] = tmpls
         self.net = state.net if net else None
         if self.net is not None:
             # P(part, yaw | cell) = P(token | context) * P(part | token): the network
@@ -1450,6 +1476,66 @@ def hinge_swap(state: "State", filler: "Filler", rnd: random.Random):
     return undo
 
 
+def snot_insert(state: "State", filler: "Filler", rnd: random.Random):
+    """Attach a SNOT decoration (B child) to an existing anchor (A) using a
+    real-set template from snot_adj.json via snot.by_a_ldraw.  Decoration
+    only in slice 2: the child doesn't claim cells and energy is
+    unchanged, so Metropolis always accepts a successful placement.  At
+    most one child per anchor to keep decoration density bounded.
+    Template drawn in proportion to how many OMR models carry it."""
+    pairs_by_a = filler.snot_pair_by_a
+    if not pairs_by_a or not state.items:
+        return None
+    candidates = [i for i, it in state.items.items()
+                  if it.vp.part.ldraw in pairs_by_a and i not in state.snot_children]
+    if not candidates:
+        return None
+    i = rnd.choice(candidates)
+    a = state.items[i]
+    tmpls = pairs_by_a[a.vp.part.ldraw]
+    # draw a template weighted by its model count
+    total = 0
+    for t in tmpls:
+        total += int(t.get("models", 1))
+    if total <= 0:
+        return None
+    r = rnd.random() * total
+    acc = 0
+    tmpl = tmpls[-1]
+    for t in tmpls:
+        acc += int(t.get("models", 1))
+        if r <= acc:
+            tmpl = t
+            break
+    b_vp = next((v for v in filler.vocab if v.part.ldraw == tmpl["b_ldraw"]), None)
+    colour = a.colour
+    if b_vp is not None and b_vp.colours:
+        if palette()[a.colour].code not in b_vp.colours:
+            colour = next((c for c in range(len(palette()))
+                           if palette()[c].code in b_vp.colours), a.colour)
+    from .bricks import LDU_PER_PLATE as _LDUP, LDU_PER_STUD as _LDUS
+    child = SnotChild(
+        b_ldraw=tmpl["b_ldraw"],
+        b_colour=palette()[colour].code,
+        rot=tmpl["rot"],
+        dy_LDU=int(tmpl["dy_s"]) * _LDUP,
+        dx_LDU=int(tmpl["dx_s"]) * _LDUS,
+        dz_LDU=int(tmpl["dz_s"]) * _LDUS,
+        models=int(tmpl.get("models", 0)),
+    )
+    state.snot_children.setdefault(i, []).append(child)
+
+    def undo(i=i, child=child):
+        if i in state.snot_children:
+            try:
+                state.snot_children[i].remove(child)
+            except ValueError:
+                pass
+            if not state.snot_children[i]:
+                del state.snot_children[i]
+    return undo
+
+
 def sample(target: Target, models: list[dict] | None = None, *, iters: int = 20000, seed: int = 0,
            weights: Optional[Weights] = None, t_start_share: float = 0.05, t_final_share: float = 0.002,
            k_models: int = 50, n_special: int = 160, log_every: int = 2000,
@@ -1522,7 +1608,8 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
     for _ in range(warmup):                         # measure the scale, change nothing
         r = rnd.random()
         move = (masonry_shift if r < 0.02 else hinge_swap if r < 0.05
-                 else swap if r < 0.12 else merge if r < 0.57 else retile)
+                 else snot_insert if r < 0.08
+                 else swap if r < 0.15 else merge if r < 0.60 else retile)
         undo = move(st, filler, rnd)
         if undo is None:
             continue
@@ -1535,7 +1622,8 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
         T = t_start * (t_final / t_start) ** (it / max(1, iters - 1))
         r = rnd.random()
         move = (masonry_shift if r < 0.02 else hinge_swap if r < 0.05
-                 else swap if r < 0.12 else merge if r < 0.57 else retile)
+                 else snot_insert if r < 0.08
+                 else swap if r < 0.15 else merge if r < 0.60 else retile)
         undo = move(st, filler, rnd)
         if undo is None:
             continue
@@ -1549,6 +1637,7 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
             history.append(e)
     used = Counter(v.category for v in (i.vp for i in st.items.values()))
     shapes = Counter(v.part.shape for v in (i.vp for i in st.items.values()))
+    snot_count = sum(len(v) for v in st.snot_children.values())
     info = {"energy": e, "accepted": accepted / max(1, iters), "parts": len(st.items), "t_start": t_start,
             "shapes": dict(shapes),
             "kl": st.kl.value(), "kl_paths": st.kl2.value(),
@@ -1559,7 +1648,11 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
             "content_loss": st.content_loss(), "style_loss": st.style_loss(),
             "bad_cells": st.bad_cells(), "unsupported": len(st.unsup), "bare_side_connectors": st.bare, "history": history,
             "vocabulary": len(vocab), "categories": dict(used),
+            "snot_decorations": snot_count,
             "references": [r["model"] for r in refs[:10]], "engine": "python", "n_ref": st.n_ref,
             "pairs": st.kl.n, "dens": _dens(st.kl.n, st.n_ref, stats.density_sd),
             "cnt": _dens(len(st.items), st.p_ref, stats.part_density_sd)}
-    return st.placements(), info
+    ps, deco = st.placements_and_decorations()
+    if deco:
+        info["_snot_decorations"] = deco                       # kept for the LDR writer; drop before JSON dump
+    return ps, info

@@ -241,7 +241,8 @@ def main() -> None:
         from everything2lego.subassemblies import split_by_y_bands
         subs = split_by_y_bands(list(ps), target_size=a.subassemblies)
         info["subassemblies"] = [len(g) for g in subs]
-    write_ldr(ps, out / "model.ldr", subassemblies=subs)
+    deco = info.pop("_snot_decorations", None)
+    write_ldr(ps, out / "model.ldr", subassemblies=subs, decorations=deco)
     (out / "info.json").write_text(json.dumps({k: v for k, v in info.items()}, indent=1, default=float))
     print(json.dumps({k: v for k, v in info.items() if k != "history"}, default=float))
     subprocess.run([sys.executable, str(ROOT / "tools/render_build.py"), str(out / "model.ldr"),

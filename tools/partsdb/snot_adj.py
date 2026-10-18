@@ -159,14 +159,29 @@ def main() -> None:
     files = sorted(OMR.glob("*.mpd")) + sorted(OMR.glob("*.ldr"))
     seen: Counter = Counter()
     pair_models: dict = {}
-    with Pool(max(1, (os.cpu_count() or 2) - 1), initializer=_init) as pool:
-        for idx, got in enumerate(pool.imap_unordered(pairs_in, files, chunksize=4)):
+    # SNOT_ADJ_WORKERS=1 forces serial (fits ~400 MB), 0 or unset -> ncpu-1 Pool.
+    nw = int(os.environ.get("SNOT_ADJ_WORKERS", "0"))
+    if nw == 1:
+        _init()
+        for idx, f in enumerate(files):
+            got = pairs_in(f)
             if not got:
                 continue
             seen.update(got)
             for key in got:
                 a, b = key[0], key[1]
                 pair_models.setdefault((a, b), set()).add(idx)
+            if idx % 100 == 0:
+                print(f"  {idx+1}/{len(files)}  pairs so far: {len(seen)}", flush=True)
+    else:
+        with Pool(nw if nw > 1 else max(1, (os.cpu_count() or 2) - 1), initializer=_init) as pool:
+            for idx, got in enumerate(pool.imap_unordered(pairs_in, files, chunksize=4)):
+                if not got:
+                    continue
+                seen.update(got)
+                for key in got:
+                    a, b = key[0], key[1]
+                    pair_models.setdefault((a, b), set()).add(idx)
     best: dict = {}
     for key, n in seen.most_common():
         a, b = key[0], key[1]
