@@ -13,11 +13,12 @@ LDraw type-1 line format:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping
 
 from .bricks import GLASS, GLASS_OFFSET, LDU_PER_PLATE, LDU_PER_STUD
 from .colors import palette
 from .pack import Placement
+from .snot import SnotChild, render_child
 
 
 # 3x3 rotation matrices (row-major, LDraw convention, right-handed Y-down).
@@ -35,7 +36,7 @@ def _fmt_num(n: int | float) -> str:
     return str(n)
 
 
-def placement_to_line(p: Placement) -> str:
+def placement_to_line(p: Placement, children: Iterable[SnotChild] = ()) -> str:
     pal = palette()
     ldraw_color = pal[p.color_idx].code
 
@@ -63,13 +64,16 @@ def placement_to_line(p: Placement) -> str:
         gy = y + m[3] * dx + m[4] * dy + m[5] * dz
         gz = z + m[6] * dx + m[7] * dy + m[8] * dz
         line += f"\n1 {p.glass} {_fmt_num(gx)} {_fmt_num(gy)} {_fmt_num(gz)} {matrix} {glass}"
+    for ch in children:
+        line += "\n" + render_child(m, int(x), int(y), int(z), ch)
     return line
 
 
 def write_ldr(placements: Iterable[Placement], out_path: str | Path,
               *, model_name: str = "everything2lego model",
               steps: Iterable[Iterable[Placement]] | None = None,
-              subassemblies: Iterable[Iterable[Placement]] | None = None) -> Path:
+              subassemblies: Iterable[Iterable[Placement]] | None = None,
+              decorations: Mapping[Placement, Iterable[SnotChild]] | None = None) -> Path:
     """Write an LDraw model with one `0 STEP` marker closing each build step.
 
     `steps` is the build-step grouping (a list of lists of placements, as
@@ -115,7 +119,7 @@ def write_ldr(placements: Iterable[Placement], out_path: str | Path,
                 step = sorted(step, key=lambda q: (q.y_plate, q.z_stud, q.x_stud))
                 if not step:
                     continue
-                lines.extend(placement_to_line(p) for p in step)
+                lines.extend(placement_to_line(p, (decorations or {}).get(p, ())) for p in step)
                 lines.append("0 STEP")
         out_path.write_text("\n".join(lines) + "\n")
         return out_path

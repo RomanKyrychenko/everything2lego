@@ -463,6 +463,9 @@ def nearest_models(rows: list[dict], shape, k: int = 50, kind: Optional[str] = N
 # state
 # ---------------------------------------------------------------------------
 
+from .snot import SnotChild
+
+
 @dataclass
 class Item:
     vp: VPart
@@ -536,6 +539,7 @@ class State:
         self.net = proposals.load()
         self.kindgrid = np.full(target.want.shape, -1, dtype=np.int64)
         self.items: dict[int, Item] = {}
+        self.snot_children: dict[int, list[SnotChild]] = {}  # parent id -> SNOT decorations (slice 1 inert)
         self.next_id = 0
         self.kl = RunningKL(stats.ref)
         self.loc = 0.0
@@ -862,6 +866,7 @@ class State:
         self.fid -= self.fid_delta(ys, xs, zs, it.ori.bits)
         self.col -= self.colour_cost(ys, xs, zs, it.ori.o, it.colour)
         del self.items[i]
+        self.snot_children.pop(i, None)
         self.unsup.discard(i)
         self._refresh_support(list(nb))
         return it
