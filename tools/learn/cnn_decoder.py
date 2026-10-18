@@ -172,12 +172,15 @@ class OMRDataset(Dataset):
 
 
 def _collate(batch):
-    """Pad placement sequences to the longest in the batch.  Returns
-    chunk_id = Y-layer of each placement (-1 for padding) so the model
-    can attend only within the same layer."""
+    """Pad placement sequences to a FIXED length (not just the batch max) so
+    MPSGraph's shape cache hits every call.  CPU is indifferent to the extra
+    padding; MPS gains ~2x by avoiding per-batch shader recompilation."""
     voxels, poss, toks, kinds = (list(x) for x in zip(*[b[:4] for b in batch]))
     v = torch.stack(voxels, 0)
-    L = max(len(t) for t in toks)
+    L_actual = max(len(t) for t in toks)
+    # Round up to the next power of 2 in multiples of 32, capped at 300 (OMRDataset
+    # max_placements).  Buckets instead of per-batch max keeps the Metal shader cache warm.
+    L = min(300, max(32, (L_actual + 31) // 32 * 32))
     pos_pad = torch.zeros(len(batch), L, 3, dtype=torch.long)
     tok_pad = torch.full((len(batch), L), -1, dtype=torch.long)
     chunk_pad = torch.full((len(batch), L), -1, dtype=torch.long)
