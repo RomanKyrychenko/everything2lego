@@ -28,6 +28,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import torch
@@ -61,7 +62,9 @@ def _best_colour(cell_cols: np.ndarray, allowed: set | None) -> int:
 
 def cnn_greedy(target, model_path, n_special: int = 160, prefer_length: float = 0.0,
                 refine_rounds: int = 0, mask_pct: float = 0.1, seed: int = 0,
-                support_penalty: float = 0.0, verbose: bool = True) -> list[Placement]:
+                support_penalty: float = 0.0,
+                guidance_model: Optional[Path] = None, guidance: float = 1.0,
+                verbose: bool = True) -> list[Placement]:
     """Run the CNN decoder greedily over the voxel target and return the list
     of Placements.  Reusable from sampler_demo (--init-from-cnn) or other
     composition pipelines.
@@ -113,6 +116,23 @@ def cnn_greedy(target, model_path, n_special: int = 160, prefer_length: float = 
     m.load_state_dict(ckpt["state_dict"])
     m.eval()
 
+    # Classifier-free guidance (optional): load a second "unconditional" model.
+    # Blend at inference: logits_cfg = logits_uncond + guidance * (logits_cond - logits_uncond)
+    # where `m` is the conditional (polished/distilled) and `m_u` is the OMR-only unconditional.
+    m_u: Optional[Model] = None
+    if guidance_model is not None:
+        if factored:
+            raise ValueError("CFG not supported for factored checkpoints")
+        ck_u = torch.load(guidance_model, map_location="cpu", weights_only=False)
+        if ck_u["tokens"] != tokens or ck_u["kinds"] != kinds or ck_u["grid"] != grid:
+            raise ValueError("CFG models must share tokens/kinds/grid")
+        ch_u = int(ck_u.get("ch", 32)); unet_u = bool(ck_u.get("unet"))
+        m_u = Model(n_tokens=n_tokens, n_kinds=n_kinds, grid=grid, ch=ch_u, unet=unet_u).to(device)
+        m_u.load_state_dict(ck_u["state_dict"])
+        m_u.eval()
+        if verbose:
+            print(f"cfg: guidance={guidance} unconditional={guidance_model.name}", flush=True)
+
     # encode voxel target once
     v = torch.from_numpy((target.want > 0).astype(np.float32))[None, None]
     v = F.interpolate(v, size=(grid, grid, grid), mode="trilinear", align_corners=False)
@@ -154,6 +174,10 @@ def cnn_greedy(target, model_path, n_special: int = 160, prefer_length: float = 
                     lpy = (ly - ly.max() - torch.logsumexp(ly - ly.max(), dim=-1)).cpu().numpy()
                 else:
                     logits = out[0, -1]
+                    if m_u is not None:
+                        out_u = m_u(v.unsqueeze(0), pos_t, prev_t, kind_t, chunk_id=chunk_t)
+                        logits_u = out_u[0, -1]
+                        logits = logits_u + guidance * (logits - logits_u)      # CFG blend
                     lp = (logits - logits.max() - torch.logsumexp(logits - logits.max(), dim=-1)).cpu().numpy()
             valid = []
             for k, opt in enumerate(opts):
@@ -265,6 +289,10 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--support-penalty", type=float, default=0.0,
                     help="penalty per unsupported bottom cell in each candidate option (0 disables; 1-5 soft, 1e6 effectively hard)")
+    ap.add_argument("--guidance-model", type=Path, default=None,
+                    help="path to an 'unconditional' (OMR-only) CNN checkpoint for classifier-free guidance; blends with --model (treated as 'conditional')")
+    ap.add_argument("--guidance", type=float, default=1.0,
+                    help="CFG scale: logits_cfg = logits_uncond + w * (logits_cond - logits_uncond); 1.0 = pure conditional, >1 amplifies the direction, <1 blends toward unconditional")
     ap.add_argument("--measure", action="store_true",
                     help="run sampler.sample(iters=0, warmup=0) on the CNN output to report full quality metrics (KL, outline, unsupported, ...)")
     a = ap.parse_args()
@@ -273,7 +301,8 @@ def main() -> None:
     target = target_from_mesh(a.mesh, a.studs, a.shell, a.kind)
     placements = cnn_greedy(target, a.model, n_special=a.n_special, prefer_length=a.prefer_length,
                              refine_rounds=a.refine, mask_pct=a.mask_pct, seed=a.seed,
-                             support_penalty=a.support_penalty)
+                             support_penalty=a.support_penalty,
+                             guidance_model=a.guidance_model, guidance=a.guidance)
     write_ldr(placements, a.out / "model.ldr")
     if a.measure:
         from everything2lego.sampler import sample as _sample

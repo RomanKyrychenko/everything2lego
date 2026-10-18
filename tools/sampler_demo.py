@@ -179,6 +179,8 @@ def main() -> None:
     ap.add_argument("--init-from-cnn", default=None, help="path to a cnn_decoder.pt checkpoint: run its greedy decode, then feed those placements as init to the sampler (composition: fast CNN seeds the Metropolis walk)")
     ap.add_argument("--init-prefer-length", type=float, default=1.0, help="--prefer-length passed to the CNN greedy seed; 1.0 is the sched-sampling champion")
     ap.add_argument("--init-support-penalty", type=float, default=0.0, help="--support-penalty passed to the CNN greedy seed; penalises unsupported bottom cells at inference")
+    ap.add_argument("--init-guidance-model", default=None, help="path to an OMR-only CNN checkpoint for CFG when the --init-from-cnn is a hybrid/distilled model")
+    ap.add_argument("--init-guidance", type=float, default=1.0, help="CFG scale for the CNN seed (1.0 = pure conditional, >1 amplifies, <1 blends toward unconditional)")
     ap.add_argument("--subassemblies", type=int, default=0, help="group placements into N-part submodels in an MPD .ldr (real sets have 11-26 sub-assemblies; 25 is a reasonable target)")
     ap.add_argument("--smooth", type=int, default=0, help="apply N iterations of Taubin smoothing to the mesh before voxelising (reduces 1-stud surface noise; 5-10 is a reasonable range)")
     a = ap.parse_args()
@@ -211,7 +213,9 @@ def main() -> None:
         from cnn_build import cnn_greedy
         print(f"init-from-cnn: running greedy over {Path(a.init_from_cnn).name}...", flush=True)
         init_placements = cnn_greedy(target, Path(a.init_from_cnn), prefer_length=a.init_prefer_length,
-                                       support_penalty=a.init_support_penalty)
+                                       support_penalty=a.init_support_penalty,
+                                       guidance_model=Path(a.init_guidance_model) if a.init_guidance_model else None,
+                                       guidance=a.init_guidance)
         print(f"init: {len(init_placements)} placements from CNN", flush=True)
     ps, info = sample(target, models, iters=iters, seed=a.seed, weights=Weights(style=a.style),
                       tile_boost=a.tile_boost, snot_boost=a.snot_boost, opt_bias=opt_bias,
