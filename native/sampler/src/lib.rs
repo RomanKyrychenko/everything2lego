@@ -87,6 +87,8 @@ pub struct Problem {
     pub max_deg_paths4: i32,    // degree cap: parts with more neighbours skip paths4 (0 = no cap)
     pub paths4_sample_n: i32,   // deterministic subsample: keep walks where hash(a,b,c,d) % N == 0 (0/1 = all)
     pub w_entropy_glob3: f64,   // anti mode-collapse: energy -= w_entropy_glob3 * H(kl3) (nats)
+    pub w_revkl_glob3: f64,     // coverage term: energy -= w_revkl_glob3 * (s_plogc / n_ours)
+    pub pref3: *const f64,      // n_tok*n_tok*3*8 or null: p_ref values parallel to logp3
     // each option's outline in the three axis views, sample pixels box-local:
     // along x (sy, sz), along y (sx, sz), along z (sy, sx)
     pub pixx_start: *const i32,
@@ -278,6 +280,8 @@ struct Data {
     max_deg_paths4: i32,
     paths4_sample_n: u32,
     w_entropy_glob3: f64,
+    w_revkl_glob3: f64,
+    pref3: Vec<f64>,
     tsil: [Vec<bool>; 3],
     scols: [i32; 3], // columns of each view (rows are implied)
     n_conn: usize,
@@ -435,6 +439,9 @@ impl Data {
             max_deg_paths4: p.max_deg_paths4,
             paths4_sample_n: p.paths4_sample_n.max(1) as u32,
             w_entropy_glob3: p.w_entropy_glob3,
+            w_revkl_glob3: p.w_revkl_glob3,
+            pref3: if p.pref3.is_null() { Vec::new() }
+                    else { v(p.pref3, n_tok * n_tok * 3 * PATHS4_BUCKETS) },
             tsil: [
                 v(p.tsx, (p.h * SUB * p.z * SUB) as usize).iter().map(|&b| b != 0).collect(),
                 v(p.tsy, (p.x * SUB * p.z * SUB) as usize).iter().map(|&b| b != 0).collect(),
@@ -765,21 +772,32 @@ fn net_features(d: &Data, net: &Net, kindgrid: &[i32], y: i32, x: i32, z: i32) -
 // ---------------------------------------------------------------------------
 
 /// KL(counts || reference) under count changes: sum c log c, sum c log p, n.
+/// Optionally also tracks s_plogc = sum_k p_ref(k) * log(c[k] + EPS) for a
+/// reverse-direction coverage term; opt-in by passing a non-empty pref vector.
 struct Kl {
     counts: Vec<f64>,
+    pref: Vec<f64>,         // same length as counts; empty = don't track s_plogc
+    tot_pref: f64,          // sum of pref (for normalisation of the coverage term)
     s_clogc: f64,
     s_clogp: f64,
+    s_plogc: f64,
     n: f64,
 }
 
+const KL_PLOGC_EPS: f64 = 1e-6;
+
 impl Kl {
     fn new(len: usize) -> Kl {
-        Kl { counts: vec![0.0; len], s_clogc: 0.0, s_clogp: 0.0, n: 0.0 }
+        Kl { counts: vec![0.0; len], pref: Vec::new(), tot_pref: 0.0,
+             s_clogc: 0.0, s_clogp: 0.0, s_plogc: 0.0, n: 0.0 }
+    }
+    fn new_with_pref(len: usize, pref: Vec<f64>) -> Kl {
+        let tot = pref.iter().sum::<f64>();
+        let s0 = tot * KL_PLOGC_EPS.ln();
+        Kl { counts: vec![0.0; len], pref, tot_pref: tot,
+             s_clogc: 0.0, s_clogp: 0.0, s_plogc: s0, n: 0.0 }
     }
     fn add(&mut self, key: usize, dc: f64, logp: f64) {
-        // counts may be weights (paths); keep the raw count so swap+undo
-        // round-trips exactly.  The log terms clamp to 0 when counts fall
-        // just below 0 (floating-point noise would give NaN otherwise).
         let c0 = self.counts[key];
         let c1 = c0 + dc;
         if c0 > 0.0 {
@@ -789,6 +807,12 @@ impl Kl {
             self.s_clogc += c1 * c1.ln();
         }
         self.s_clogp += dc * logp;
+        if !self.pref.is_empty() {
+            let p = self.pref[key];
+            if p != 0.0 {
+                self.s_plogc += p * ((c1 + KL_PLOGC_EPS).ln() - (c0 + KL_PLOGC_EPS).ln());
+            }
+        }
         self.n += dc;
         self.counts[key] = c1;
     }
@@ -871,7 +895,13 @@ impl<'a> State<'a> {
             n_unsup: 0,
             kl1: Kl::new(d.n_tok * d.n_tok * 3),
             kl2: Kl::new(d.n_tok * d.n_tok * 3),
-            kl3: Kl::new(if d.paths4_enabled() { d.n_tok * d.n_tok * 3 * PATHS4_BUCKETS } else { 0 }),
+            kl3: if d.paths4_enabled() {
+                if !d.pref3.is_empty() && d.w_revkl_glob3 != 0.0 {
+                    Kl::new_with_pref(d.n_tok * d.n_tok * 3 * PATHS4_BUCKETS, d.pref3.clone())
+                } else {
+                    Kl::new(d.n_tok * d.n_tok * 3 * PATHS4_BUCKETS)
+                }
+            } else { Kl::new(0) },
             adj: Vec::new(),
             path_queue: Vec::new(),
             path4_queue: Vec::new(),
@@ -1271,6 +1301,13 @@ impl<'a> State<'a> {
         let ent = if d.paths4_enabled() && d.w_entropy_glob3 != 0.0 {
             -d.w_entropy_glob3 * self.kl3.entropy()
         } else { 0.0 };
+        // Reverse-direction cross-entropy: -sum_k p_ref(k) * log((c[k]+eps)/n_ours).
+        // = -s_plogc + tot_pref * log(n_ours).  Encourages ours to cover high-p_ref
+        // keys; grows linearly with log(n_ours).  Lower value = better coverage.
+        let rkl = if d.paths4_enabled() && d.w_revkl_glob3 != 0.0 && !self.kl3.pref.is_empty() && self.kl3.n > 1e-9 {
+            let tot = self.kl3.tot_pref;
+            d.w_revkl_glob3 * (-self.kl3.s_plogc + tot * self.kl3.n.ln())
+        } else { 0.0 };
         d.style
             * d.n_ref
             * (d.w_loc * self.loc / n
@@ -1278,6 +1315,7 @@ impl<'a> State<'a> {
                 + d.w_glob2 * self.kl2.value()
                 + d.w_glob3 * kl3_v
                 + ent
+                + rkl
                 + d.w_dens * r * r / (2.0 * d.dens_sd * d.dens_sd)
                 + cnt)
     }
@@ -2002,7 +2040,10 @@ unsafe fn run(p: &Problem) -> i32 {
         st.style_loss(),
         if d.paths4_enabled() { st.kl3.value() } else { 0.0 },
         if d.paths4_enabled() { st.kl3.entropy() } else { 0.0 },
-        0.0, 0.0,                                                      // reserved
+        if d.paths4_enabled() && !st.kl3.pref.is_empty() && st.kl3.n > 1e-9 {
+            -st.kl3.s_plogc + st.kl3.tot_pref * st.kl3.n.ln()
+        } else { 0.0 },
+        0.0,                                                           // reserved
     ];
     for (k, v) in info.iter().enumerate().take(INFO_LEN) {
         *p.info.add(k) = *v;
@@ -2031,5 +2072,5 @@ pub unsafe extern "C" fn e2l_sample(p: *const Problem) -> i32 {
 /// The layout version: Python checks it before calling.
 #[no_mangle]
 pub extern "C" fn e2l_abi() -> i32 {
-    15
+    16
 }

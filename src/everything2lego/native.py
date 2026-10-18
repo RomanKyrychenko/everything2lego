@@ -28,7 +28,7 @@ from typing import Optional
 
 import numpy as np
 
-ABI = 15
+ABI = 16
 INFO_LEN = 20
 PATHS4_BUCKETS = 8
 
@@ -63,6 +63,7 @@ class Problem(C.Structure):
         ("w_glob3", C.c_double), ("logp3", _P(C.c_double)), ("mid_bucket", _P(C.c_int32)),
         ("max_deg_paths4", C.c_int32), ("paths4_sample_n", C.c_int32),
         ("w_entropy_glob3", C.c_double),
+        ("w_revkl_glob3", C.c_double), ("pref3", _P(C.c_double)),
         ("pixx_start", _P(C.c_int32)), ("pixx", _P(C.c_int32)),
         ("pixy_start", _P(C.c_int32)), ("pixy", _P(C.c_int32)),
         ("pixz_start", _P(C.c_int32)), ("pixz", _P(C.c_int32)),
@@ -287,14 +288,16 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         exact_p = exact / _total
         # broadcast kind back to (n_tok, n_tok, n_dkey) via indexing
         kind_p_tok = kind_count[kind_arr[:, None], kind_arr[None, :]] / _kind_total / kind_spread[kind_arr[:, None], kind_arr[None, :]]
-        logp3 = np.log(l1 * exact_p + l2 * kind_p_tok + l3 / _vocab)
-        logp3 = logp3.reshape(n_tok, n_tok, 3, PATHS4_BUCKETS)
+        p3_raw = l1 * exact_p + l2 * kind_p_tok + l3 / _vocab           # p_ref(key) for each slot
+        logp3 = np.log(p3_raw).reshape(n_tok, n_tok, 3, PATHS4_BUCKETS)
+        pref3 = p3_raw.reshape(n_tok, n_tok, 3, PATHS4_BUCKETS)         # parallel array; coverage term uses it
         # mid_bucket[a, b] = Stats.middle_bucket(tok_a, tok_b)
         bucket_of = stats.middle_bucket
         mid_bucket = np.array([[bucket_of(ta, tb) for tb in toks] for ta in toks], np.int32)
     else:
         logp3 = None
         mid_bucket = None
+        pref3 = None
     from .sampler import unpack
     fine = unpack(target.bits)
     tsil = (fine.any(axis=1), fine.any(axis=0), fine.any(axis=2))
@@ -375,6 +378,8 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         max_deg_paths4=int(getattr(weights, "max_deg_paths4", 0)),
         paths4_sample_n=int(getattr(weights, "paths4_sample_n", 1)),
         w_entropy_glob3=float(getattr(weights, "entropy_glob3", 0.0) if use_paths4 else 0.0),
+        w_revkl_glob3=float(getattr(weights, "revkl_glob3", 0.0) if use_paths4 else 0.0),
+        pref3=(_ptr(arr(pref3, np.float64), C.c_double) if use_paths4 else _P(C.c_double)()),
         pixx_start=_ptr(arr(pstart[0], np.int32), C.c_int32), pixx=_ptr(arr(np.concatenate(pvals[0]), np.int32), C.c_int32),
         pixy_start=_ptr(arr(pstart[1], np.int32), C.c_int32), pixy=_ptr(arr(np.concatenate(pvals[1]), np.int32), C.c_int32),
         pixz_start=_ptr(arr(pstart[2], np.int32), C.c_int32), pixz=_ptr(arr(np.concatenate(pvals[2]), np.int32), C.c_int32),
@@ -482,7 +487,7 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
     keys = ("energy", "accepted", "t_start", "kl", "local_per_pair", "fidelity", "bad_cells",
             "unsupported", "bare_side_connectors", "parts", "pairs", "energy_recomputed",
             "kl_paths", "outline", "content_loss", "style_loss",
-            "kl_paths4", "entropy_paths4", "_reserved18", "_reserved19")
+            "kl_paths4", "entropy_paths4", "revkl_paths4", "_reserved19")
     inf = {k: float(v) for k, v in zip(keys, info)}
     for k in ("bad_cells", "unsupported", "bare_side_connectors", "parts"):
         inf[k] = int(inf[k])

@@ -501,6 +501,7 @@ class Weights:
     max_deg_paths4: int = 0   # degree cap for the paths4 enumeration (0 = no cap, 10-20 kills baseplate blow-up)
     paths4_sample_n: int = 1  # 1 = all walks, N > 1 = keep ~1/N walks via deterministic hash + reweight
     entropy_glob3: float = 0.0  # anti mode-collapse: energy -= entropy_glob3 * H(kl3) nats
+    revkl_glob3: float = 0.0    # coverage: energy -= revkl_glob3 * E_pref3[log(ours+eps)] (anti mode-diffusion)
     col: float = 0.04
     loc: float = 1.0
     glob: float = 1.0
