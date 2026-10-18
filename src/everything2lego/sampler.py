@@ -509,6 +509,11 @@ class Weights:
     side: float = 6.0         # a side stud or hole facing out of the object: SNOT with nothing on it
     dens: float = 1.0         # pairs per cell as real sets have them (not too few big, too many small parts)
     cnt: float = 1.0          # parts per cell as real sets have them
+    # Proposal biases: added to log P(part) at proposal time, not an energy term.
+    # Fitted to match real-set category fractions.  sample()'s tile_boost / snot_boost
+    # kwargs still override these if non-zero (for ablations).
+    tile_boost: float = 0.0   # bias toward tile parts; +2 lands near real-set tile fraction 15-23%
+    snot_boost: float = 0.0   # bias toward SNOT parts (brickS, plateS, tileS); +5 lands near real-set 17-32%
 
     @classmethod
     def learned(cls, kind: Optional[str] = None) -> "Weights":
@@ -1467,6 +1472,11 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
     else:
         refs = stats._refs                               # for info["references"]
     weights = weights or Weights.learned(target.kind)
+    # Default proposal biases from fitted Weights when caller didn't pass an override.
+    if tile_boost == 0.0:
+        tile_boost = getattr(weights, "tile_boost", 0.0)
+    if snot_boost == 0.0:
+        snot_boost = getattr(weights, "snot_boost", 0.0)
     vocab = select_vocabulary(target.kind, n_special)
     if engine == "auto" and not native.available():
         warnings.warn(f"native sampler: {native.why_not()} (python -m everything2lego.native build); "
@@ -1482,9 +1492,11 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
             init_placements=init_placements)
         placements = [Placement(v.part, c, x, z, y, o.size[1], o.size[2], o.rot) for v, o, c, y, x, z in got]
         used = Counter(v.category for v, *_ in got)
+        shapes = Counter(v.part.shape for v, *_ in got)
         n_ref = stats.density * float(target.fill.sum())
         p_ref = stats.part_density * float(target.fill.sum())
-        info.update({"history": history, "vocabulary": len(vocab), "categories": dict(used), "n_ref": n_ref,
+        info.update({"history": history, "vocabulary": len(vocab), "categories": dict(used),
+                     "shapes": dict(shapes), "n_ref": n_ref,
                      "dens": _dens(info["pairs"], n_ref, stats.density_sd),
                      "cnt": _dens(info["parts"], p_ref, stats.part_density_sd),
                      "references": [r["model"] for r in refs[:10]], "engine": "native"})
@@ -1531,7 +1543,9 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
         if log_every and (it + 1) % log_every == 0:
             history.append(e)
     used = Counter(v.category for v in (i.vp for i in st.items.values()))
+    shapes = Counter(v.part.shape for v in (i.vp for i in st.items.values()))
     info = {"energy": e, "accepted": accepted / max(1, iters), "parts": len(st.items), "t_start": t_start,
+            "shapes": dict(shapes),
             "kl": st.kl.value(), "kl_paths": st.kl2.value(),
             "kl_paths4": (st.kl3.value() if st.kl3 is not None else 0.0),
             "entropy_paths4": st.kl3_entropy(),
