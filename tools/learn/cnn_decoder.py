@@ -311,11 +311,12 @@ class Model(nn.Module):
             L = mask.size(-1)
             diag = torch.eye(L, dtype=torch.bool, device=mask.device)
             mask = mask & ~diag                                       # self-attention always allowed
-            # (B, L, L) src_mask isn't supported in torch 2.2, so loop
-            out = torch.zeros_like(h)
-            for b in range(B):
-                out[b:b+1] = self.attn(h[b:b+1], mask=mask[b])
-            h = out
+            # Vectorised: pass per-head mask as (B*num_heads, L, L) in a single call.
+            # torch's TransformerEncoderLayer accepts src_mask of that shape.  num_heads=4
+            # here (fixed when self.attn was built).
+            num_heads = 4
+            mask_bh = mask.unsqueeze(1).expand(-1, num_heads, -1, -1).reshape(B * num_heads, L, L)
+            h = self.attn(h, mask=mask_bh)
         if self.factored:
             t = self.head_trunk(h)
             return self.head_cat(t), self.head_size(t), self.head_yaw(t)
