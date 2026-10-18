@@ -500,6 +500,7 @@ class Weights:
     glob3: float = 0.0        # 4-walk patterns (the third scale) -- opt-in; needs features.pkl with paths4
     max_deg_paths4: int = 0   # degree cap for the paths4 enumeration (0 = no cap, 10-20 kills baseplate blow-up)
     paths4_sample_n: int = 1  # 1 = all walks, N > 1 = keep ~1/N walks via deterministic hash + reweight
+    entropy_glob3: float = 0.0  # anti mode-collapse: energy -= entropy_glob3 * H(kl3) nats
     col: float = 0.04
     loc: float = 1.0
     glob: float = 1.0
@@ -790,12 +791,20 @@ class State:
         w = self.w
         n = self.kl.n
         kl3_v = self.kl3.value() if self.kl3 is not None else 0.0
+        ent3 = -w.entropy_glob3 * self.kl3_entropy() if self.kl3 is not None and w.entropy_glob3 != 0.0 else 0.0
         style = (w.loc * self.loc / n + w.glob * self.kl.value() + w.glob2 * self.kl2.value()
-                 + w.glob3 * kl3_v
+                 + w.glob3 * kl3_v + ent3
                  + w.dens * math.log(n / self.n_ref) ** 2 / (2 * self.s.density_sd ** 2)
                  + w.cnt * _dens(len(self.items), self.p_ref, self.s.part_density_sd)) if n > 0 else 0.0
         return (w.cov * self.fid + w.sil * self.sil / SUB ** 2 + w.col * self.col
                 + w.style * self.n_ref * style + w.sup * len(self.unsup) + w.side * self.bare)
+
+    def kl3_entropy(self) -> float:
+        """Shannon entropy (nats) of kl3's current count distribution."""
+        kl3 = self.kl3
+        if kl3 is None or kl3.n <= 1e-9:
+            return 0.0
+        return math.log(kl3.n) - kl3.s_clogc / kl3.n
 
     def content_loss(self) -> float:
         w = self.w
@@ -1524,6 +1533,7 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
     info = {"energy": e, "accepted": accepted / max(1, iters), "parts": len(st.items), "t_start": t_start,
             "kl": st.kl.value(), "kl_paths": st.kl2.value(),
             "kl_paths4": (st.kl3.value() if st.kl3 is not None else 0.0),
+            "entropy_paths4": st.kl3_entropy(),
             "local_per_pair": st.loc / max(1, st.kl.n),
             "fidelity": st.fid, "outline": st.sil / SUB ** 2,
             "content_loss": st.content_loss(), "style_loss": st.style_loss(),

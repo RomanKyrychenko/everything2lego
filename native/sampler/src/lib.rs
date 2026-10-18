@@ -86,6 +86,7 @@ pub struct Problem {
     pub mid_bucket: *const i32, // n_tok*n_tok or null: bucket for the middle pair (b, c)
     pub max_deg_paths4: i32,    // degree cap: parts with more neighbours skip paths4 (0 = no cap)
     pub paths4_sample_n: i32,   // deterministic subsample: keep walks where hash(a,b,c,d) % N == 0 (0/1 = all)
+    pub w_entropy_glob3: f64,   // anti mode-collapse: energy -= w_entropy_glob3 * H(kl3) (nats)
     // each option's outline in the three axis views, sample pixels box-local:
     // along x (sy, sz), along y (sx, sz), along z (sy, sx)
     pub pixx_start: *const i32,
@@ -276,6 +277,7 @@ struct Data {
     mid_bucket: Vec<i32>,  // n_tok*n_tok or empty
     max_deg_paths4: i32,
     paths4_sample_n: u32,
+    w_entropy_glob3: f64,
     tsil: [Vec<bool>; 3],
     scols: [i32; 3], // columns of each view (rows are implied)
     n_conn: usize,
@@ -432,6 +434,7 @@ impl Data {
                           else { v(p.mid_bucket, n_tok * n_tok) },
             max_deg_paths4: p.max_deg_paths4,
             paths4_sample_n: p.paths4_sample_n.max(1) as u32,
+            w_entropy_glob3: p.w_entropy_glob3,
             tsil: [
                 v(p.tsx, (p.h * SUB * p.z * SUB) as usize).iter().map(|&b| b != 0).collect(),
                 v(p.tsy, (p.x * SUB * p.z * SUB) as usize).iter().map(|&b| b != 0).collect(),
@@ -794,6 +797,14 @@ impl Kl {
             return 0.0;
         }
         (self.s_clogc - self.s_clogp) / self.n - self.n.ln()
+    }
+    /// Shannon entropy of the current count distribution: H = log(n) - s_clogc / n.
+    /// Reported in nats.  Used as an anti-mode-collapse regularizer.
+    fn entropy(&self) -> f64 {
+        if self.n <= 1e-9 {
+            return 0.0;
+        }
+        self.n.ln() - self.s_clogc / self.n
     }
 }
 
@@ -1255,12 +1266,18 @@ impl<'a> State<'a> {
         let rp = if np > 0.0 { (np / d.p_ref).ln() } else { 0.0 };
         let cnt = if np > 0.0 { d.w_cnt * rp * rp / (2.0 * d.cnt_sd * d.cnt_sd) } else { 0.0 };
         let kl3_v = if d.paths4_enabled() { self.kl3.value() } else { 0.0 };
+        // Entropy regularizer on 4-walks: pull H(kl3) up to counter KL's mode-seeking.
+        // Negative in energy means more entropy -> lower energy -> preferred.
+        let ent = if d.paths4_enabled() && d.w_entropy_glob3 != 0.0 {
+            -d.w_entropy_glob3 * self.kl3.entropy()
+        } else { 0.0 };
         d.style
             * d.n_ref
             * (d.w_loc * self.loc / n
                 + d.w_glob * self.kl1.value()
                 + d.w_glob2 * self.kl2.value()
                 + d.w_glob3 * kl3_v
+                + ent
                 + d.w_dens * r * r / (2.0 * d.dens_sd * d.dens_sd)
                 + cnt)
     }
@@ -1984,7 +2001,8 @@ unsafe fn run(p: &Problem) -> i32 {
         st.content(),
         st.style_loss(),
         if d.paths4_enabled() { st.kl3.value() } else { 0.0 },
-        0.0, 0.0, 0.0,                                                 // reserved
+        if d.paths4_enabled() { st.kl3.entropy() } else { 0.0 },
+        0.0, 0.0,                                                      // reserved
     ];
     for (k, v) in info.iter().enumerate().take(INFO_LEN) {
         *p.info.add(k) = *v;
@@ -2013,5 +2031,5 @@ pub unsafe extern "C" fn e2l_sample(p: *const Problem) -> i32 {
 /// The layout version: Python checks it before calling.
 #[no_mangle]
 pub extern "C" fn e2l_abi() -> i32 {
-    14
+    15
 }

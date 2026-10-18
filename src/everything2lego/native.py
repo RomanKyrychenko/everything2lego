@@ -28,7 +28,7 @@ from typing import Optional
 
 import numpy as np
 
-ABI = 14
+ABI = 15
 INFO_LEN = 20
 PATHS4_BUCKETS = 8
 
@@ -62,6 +62,7 @@ class Problem(C.Structure):
         ("middle_w", _P(C.c_double)),
         ("w_glob3", C.c_double), ("logp3", _P(C.c_double)), ("mid_bucket", _P(C.c_int32)),
         ("max_deg_paths4", C.c_int32), ("paths4_sample_n", C.c_int32),
+        ("w_entropy_glob3", C.c_double),
         ("pixx_start", _P(C.c_int32)), ("pixx", _P(C.c_int32)),
         ("pixy_start", _P(C.c_int32)), ("pixy", _P(C.c_int32)),
         ("pixz_start", _P(C.c_int32)), ("pixz", _P(C.c_int32)),
@@ -373,6 +374,7 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         mid_bucket=(_ptr(arr(mid_bucket, np.int32), C.c_int32) if use_paths4 else _P(C.c_int32)()),
         max_deg_paths4=int(getattr(weights, "max_deg_paths4", 0)),
         paths4_sample_n=int(getattr(weights, "paths4_sample_n", 1)),
+        w_entropy_glob3=float(getattr(weights, "entropy_glob3", 0.0) if use_paths4 else 0.0),
         pixx_start=_ptr(arr(pstart[0], np.int32), C.c_int32), pixx=_ptr(arr(np.concatenate(pvals[0]), np.int32), C.c_int32),
         pixy_start=_ptr(arr(pstart[1], np.int32), C.c_int32), pixy=_ptr(arr(np.concatenate(pvals[1]), np.int32), C.c_int32),
         pixz_start=_ptr(arr(pstart[2], np.int32), C.c_int32), pixz=_ptr(arr(np.concatenate(pvals[2]), np.int32), C.c_int32),
@@ -480,7 +482,7 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
     keys = ("energy", "accepted", "t_start", "kl", "local_per_pair", "fidelity", "bad_cells",
             "unsupported", "bare_side_connectors", "parts", "pairs", "energy_recomputed",
             "kl_paths", "outline", "content_loss", "style_loss",
-            "kl_paths4", "_reserved17", "_reserved18", "_reserved19")
+            "kl_paths4", "entropy_paths4", "_reserved18", "_reserved19")
     inf = {k: float(v) for k, v in zip(keys, info)}
     for k in ("bad_cells", "unsupported", "bare_side_connectors", "parts"):
         inf[k] = int(inf[k])
