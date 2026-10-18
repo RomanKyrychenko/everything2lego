@@ -131,7 +131,7 @@ def write_ldr(placements: Iterable[Placement], out_path: str | Path,
         step = sorted(step, key=lambda q: (q.y_plate, q.z_stud, q.x_stud))
         if not step:
             continue
-        lines.extend(placement_to_line(p) for p in step)
+        lines.extend(placement_to_line(p, (decorations or {}).get(p, ())) for p in step)
         lines.append("0 STEP")
     out_path.write_text("\n".join(lines) + "\n")
     return out_path

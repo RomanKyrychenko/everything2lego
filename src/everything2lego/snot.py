@@ -76,7 +76,13 @@ SNOT_PAIRS_PATH = Path(os.environ.get(
 def load_pairs() -> tuple[dict, ...]:
     """SNOT pair records with the enriched rotation.  Records missing the
     `rot` field (v1 schema) are dropped; re-run snot_adj.py v2 to produce
-    them."""
+    them.
+
+    Only face_a == 'U' records are returned: the sampler places parts
+    studs-up, so A's frame in these records matches the sampler's
+    placement frame and the stored (rot, dx, dy, dz) can be applied
+    directly.  S+U records are dropped — handling those would need the
+    loader to swap A and B and invert the pose, future work."""
     if not SNOT_PAIRS_PATH.exists():
         return ()
     rows = json.loads(SNOT_PAIRS_PATH.read_text())
@@ -85,6 +91,8 @@ def load_pairs() -> tuple[dict, ...]:
         rot = r.get("rot")
         if rot is None:
             continue                                                   # legacy schema; skip
+        if r.get("face_a") != "U":
+            continue                                                   # A sideways: pose not in sampler-placeable frame
         a_ldraw = f"{r['a']}.dat"
         b_ldraw = f"{r['b']}.dat"
         out.append({
