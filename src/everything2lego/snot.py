@@ -227,9 +227,23 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
         return {}
     cat_by_ldraw = {p.ldraw: p for p in full_catalog()}
     production = _production()
+    placements = list(placements)
     bboxes = [(p,) + _bbox_LDU(p) for p in placements]
+    # Model's centre of mass in LDU (used for the outward-facing check: a child
+    # whose world position is CLOSER to the COM than the anchor is heading
+    # inward, which usually hides the decoration and looks wrong).
+    if placements:
+        import numpy as _np
+        _cs = _np.array([[((2*p.x_stud + p.w_world - 1) * (_LDU_STUD // 2)),
+                            -(p.y_plate + p.part.height_units) * _LDU_PLATE,
+                            ((2*p.z_stud + p.d_world - 1) * (_LDU_STUD // 2))]
+                            for p in placements])
+        com = _cs.mean(axis=0)
+    else:
+        com = (0, 0, 0)
     out: dict = {}
-    rejected = 0
+    rejected_overlap = 0
+    rejected_inward = 0
     for p in placements:
         if p in out:
             continue
@@ -287,15 +301,58 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
         bx = parent_x + wdx
         by = parent_y + wdy
         bz = parent_z + wdz
+        # Full-bbox collision: B's own LDU bbox (from vocab) vs every other
+        # placement's bbox.  Rotate B's local extent via rot before translating.
+        if b_part is None:
+            # Unknown B footprint: fall back to the old lo-corner-point check.
+            b_cells = [(bx, by, bz, bx + 1, by + 1, bz + 1)]
+        else:
+            # In B's own frame: span (0..w*20, 0..h*8, 0..d*20) relative to B.lo.
+            b_w = b_part.footprint[0] * _LDU_STUD
+            b_d = b_part.footprint[1] * _LDU_STUD
+            b_h = b_part.height_units * _LDU_PLATE
+            # Transform B's 8 corners by (parent_mat @ parse_rot(rot)) and offset to world.
+            r_local = parse_rot(tmpl["rot"])
+            r_world = _mat_mul(m, r_local)
+            corners_local = [(0, 0, 0), (b_w, 0, 0), (0, b_h, 0), (b_w, b_h, 0),
+                              (0, 0, b_d), (b_w, 0, b_d), (0, b_h, b_d), (b_w, b_h, b_d)]
+            # B's lo (relative to B's origin, in B's own frame) = (-b_w/2, 0, -b_d/2);
+            # we already shifted to A.origin-to-B.origin, so world B.origin = (bx,by,bz).
+            # B.lo world = (bx,by,bz) + r_world @ (-b_w/2, 0, -b_d/2)
+            lo_local = (-b_w // 2, 0, -b_d // 2)
+            lo_shift = _mat_vec(r_world, lo_local)
+            world_corners = [(bx + lo_shift[0] + c[0], by + lo_shift[1] + c[1],
+                                bz + lo_shift[2] + c[2]) for c in
+                               [_mat_vec(r_world, cc) for cc in corners_local]]
+            xs = [c[0] for c in world_corners]
+            ys = [c[1] for c in world_corners]
+            zs = [c[2] for c in world_corners]
+            b_cells = [(min(xs), min(ys), min(zs), max(xs), max(ys), max(zs))]
         collide = False
-        for q, qx0, qx1, qy0, qy1, qz0, qz1 in bboxes:
-            if q is p:
-                continue
-            if qx0 < bx < qx1 and qy0 < by < qy1 and qz0 < bz < qz1:
-                collide = True
+        for bx0, by0, bz0, bx1, by1, bz1 in b_cells:
+            # inflate by 1 LDU inward so we don't reject touching-but-not-overlapping
+            margin = 2
+            for q, qx0, qx1, qy0, qy1, qz0, qz1 in bboxes:
+                if q is p:
+                    continue
+                if (bx0 + margin < qx1 and bx1 - margin > qx0
+                        and by0 + margin < qy1 and by1 - margin > qy0
+                        and bz0 + margin < qz1 and bz1 - margin > qz0):
+                    collide = True
+                    break
+            if collide:
                 break
         if collide:
-            rejected += 1
+            rejected_overlap += 1
+            continue
+        # Outward-facing check: dot((child - anchor), (anchor - COM)) must be
+        # positive — the child moves AWAY from the model's centre of mass.
+        a_to_com_x = parent_x - com[0]
+        a_to_com_y = parent_y - com[1]
+        a_to_com_z = parent_z - com[2]
+        outward = wdx * a_to_com_x + wdy * a_to_com_y + wdz * a_to_com_z
+        if outward < 0:
+            rejected_inward += 1
             continue
         anchor_code = pal[p.color_idx].code
         b_colours = production.get(tmpl["b_ldraw"])
