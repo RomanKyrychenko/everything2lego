@@ -273,13 +273,46 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
     else:
         occ = _np.zeros((1, 1, 1), dtype=bool)
         grid_origin = (0, 0, 0)
-    # Accent colour: the second-most-common colour across placements, used
-    # for decorations when B is produced in it.  Falls back to inherited.
+    # Accent colour: pick from the build's palette by MAX luminance contrast
+    # against the primary (most-common) colour.  Prevents the "warm model gets
+    # cool dark-gray accent" clash: a tan/brown primary pulls black or white
+    # as the accent instead of grey.  Weighted toward colours actually used
+    # in the build.
     from collections import Counter
     _col_counts = Counter(pp.color_idx for pp in placements)
-    _top = _col_counts.most_common(2)
-    accent_colour_idx = _top[1][0] if len(_top) >= 2 else (_top[0][0] if _top else 0)
+    _top = _col_counts.most_common()
+    def _lum(idx: int) -> float:
+        r, g, b = pal[idx].rgb
+        return 0.299 * r + 0.587 * g + 0.114 * b
+    def _warm(idx: int) -> int:
+        """+1 warm (red/orange/yellow/brown dominates), -1 cool
+        (blue/cyan dominates), 0 neutral (greyscale within 20 RGB units)."""
+        r, g, b = pal[idx].rgb
+        if abs(r - b) < 20 and abs(g - (r + b) / 2) < 20:
+            return 0
+        return 1 if r > b else -1
+    if _top:
+        primary_idx = _top[0][0]
+        primary_lum = _lum(primary_idx)
+        primary_warm = _warm(primary_idx)
+        # Prefer accent in the same hue family (warm/cool/neutral) as the
+        # primary; within that family, pick max luminance contrast.  Falls back
+        # to any-colour max-contrast if no same-family candidate exists.
+        used = [(idx, cnt) for idx, cnt in _top if cnt >= 2 and idx != primary_idx]
+        same_family = [(i, c) for i, c in used if _warm(i) == primary_warm]
+        pool = same_family if same_family else used
+        if pool:
+            accent_colour_idx = max(pool, key=lambda ic: abs(_lum(ic[0]) - primary_lum))[0]
+        else:
+            accent_colour_idx = primary_idx
+    else:
+        accent_colour_idx = 0
     accent_code = pal[accent_colour_idx].code
+    # Cap decorations per band so a long row doesn't turn into a mechanical
+    # repeat.  5 feels enough to read as "pattern" without feeling stamped.
+    BAND_CAP = 5
+    band_count: dict[tuple, int] = {}
+    anchor_band: dict = {}
     out: dict = {}
     rejected_overlap = 0
     rejected_inward = 0
@@ -354,11 +387,16 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
             continue
         # Try horizontal band first, then vertical, then unoriented (fallback).
         tmpl = None
+        hit_band_key = None
         for band_key, keyed_for_face in ((_h_key(p, face), True),
                                            (_v_key(p, face), True)):
             if band_key in band_template:
                 tmpl = band_template[band_key]
                 if tmpl is not None:
+                    if band_count.get(band_key, 0) >= BAND_CAP:
+                        tmpl = None
+                        continue
+                    hit_band_key = band_key
                     break
                 continue
             # First anchor on this band: rate gate + template pick
@@ -384,6 +422,7 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
                     break
             band_template[band_key] = picked
             tmpl = picked
+            hit_band_key = band_key
             break
         if tmpl is None:
             continue
@@ -398,6 +437,14 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
         parent_y = -(p.y_plate + p.part.height_units) * _LDU_PLATE
         parent_z = (2 * p.z_stud + p.d_world - 1) * (_LDU_STUD // 2)
         m = _YAW_MAT[(p.rotation_deg + p.part.yaw) % 360]
+        # io_ldraw subtracts the anchor's own origin shift (rotated by m) from
+        # its LDraw position; mirror that here so child offsets apply to the
+        # same world point io_ldraw places the anchor at.  Zero for most parts.
+        _ox, _oy, _oz = p.part.origin
+        if _ox or _oy or _oz:
+            parent_x -= m[0] * _ox + m[2] * _oz
+            parent_z -= m[6] * _ox + m[8] * _oz
+            parent_y -= _oy
         # A part at x_stud=0 has its world lo at x=-10 (half a stud left of the
         # footprint centre); io_ldraw puts the LDraw origin at (w-1)*10.  So
         # lo-to-origin = (w-1)*10 - (-10) = w*10.  Same for z.
@@ -532,6 +579,9 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
             models=int(tmpl.get("models", 0)),
         )
         out[p] = [child]
+        if hit_band_key is not None:
+            band_count[hit_band_key] = band_count.get(hit_band_key, 0) + 1
+            anchor_band[p] = hit_band_key
     # Gap-fill: for each decorated anchor, propagate its decoration to adjacent
     # same-row same-ldraw neighbours (within 1 stud ±x or ±z) that didn't pass
     # the main loop (e.g. _exterior_face picked a different side).  Keeps bands
@@ -540,6 +590,9 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
     newly: dict = {}
     for p, kids in list(out.items()):
         ch = kids[0]
+        bk = anchor_band.get(p)
+        if bk is not None and band_count.get(bk, 0) >= BAND_CAP:
+            continue                                           # band is full; don't gap-fill it
         for q in row_index.get((p.y_plate, p.part.ldraw), ()):
             if q is p or q in out or q in newly:
                 continue
@@ -550,6 +603,10 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
             if _exterior_face(q) is None:
                 continue
             newly[q] = [ch]
+            if bk is not None:
+                band_count[bk] = band_count.get(bk, 0) + 1
+                if band_count[bk] >= BAND_CAP:
+                    break
     out.update(newly)
     return out
 
