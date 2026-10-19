@@ -388,14 +388,12 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
     row_index: dict[tuple, list] = {}
     for pp in placements:
         row_index.setdefault((pp.y_plate, pp.part.ldraw), []).append(pp)
-    for p in placements:
-        tmpls = idx.get(p.part.ldraw)
-        if not tmpls:
-            continue
-        face = _exterior_face(p)
-        if face is None:
-            rejected_interior += 1
-            continue
+    def _try_decorate(p, face, tmpls):
+        """Attempt to decorate anchor `p` on `face`.  Returns (SnotChild,
+        band_key) on success or None.  All closures (band_template, band_count,
+        bboxes, occ, grid_origin, cat_by_ldraw, accent codes, pal, rate, rnd)
+        are captured from the enclosing scope."""
+        nonlocal rejected_overlap, rejected_inward, rejected_cells
         tmpl = None
         hit_band_key = None
         for band_key, keyed_for_face in ((_h_key(p, face), True),
@@ -435,7 +433,7 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
             hit_band_key = band_key
             break
         if tmpl is None:
-            continue
+            return None
         # Child's LDU lo-corner in world: parent position + yaw-rotated A-frame offset.
         # Correction: mining stored B.lo - A.lo (lo-corner-to-lo-corner in A's local
         # frame) but render_child needs B.origin - A.origin.  io_ldraw places the part
@@ -523,7 +521,7 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
                 break
         if collide:
             rejected_overlap += 1
-            continue
+            return None
         # Cell-level occupancy check (fix 3).  B's grid cell range in the
         # occupancy grid: compute from the world bbox we already have.
         if b_part is not None:
@@ -542,7 +540,7 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
             if gy0 < gy1 and gx0 < gx1 and gz0 < gz1:
                 if occ[gy0:gy1, gx0:gx1, gz0:gz1].any():
                     rejected_cells += 1
-                    continue
+                    return None
         # Exit-path check (fix 2): the stud/plate cell just outside the anchor,
         # in the dominant direction of the child's offset, should be EMPTY —
         # otherwise the "SNOT outward from COM but into another part" case.
@@ -565,7 +563,7 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
                 and 0 <= exit_gz < occ.shape[2]):
             if occ[exit_gy, exit_gx, exit_gz]:
                 rejected_inward += 1
-                continue
+                return None
         # Attachment check: every grid cell B occupies must have at least one
         # solid 6-face neighbour (any placement, including the anchor).  Catches
         # the "flying detail" case where B's far cell sits in open air with
@@ -593,7 +591,7 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
                     break
             if flying:
                 rejected_cells += 1
-                continue
+                return None
         anchor_code = pal[p.color_idx].code
         b_colours = production.get(tmpl["b_ldraw"])
         # Alternate between the two accents by anchor y_plate parity so bands
@@ -620,10 +618,26 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
             dz_LDU=dzs,
             models=int(tmpl.get("models", 0)),
         )
-        out[p] = [child]
-        if hit_band_key is not None:
-            band_count[hit_band_key] = band_count.get(hit_band_key, 0) + 1
-            anchor_band[p] = hit_band_key
+        return (child, hit_band_key)
+
+    for p in placements:
+        tmpls = idx.get(p.part.ldraw)
+        if not tmpls:
+            continue
+        faces = _exterior_faces(p)
+        if not faces:
+            rejected_interior += 1
+            continue
+        for face in faces:
+            result = _try_decorate(p, face, tmpls)
+            if result is None:
+                continue
+            child, hit_band_key = result
+            out.setdefault(p, []).append(child)
+            if hit_band_key is not None:
+                band_count[hit_band_key] = band_count.get(hit_band_key, 0) + 1
+                anchor_band.setdefault(p, hit_band_key)
+
     # Gap-fill: for each decorated anchor, propagate its decoration to adjacent
     # same-row same-ldraw neighbours (within 1 stud ±x or ±z) that didn't pass
     # the main loop (e.g. _exterior_face picked a different side).  Keeps bands
