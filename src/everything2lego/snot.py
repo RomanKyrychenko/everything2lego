@@ -127,6 +127,11 @@ def load_pairs() -> tuple[dict, ...]:
             continue                                                   # primitive or non-catalogue
         if cat_by_ldraw and not _is_decoration(cat_by_ldraw.get(b_ldraw)):
             continue                                                   # B isn't a small decoration shape
+        # Tight pose: B near A.  Templates with large horizontal / vertical
+        # offsets place B far from the anchor and look like floating debris.
+        # Keep only (|dx_s|, |dz_s|) ≤ 2 studs and dy_s ∈ [-1, 1] plates.
+        if abs(int(r["dx"])) > 2 or abs(int(r["dz"])) > 2 or abs(int(r["dy"])) > 1:
+            continue
         out.append({
             "a_ldraw": a_ldraw,
             "b_ldraw": b_ldraw,
@@ -272,6 +277,30 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
     rejected_overlap = 0
     rejected_inward = 0
     rejected_cells = 0
+    rejected_interior = 0
+
+    def _is_exterior_wall_anchor(p) -> bool:
+        """Anchor must have at least one empty ±x or ±z neighbour cell.  Keeps
+        side-wall anchors; rejects anchors buried inside the structure, and
+        the roof-top case where only ±y is open (would spawn floating-sky SNOT)."""
+        ys = p.y_plate - grid_origin[0]
+        xs = p.x_stud - grid_origin[1]
+        zs = p.z_stud - grid_origin[2]
+        y_mid = ys + max(0, p.part.height_units // 2)
+        # scan sides of the anchor's footprint for a neighbouring empty cell
+        for dx in (-1, p.w_world):
+            x = xs + dx
+            if 0 <= x < occ.shape[1]:
+                z0 = max(0, zs); z1 = min(occ.shape[2], zs + p.d_world)
+                if z0 < z1 and not occ[y_mid, x, z0:z1].all():
+                    return True
+        for dz in (-1, p.d_world):
+            z = zs + dz
+            if 0 <= z < occ.shape[2]:
+                x0 = max(0, xs); x1 = min(occ.shape[1], xs + p.w_world)
+                if x0 < x1 and not occ[y_mid, x0:x1, z].all():
+                    return True
+        return False
     for p in placements:
         if p in out:
             continue
@@ -279,6 +308,9 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
         if not tmpls:
             continue
         if rnd.random() >= rate:
+            continue
+        if not _is_exterior_wall_anchor(p):
+            rejected_interior += 1
             continue
         total = 0
         for t in tmpls:
