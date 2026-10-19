@@ -176,6 +176,8 @@ def main() -> None:
     ap.add_argument("--tile-boost", type=float, default=0.0, help="log-bonus on every tile option at proposal time; real sets use 15-23%% tiles vs our 11%%, +1 to +2 is a reasonable range")
     ap.add_argument("--snot-boost", type=float, default=0.0, help="log-bonus on every SNOT option (brickS/plateS/tileS) at proposal time; real sets use 17-32%% SNOT vs our ~0%%")
     ap.add_argument("--engine", default="auto", choices=["auto", "python", "native"], help="sampler engine (python = SNOT templates + hinges via snot_insert / hinge_swap; native = Rust fast path, no SNOT yet)")
+    ap.add_argument("--snot-decorate", action=argparse.BooleanOptionalAction, default=True, help="after sampling, add SNOT children to anchors (snot.decorate); engine-agnostic, so native builds also get real SNOT")
+    ap.add_argument("--snot-rate", type=float, default=0.2, help="probability per eligible anchor to get a SNOT child; real sets run 17-32%% SNOT fraction")
     ap.add_argument("--cnn-prior", default=None, help="path to a per-option bias .npy from tools/cnn_prior.py (whole-target CNN score, added to each option's logprior)")
     ap.add_argument("--init-from-cnn", default=None, help="path to a cnn_decoder.pt checkpoint: run its greedy decode, then feed those placements as init to the sampler (composition: fast CNN seeds the Metropolis walk)")
     ap.add_argument("--init-prefer-length", type=float, default=1.0, help="--prefer-length passed to the CNN greedy seed; 1.0 is the sched-sampling champion")
@@ -242,8 +244,15 @@ def main() -> None:
         from everything2lego.subassemblies import split_by_y_bands
         subs = split_by_y_bands(list(ps), target_size=a.subassemblies)
         info["subassemblies"] = [len(g) for g in subs]
-    deco = info.pop("_snot_decorations", None)
-    write_ldr(ps, out / "model.ldr", subassemblies=subs, decorations=deco)
+    deco = info.pop("_snot_decorations", None) or {}
+    if a.snot_decorate:
+        from everything2lego import snot as _snot
+        extra = _snot.decorate(ps, seed=a.seed, rate=a.snot_rate)
+        for p, kids in extra.items():
+            if p not in deco:
+                deco[p] = list(kids)
+        info["snot_decorations"] = sum(len(v) for v in deco.values())
+    write_ldr(ps, out / "model.ldr", subassemblies=subs, decorations=deco or None)
     (out / "info.json").write_text(json.dumps({k: v for k, v in info.items()}, indent=1, default=float))
     print(json.dumps({k: v for k, v in info.items() if k != "history"}, default=float))
     subprocess.run([sys.executable, str(ROOT / "tools/render_build.py"), str(out / "model.ldr"),

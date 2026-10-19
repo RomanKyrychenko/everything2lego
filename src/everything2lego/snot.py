@@ -158,6 +158,59 @@ def _mat_vec(m: tuple[int, ...], v: tuple[int, int, int]) -> tuple[int, int, int
             m[6]*v[0] + m[7]*v[1] + m[8]*v[2])
 
 
+def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
+    """Post-process a list of Placements into a decorations dict (keyed
+    by Placement, value is a list of SnotChild).  Each matching anchor
+    gets a child with probability `rate`, drawn by model-count weight.
+    `rate=0.2` targets real-set SNOT fraction (17-32% per OMR audit).
+    Doesn't need sampler state — works after any engine.
+
+    Returns {} when snot_adj.json is absent / lacks the v2 `rot` field.
+    Children inherit the anchor's colour (b_colour = palette()[anchor.color_idx].code)
+    unless and until a vocab-driven colour match is added."""
+    import random
+    from .colors import palette
+    pal = palette()
+    rnd = random.Random(seed)
+    idx = by_a_ldraw()
+    if not idx:
+        return {}
+    out: dict = {}
+    for p in placements:
+        if p in out:
+            continue
+        tmpls = idx.get(p.part.ldraw)
+        if not tmpls:
+            continue
+        if rnd.random() >= rate:
+            continue
+        total = 0
+        for t in tmpls:
+            total += int(t.get("models", 1))
+        if total <= 0:
+            continue
+        r = rnd.random() * total
+        acc = 0
+        tmpl = tmpls[-1]
+        for t in tmpls:
+            acc += int(t.get("models", 1))
+            if r <= acc:
+                tmpl = t
+                break
+        anchor_code = pal[p.color_idx].code
+        child = SnotChild(
+            b_ldraw=tmpl["b_ldraw"],
+            b_colour=anchor_code,
+            rot=tmpl["rot"],
+            dy_LDU=int(tmpl["dy_s"]) * _LDU_PLATE,
+            dx_LDU=int(tmpl["dx_s"]) * _LDU_STUD,
+            dz_LDU=int(tmpl["dz_s"]) * _LDU_STUD,
+            models=int(tmpl.get("models", 0)),
+        )
+        out[p] = [child]
+    return out
+
+
 def render_child(parent_mat: tuple[int, ...], parent_x: int, parent_y: int, parent_z: int,
                  child, child_part_origin: tuple[float, float, float] = (0.0, 0.0, 0.0)) -> str:
     """One LDraw type-1 line for a SnotChild attached to a parent at
