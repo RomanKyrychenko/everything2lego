@@ -96,9 +96,24 @@ def load_pairs() -> tuple[dict, ...]:
     # Lazy catalogue load so this module can import without bricks' deps.
     try:
         from .bricks import full_catalog
-        catalogue_ldraws = frozenset(p.ldraw for p in full_catalog())
+        cat_by_ldraw = {p.ldraw: p for p in full_catalog()}
     except Exception:
-        catalogue_ldraws = frozenset()
+        cat_by_ldraw = {}
+    # Decoration allowlist for B: small shapes only (plate / tile / slope /
+    # round, footprint area ≤ 4, height ≤ 1).  Keeps real wall-decoration
+    # patterns (1x1 round, 1x2 plate sideways, 1x1 slope, 2x2 tile) and
+    # drops minifig parts, bars, 1xN plates, hinge mechanisms etc. that
+    # produce the "antenna sticking out of the top" look.
+    _DECOR_SHAPES = frozenset(("plate", "tile", "slope", "slope_inv", "round"))
+
+    def _is_decoration(part) -> bool:
+        if part is None:
+            return False
+        if part.shape not in _DECOR_SHAPES:
+            return False
+        w, d = part.footprint
+        return w * d <= 4 and part.height_units <= 1
+
     out = []
     for r in rows:
         rot = r.get("rot")
@@ -108,8 +123,10 @@ def load_pairs() -> tuple[dict, ...]:
             continue                                                   # A sideways: pose not in sampler-placeable frame
         a_ldraw = f"{r['a']}.dat"
         b_ldraw = f"{r['b']}.dat"
-        if catalogue_ldraws and (a_ldraw not in catalogue_ldraws or b_ldraw not in catalogue_ldraws):
-            continue                                                   # primitive or non-catalogue part — would render as a plain block
+        if cat_by_ldraw and (a_ldraw not in cat_by_ldraw or b_ldraw not in cat_by_ldraw):
+            continue                                                   # primitive or non-catalogue
+        if cat_by_ldraw and not _is_decoration(cat_by_ldraw.get(b_ldraw)):
+            continue                                                   # B isn't a small decoration shape
         out.append({
             "a_ldraw": a_ldraw,
             "b_ldraw": b_ldraw,
@@ -218,6 +235,7 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
     the common "SNOT fell inside a wall" case; doesn't guarantee full-
     bbox non-overlap."""
     import random
+    import numpy as _np
     from .colors import palette
     from .bricks import full_catalog, _production
     pal = palette()
@@ -229,21 +247,31 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
     production = _production()
     placements = list(placements)
     bboxes = [(p,) + _bbox_LDU(p) for p in placements]
-    # Model's centre of mass in LDU (used for the outward-facing check: a child
-    # whose world position is CLOSER to the COM than the anchor is heading
-    # inward, which usually hides the decoration and looks wrong).
+    # Occupancy grid at stud/plate resolution.  Used to (a) check all of B's
+    # cells are empty before placing (fix 3), (b) check the anchor-adjacent
+    # cell in the child's direction is empty — the "exit path" is clear (fix 2).
     if placements:
-        import numpy as _np
-        _cs = _np.array([[((2*p.x_stud + p.w_world - 1) * (_LDU_STUD // 2)),
-                            -(p.y_plate + p.part.height_units) * _LDU_PLATE,
-                            ((2*p.z_stud + p.d_world - 1) * (_LDU_STUD // 2))]
-                            for p in placements])
-        com = _cs.mean(axis=0)
+        y_lo = min(p.y_plate for p in placements)
+        y_hi = max(p.y_plate + p.part.height_units for p in placements)
+        x_lo = min(p.x_stud for p in placements)
+        x_hi = max(p.x_stud + p.w_world for p in placements)
+        z_lo = min(p.z_stud for p in placements)
+        z_hi = max(p.z_stud + p.d_world for p in placements)
+        H, X, Z = y_hi - y_lo + 1, x_hi - x_lo + 1, z_hi - z_lo + 1
+        occ = _np.zeros((H, X, Z), dtype=bool)
+        for p in placements:
+            ys = p.y_plate - y_lo
+            xs = p.x_stud - x_lo
+            zs = p.z_stud - z_lo
+            occ[ys:ys + p.part.height_units, xs:xs + p.w_world, zs:zs + p.d_world] = True
+        grid_origin = (y_lo, x_lo, z_lo)
     else:
-        com = (0, 0, 0)
+        occ = _np.zeros((1, 1, 1), dtype=bool)
+        grid_origin = (0, 0, 0)
     out: dict = {}
     rejected_overlap = 0
     rejected_inward = 0
+    rejected_cells = 0
     for p in placements:
         if p in out:
             continue
@@ -345,15 +373,48 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
         if collide:
             rejected_overlap += 1
             continue
-        # Outward-facing check: dot((child - anchor), (anchor - COM)) must be
-        # positive — the child moves AWAY from the model's centre of mass.
-        a_to_com_x = parent_x - com[0]
-        a_to_com_y = parent_y - com[1]
-        a_to_com_z = parent_z - com[2]
-        outward = wdx * a_to_com_x + wdy * a_to_com_y + wdz * a_to_com_z
-        if outward < 0:
-            rejected_inward += 1
-            continue
+        # Cell-level occupancy check (fix 3).  B's grid cell range in the
+        # occupancy grid: compute from the world bbox we already have.
+        if b_part is not None:
+            # World bbox we already computed above in `b_cells`
+            bx0, by0, bz0, bx1, by1, bz1 = b_cells[0]
+            gy0 = int(round(-by1 / _LDU_PLATE)) - grid_origin[0]
+            gy1 = int(round(-by0 / _LDU_PLATE)) - grid_origin[0]
+            gx0 = int(round(bx0 / _LDU_STUD)) - grid_origin[1]
+            gx1 = int(round(bx1 / _LDU_STUD)) - grid_origin[1]
+            gz0 = int(round(bz0 / _LDU_STUD)) - grid_origin[2]
+            gz1 = int(round(bz1 / _LDU_STUD)) - grid_origin[2]
+            gy0 = max(0, gy0); gx0 = max(0, gx0); gz0 = max(0, gz0)
+            gy1 = min(occ.shape[0], max(gy1, gy0 + 1))
+            gx1 = min(occ.shape[1], max(gx1, gx0 + 1))
+            gz1 = min(occ.shape[2], max(gz1, gz0 + 1))
+            if gy0 < gy1 and gx0 < gx1 and gz0 < gz1:
+                if occ[gy0:gy1, gx0:gx1, gz0:gz1].any():
+                    rejected_cells += 1
+                    continue
+        # Exit-path check (fix 2): the stud/plate cell just outside the anchor,
+        # in the dominant direction of the child's offset, should be EMPTY —
+        # otherwise the "SNOT outward from COM but into another part" case.
+        a_gy = p.y_plate - grid_origin[0] + p.part.height_units // 2
+        a_gx = p.x_stud - grid_origin[1] + p.w_world // 2
+        a_gz = p.z_stud - grid_origin[2] + p.d_world // 2
+        step = (0, 0, 0)
+        aw = abs(wdx) + abs(wdy) + abs(wdz)
+        if aw > 0:
+            if abs(wdx) >= abs(wdy) and abs(wdx) >= abs(wdz):
+                step = (0, 1 if wdx > 0 else -1, 0)
+            elif abs(wdz) >= abs(wdy):
+                step = (0, 0, 1 if wdz > 0 else -1)
+            else:
+                step = (-1 if wdy > 0 else 1, 0, 0)             # LDraw y is DOWN
+        exit_gy = a_gy + step[0]
+        exit_gx = a_gx + step[1]
+        exit_gz = a_gz + step[2]
+        if (0 <= exit_gy < occ.shape[0] and 0 <= exit_gx < occ.shape[1]
+                and 0 <= exit_gz < occ.shape[2]):
+            if occ[exit_gy, exit_gx, exit_gz]:
+                rejected_inward += 1
+                continue
         anchor_code = pal[p.color_idx].code
         b_colours = production.get(tmpl["b_ldraw"])
         if b_colours and anchor_code not in b_colours:
