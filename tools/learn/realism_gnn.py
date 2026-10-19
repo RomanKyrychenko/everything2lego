@@ -40,6 +40,74 @@ NODE_DIM = len(CATEGORIES) + 5 + (len(COLOUR_BINS) + 1) + 4         # cat + size
 EDGE_DIM = 3 + 3                                                      # direction one-hot + normalized offset
 
 
+def _augment_graph(graph, rng: random.Random):
+    """Return a copy of (nodes, edge_index, edge_attr) with on-the-fly
+    augmentation applied: (a) subgraph crop (keep contiguous 60-100%
+    of nodes via BFS from a random seed), (b) colour permutation
+    (swap two used colour columns).  Yaw rotation would require
+    re-encoding positions in edge_attr; skipped — the GNN is already
+    permutation-invariant over edges.  Returns None if the crop
+    leaves too few nodes."""
+    nodes, edge_index, edge_attr = graph
+    N = nodes.shape[0]
+    # (a) subgraph crop
+    keep_frac = rng.uniform(0.6, 1.0)
+    target_N = max(10, int(N * keep_frac))
+    if target_N < N:
+        # BFS from random seed over the undirected adjacency
+        adj = [[] for _ in range(N)]
+        for k in range(edge_index.shape[1]):
+            s, d = int(edge_index[0, k]), int(edge_index[1, k])
+            adj[s].append(d)
+        seed = rng.randrange(N)
+        kept = [seed]
+        kept_set = {seed}
+        frontier = [seed]
+        while len(kept) < target_N and frontier:
+            next_frontier = []
+            for u in frontier:
+                for v in adj[u]:
+                    if v not in kept_set:
+                        kept_set.add(v)
+                        kept.append(v)
+                        next_frontier.append(v)
+                        if len(kept) >= target_N:
+                            break
+                if len(kept) >= target_N:
+                    break
+            frontier = next_frontier
+        if len(kept) < 10:
+            return None
+        remap = {old: new for new, old in enumerate(kept)}
+        new_nodes = nodes[np.array(kept)].copy()
+        new_edges = []
+        new_attrs = []
+        for k in range(edge_index.shape[1]):
+            s, d = int(edge_index[0, k]), int(edge_index[1, k])
+            if s in kept_set and d in kept_set:
+                new_edges.append((remap[s], remap[d]))
+                new_attrs.append(edge_attr[k])
+        if not new_edges:
+            return None
+        new_edge_index = np.array(new_edges, dtype=np.int64).T
+        new_edge_attr = np.array(new_attrs, dtype=np.float32)
+    else:
+        new_nodes = nodes.copy()
+        new_edge_index = edge_index.copy()
+        new_edge_attr = edge_attr.copy()
+    # (b) colour permutation: swap two used colour columns in the node features
+    cat_bins = len(CATEGORIES)
+    col_off = cat_bins + 5
+    col_bins = len(COLOUR_BINS) + 1
+    used_colours = [i for i in range(col_bins) if new_nodes[:, col_off + i].any()]
+    if len(used_colours) >= 2:
+        a, b = rng.sample(used_colours, 2)
+        tmp = new_nodes[:, col_off + a].copy()
+        new_nodes[:, col_off + a] = new_nodes[:, col_off + b]
+        new_nodes[:, col_off + b] = tmp
+    return new_nodes, new_edge_index, new_edge_attr
+
+
 def build_graph(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
     """Returns (node_features N×NODE_DIM, edge_index 2×E, edge_attr E×EDGE_DIM)
     or None on parse failure.  Edges are undirected (both directions)."""
@@ -102,21 +170,43 @@ def build_graph(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
 
 def cmd_build(a) -> None:
     OUT.mkdir(parents=True, exist_ok=True)
-    bids = _building_omr_ids()
-    omr_all = [f for f in sorted(OMR.glob("*.mpd")) if f.stem.split("_")[0] in bids]
+    # Broaden "real" beyond kind=building: OMR has 353 building files but 1820
+    # total; richer "real" training data stabilises the classifier.  Exclude
+    # kind=parts (literal part catalogues, not builds).
+    import csv
+    exclude_ids: set[str] = set()
+    try:
+        with (DATA / "analysis" / "set_kinds.csv").open() as f:
+            for row in csv.DictReader(f):
+                if row.get("kind") == "parts":
+                    exclude_ids.add(row["id"])
+    except Exception:
+        pass
+    omr_all = [f for f in sorted(OMR.glob("*.mpd"))
+               if f.stem.split("_")[0] not in exclude_ids]
     random.Random(a.seed).shuffle(omr_all)
     omr = omr_all[:a.n_real]
-    omr_pool = [f for f in omr_all if f not in set(omr)]
+    # ours_from_omr uses the same OMR pool — the sampler output is a NEW
+    # build with ours-style brick choices, not a copy of the real set, so
+    # training on both the real set and the sampler's output isn't a leak.
+    omr_pool = omr_all if omr_all else [f for f in omr_all if f not in set(omr)]
 
     bucket: dict[str, list] = {"real": [], "ours": [], "deg": [], "ours_omr": []}
 
     # Real + collect parts for degradation
     sample_parts = []
-    print(f"real: parsing {len(omr)} OMR building sets", flush=True)
+    aug_rng = random.Random(a.seed + 100)
+    print(f"real: parsing {len(omr)} OMR models (+ {a.n_aug} augmentations each)", flush=True)
     for i, f in enumerate(omr):
         g = build_graph(f)
         if g is not None:
             bucket["real"].append(g)
+            # Augmentations: each real gets N extra graphs via subgraph crop +
+            # colour perm.  Expands effective training data without new builds.
+            for _ in range(a.n_aug):
+                aug = _augment_graph(g, aug_rng)
+                if aug is not None:
+                    bucket["real"].append(aug)
         if len(sample_parts) < a.n_degraded:
             from ldraw_read import flatten
             try:
@@ -124,7 +214,7 @@ def cmd_build(a) -> None:
             except Exception:
                 pass
         if (i + 1) % 50 == 0:
-            print(f"  {i+1}/{len(omr)}", flush=True)
+            print(f"  {i+1}/{len(omr)}  real so far: {len(bucket['real'])}", flush=True)
     print(f"real: {len(bucket['real'])}", flush=True)
 
     # Ours
@@ -233,22 +323,33 @@ def cmd_train(a) -> None:
             return torch.relu(self.upd(torch.cat([x, agg], dim=-1)))
 
     class GNN(nn.Module):
-        def __init__(self, hidden=32):
+        def __init__(self, hidden=32, n_layers=2):
             super().__init__()
             self.embed = nn.Linear(NODE_DIM, hidden)
-            self.mp1 = MP(hidden)
-            self.mp2 = MP(hidden)
-            self.head = nn.Sequential(nn.Linear(hidden, 16), nn.ReLU(), nn.Linear(16, 2))
+            self.layers = nn.ModuleList([MP(hidden) for _ in range(n_layers)])
+            self.head = nn.Sequential(nn.Linear(hidden, 32), nn.ReLU(),
+                                       nn.Linear(32, 16), nn.ReLU(), nn.Linear(16, 2))
 
         def forward(self, nodes, ei, ea):
             x = torch.relu(self.embed(nodes))
-            x = self.mp1(x, ei, ea)
-            x = self.mp2(x, ei, ea)
+            for layer in self.layers:
+                x = layer(x, ei, ea)
             graph = x.mean(dim=0)
             return self.head(graph).unsqueeze(0)                # (1, 2)
 
-    net = GNN(hidden=a.hidden).to(device)
+    net = GNN(hidden=a.hidden, n_layers=a.layers).to(device)
     opt = torch.optim.Adam(net.parameters(), lr=a.lr)
+    # Class-weighted cross-entropy to compensate class imbalance.  With
+    # augmentation enabled, real can outnumber ours+deg+ours_omr by 10×, so an
+    # unweighted classifier learns a prior toward "real" and never-say-"ours"-
+    # confidently on single examples.  Weights = inverse frequency.
+    n_pos = sum(1 for _, y, _ in train if y == 1)
+    n_neg = len(train) - n_pos
+    total = max(1, len(train))
+    w_pos = total / (2 * max(1, n_pos))
+    w_neg = total / (2 * max(1, n_neg))
+    class_w = torch.tensor([w_neg, w_pos], device=device, dtype=torch.float32)
+    print(f"class weights: not-real={w_neg:.2f}  real={w_pos:.2f}  (counts {n_neg}/{n_pos})", flush=True)
     best = -1.0
     for ep in range(1, a.epochs + 1):
         net.train()
@@ -257,12 +358,14 @@ def cmd_train(a) -> None:
         tr_hit = tr_n = tr_loss = 0.0
         for ix in order:
             (nodes, ei, ea), y, _ = train[ix]
+            if ei.shape[1] == 0 or nodes.shape[0] == 0:
+                continue                                     # MPS can't handle empty tensors
             nodes_t = torch.tensor(nodes, device=device)
             ei_t = torch.tensor(ei, device=device, dtype=torch.long)
             ea_t = torch.tensor(ea, device=device)
             y_t = torch.tensor([y], device=device, dtype=torch.long)
             logits = net(nodes_t, ei_t, ea_t)
-            loss = F.cross_entropy(logits, y_t)
+            loss = F.cross_entropy(logits, y_t, weight=class_w)
             opt.zero_grad(); loss.backward(); opt.step()
             tr_loss += loss.item(); tr_n += 1
             tr_hit += int(logits.argmax(-1).item() == y)
@@ -271,6 +374,8 @@ def cmd_train(a) -> None:
         per: dict = {}
         with torch.no_grad():
             for (nodes, ei, ea), y, s in val:
+                if ei.shape[1] == 0 or nodes.shape[0] == 0:
+                    continue
                 nodes_t = torch.tensor(nodes, device=device)
                 ei_t = torch.tensor(ei, device=device, dtype=torch.long)
                 ea_t = torch.tensor(ea, device=device)
@@ -281,13 +386,35 @@ def cmd_train(a) -> None:
                 per[s][0] += int(pred == y)
         va = vl_hit / max(1, len(val))
         tag = "  ".join(f"{k}={h/max(1,t):.3f}" for k, (h, t) in per.items())
-        print(f"ep {ep:02d}  tr loss {tr_loss/max(1,tr_n):.4f} acc {tr_hit/max(1,tr_n):.3f}  val acc {va:.3f}  [{tag}]", flush=True)
-        if va > best:
-            best = va
+        # Confusion for F1: positive = real (class 1).
+        tp = fp = fn = tn = 0
+        with torch.no_grad():
+            for (nodes, ei, ea), y, s in val:
+                if ei.shape[1] == 0 or nodes.shape[0] == 0:
+                    continue
+                nodes_t = torch.tensor(nodes, device=device)
+                ei_t = torch.tensor(ei, device=device, dtype=torch.long)
+                ea_t = torch.tensor(ea, device=device)
+                pred = int(net(nodes_t, ei_t, ea_t).argmax(-1).item())
+                if y == 1 and pred == 1: tp += 1
+                elif y == 0 and pred == 1: fp += 1
+                elif y == 1 and pred == 0: fn += 1
+                else: tn += 1
+        prec_pos = tp / max(1, tp + fp)
+        rec_pos = tp / max(1, tp + fn)
+        f1_pos = 2 * prec_pos * rec_pos / max(1e-9, prec_pos + rec_pos)
+        prec_neg = tn / max(1, tn + fn)
+        rec_neg = tn / max(1, tn + fp)
+        f1_neg = 2 * prec_neg * rec_neg / max(1e-9, prec_neg + rec_neg)
+        f1_macro = (f1_pos + f1_neg) / 2
+        print(f"ep {ep:02d}  tr loss {tr_loss/max(1,tr_n):.4f} acc {tr_hit/max(1,tr_n):.3f}  "
+              f"val acc {va:.3f}  F1_real={f1_pos:.3f} F1_notreal={f1_neg:.3f} F1_macro={f1_macro:.3f}  [{tag}]", flush=True)
+        if f1_macro > best:
+            best = f1_macro
             import torch as _t
-            _t.save({"state_dict": net.state_dict(), "val_acc": va, "epoch": ep,
-                      "hidden": a.hidden}, MODEL_PT)
-    print(f"best val acc {best:.3f}  saved -> {MODEL_PT}", flush=True)
+            _t.save({"state_dict": net.state_dict(), "val_acc": va, "f1_macro": f1_macro,
+                      "epoch": ep, "hidden": a.hidden, "layers": a.layers}, MODEL_PT)
+    print(f"best F1_macro {best:.3f}  saved -> {MODEL_PT}", flush=True)
 
 
 def cmd_score(a) -> None:
@@ -300,6 +427,7 @@ def cmd_score(a) -> None:
     nodes, ei, ea = g
     ckpt = torch.load(MODEL_PT, map_location="cpu", weights_only=True)
     hidden = ckpt["hidden"]
+    n_layers = ckpt.get("layers", 2)
 
     class MP(nn.Module):
         def __init__(self, dim: int):
@@ -320,14 +448,14 @@ def cmd_score(a) -> None:
         def __init__(self):
             super().__init__()
             self.embed = nn.Linear(NODE_DIM, hidden)
-            self.mp1 = MP(hidden)
-            self.mp2 = MP(hidden)
-            self.head = nn.Sequential(nn.Linear(hidden, 16), nn.ReLU(), nn.Linear(16, 2))
+            self.layers = nn.ModuleList([MP(hidden) for _ in range(n_layers)])
+            self.head = nn.Sequential(nn.Linear(hidden, 32), nn.ReLU(),
+                                       nn.Linear(32, 16), nn.ReLU(), nn.Linear(16, 2))
 
         def forward(self, nodes, ei, ea):
             x = torch.relu(self.embed(nodes))
-            x = self.mp1(x, ei, ea)
-            x = self.mp2(x, ei, ea)
+            for layer in self.layers:
+                x = layer(x, ei, ea)
             return self.head(x.mean(dim=0)).unsqueeze(0)
 
     net = GNN(); net.load_state_dict(ckpt["state_dict"]); net.eval()
@@ -345,6 +473,7 @@ def main() -> None:
     b.add_argument("--n-ours", type=int, default=30)
     b.add_argument("--n-degraded", type=int, default=100)
     b.add_argument("--n-ours-from-omr", type=int, default=30)
+    b.add_argument("--n-aug", type=int, default=3, help="N augmented copies per real OMR (subgraph crop + colour swap)")
     b.add_argument("--iters", type=int, default=10000)
     b.add_argument("--seed", type=int, default=0)
     b.set_defaults(func=cmd_build)
@@ -352,6 +481,7 @@ def main() -> None:
     t.add_argument("--epochs", type=int, default=40)
     t.add_argument("--lr", type=float, default=5e-4)
     t.add_argument("--hidden", type=int, default=32)
+    t.add_argument("--layers", type=int, default=2, help="number of message-passing layers")
     t.add_argument("--val-frac", type=float, default=0.2)
     t.add_argument("--seed", type=int, default=0)
     t.add_argument("--device", default="cpu")
