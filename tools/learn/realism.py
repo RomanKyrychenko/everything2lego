@@ -172,14 +172,44 @@ def _pair_histogram(parts, bbox_cache) -> np.ndarray:
     items = _parts_with_grid(parts, bbox_cache)
     H = np.zeros((len(CATEGORIES), len(CATEGORIES), 3), dtype=np.float32)
     if len(items) > 2500:
-        items = items[:2500]                                  # cap for very large models
+        items = items[:2500]
     for i, j, d in _neighbour_pairs(items):
         ca = _category(items[i][0])
         cb = _category(items[j][0])
-        # canonical (min, max) to keep symmetric; direction kept as-is
         if ca > cb:
             ca, cb = cb, ca
         H[ca, cb, _DIR_IX[d]] += 1
+    total = H.sum()
+    if total > 0:
+        H /= total
+    return H.ravel()
+
+
+def _walk3_histogram(parts, bbox_cache) -> np.ndarray:
+    """3-walk histogram over adjacency: for each ordered a-b-c with (a,b) and
+    (b,c) adjacent and a != c, bin (cat_a, cat_b, cat_c).  7×7×7 = 343 bins.
+    Captures structural coherence that pair histogram misses: random position
+    shuffle changes the WALK distribution even when pair counts are preserved."""
+    items = _parts_with_grid(parts, bbox_cache)
+    if len(items) > 2000:
+        items = items[:2000]
+    # adjacency list
+    adj: dict[int, list[int]] = {}
+    for i, j, _ in _neighbour_pairs(items):
+        adj.setdefault(i, []).append(j)
+        adj.setdefault(j, []).append(i)
+    H = np.zeros((len(CATEGORIES), len(CATEGORIES), len(CATEGORIES)), dtype=np.float32)
+    cat_of = [_category(it[0]) for it in items]
+    for b, bns in adj.items():
+        if len(bns) < 2:
+            continue
+        cb = cat_of[b]
+        for a in bns:
+            ca = cat_of[a]
+            for c in bns:
+                if c == a:
+                    continue
+                H[ca, cb, cat_of[c]] += 1
     total = H.sum()
     if total > 0:
         H /= total
@@ -234,10 +264,13 @@ def _features_from_parts(parts, bbox_cache) -> np.ndarray:
         n / (volume / 1e6),
     ], dtype=np.float32)
     pairs = _pair_histogram(parts, bbox_cache)
-    return np.concatenate([cat, col, sz, stats, pairs])
+    walks3 = _walk3_histogram(parts, bbox_cache)
+    return np.concatenate([cat, col, sz, stats, pairs, walks3])
 
 
-FEATURE_LEN = len(CATEGORIES) + len(COLOUR_BINS) + 1 + 5 + 9 + len(CATEGORIES) * len(CATEGORIES) * 3
+FEATURE_LEN = (len(CATEGORIES) + len(COLOUR_BINS) + 1 + 5 + 9
+                + len(CATEGORIES) * len(CATEGORIES) * 3
+                + len(CATEGORIES) * len(CATEGORIES) * len(CATEGORIES))
 
 
 def _degrade(parts, kind: str, rng: random.Random):
