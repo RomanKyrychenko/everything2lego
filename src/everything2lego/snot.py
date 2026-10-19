@@ -273,6 +273,13 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
     else:
         occ = _np.zeros((1, 1, 1), dtype=bool)
         grid_origin = (0, 0, 0)
+    # Accent colour: the second-most-common colour across placements, used
+    # for decorations when B is produced in it.  Falls back to inherited.
+    from collections import Counter
+    _col_counts = Counter(pp.color_idx for pp in placements)
+    _top = _col_counts.most_common(2)
+    accent_colour_idx = _top[1][0] if len(_top) >= 2 else (_top[0][0] if _top else 0)
+    accent_code = pal[accent_colour_idx].code
     out: dict = {}
     rejected_overlap = 0
     rejected_inward = 0
@@ -309,11 +316,32 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
             return "+x" if dx > 0 else "-x"
         return "+z" if dz > 0 else "-z"
 
-    # Band cache: (face, y_plate, anchor_ldraw) -> chosen template.  First
+    # Band cache: (band_key) -> chosen template or None (skipped).  First
     # eligible anchor on a band picks the template; later anchors on the same
-    # band reuse it, so contiguous same-height anchors on the same face get a
-    # repeating decoration like real sets have.
+    # band reuse it, so contiguous same-face same-ldraw anchors get a repeating
+    # decoration like real sets have.  Two band kinds:
+    #   horizontal: ("h", face, y_plate, ldraw) — same row
+    #   vertical:   ("v", face, orth_coord, ldraw) — same column
+    # Horizontal tried first; vertical if horizontal has no face-matching
+    # template.
     band_template: dict[tuple, dict] = {}
+
+    def _h_key(p, face):
+        return ("h", face, p.y_plate, p.part.ldraw)
+
+    def _v_key(p, face):
+        # orth coord: for ±x face, the vertical column runs along z;
+        # for ±z face, along x.  Key by the perpendicular axis coord.
+        orth = p.z_stud if face in ("+x", "-x") else p.x_stud
+        return ("v", face, orth, p.part.ldraw)
+
+    # Row index for gap-fill: (y_plate, ldraw) -> placements at that row.
+    # After the main loop, we'll propagate decorations to adjacent same-ldraw
+    # anchors (within 1 stud) that didn't make it through the main loop
+    # (e.g. picked a different exterior face, or their band's rate roll skipped).
+    row_index: dict[tuple, list] = {}
+    for pp in placements:
+        row_index.setdefault((pp.y_plate, pp.part.ldraw), []).append(pp)
     for p in placements:
         if p in out:
             continue
@@ -324,33 +352,39 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
         if face is None:
             rejected_interior += 1
             continue
-        band_key = (face, p.y_plate, p.part.ldraw)
-        # Rate gate is per BAND, not per anchor — all anchors on a band
-        # either all decorate (same template) or none do.  Consistent
-        # bands look purposeful; per-anchor random looks scattered.
-        if band_key not in band_template:
+        # Try horizontal band first, then vertical, then unoriented (fallback).
+        tmpl = None
+        for band_key, keyed_for_face in ((_h_key(p, face), True),
+                                           (_v_key(p, face), True)):
+            if band_key in band_template:
+                tmpl = band_template[band_key]
+                if tmpl is not None:
+                    break
+                continue
+            # First anchor on this band: rate gate + template pick
             if rnd.random() >= rate:
-                band_template[band_key] = None               # mark skipped
+                band_template[band_key] = None
                 continue
             face_tmpls = [t for t in tmpls if _template_face_dir(t) == face]
             if not face_tmpls:
-                face_tmpls = tmpls                            # fallback
+                face_tmpls = tmpls
             total = 0
             for t in face_tmpls:
                 total += int(t.get("models", 1))
             if total <= 0:
                 band_template[band_key] = None
                 continue
-            r = rnd.random() * total
+            rr = rnd.random() * total
             acc = 0
-            tmpl = face_tmpls[-1]
+            picked = face_tmpls[-1]
             for t in face_tmpls:
                 acc += int(t.get("models", 1))
-                if r <= acc:
-                    tmpl = t
+                if rr <= acc:
+                    picked = t
                     break
-            band_template[band_key] = tmpl
-        tmpl = band_template[band_key]
+            band_template[band_key] = picked
+            tmpl = picked
+            break
         if tmpl is None:
             continue
         # Child's LDU lo-corner in world: parent position + yaw-rotated A-frame offset.
@@ -477,8 +511,14 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
                 continue
         anchor_code = pal[p.color_idx].code
         b_colours = production.get(tmpl["b_ldraw"])
-        if b_colours and anchor_code not in b_colours:
-            # anchor's colour isn't made for B — pick the first colour B *is* made in
+        # Prefer the build's accent colour (second-most-common): looks
+        # purposeful across many decorations.  Fall back to anchor's colour,
+        # then to any colour B is made in.
+        if b_colours and accent_code in b_colours:
+            b_colour = accent_code
+        elif b_colours and anchor_code in b_colours:
+            b_colour = anchor_code
+        elif b_colours:
             b_colour = next(iter(b_colours), anchor_code)
         else:
             b_colour = anchor_code
@@ -492,6 +532,25 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
             models=int(tmpl.get("models", 0)),
         )
         out[p] = [child]
+    # Gap-fill: for each decorated anchor, propagate its decoration to adjacent
+    # same-row same-ldraw neighbours (within 1 stud ±x or ±z) that didn't pass
+    # the main loop (e.g. _exterior_face picked a different side).  Keeps bands
+    # continuous.  Reuses the SAME SnotChild so the offset vector is identical
+    # in A's local frame; render_child applies each parent's yaw matrix.
+    newly: dict = {}
+    for p, kids in list(out.items()):
+        ch = kids[0]
+        for q in row_index.get((p.y_plate, p.part.ldraw), ()):
+            if q is p or q in out or q in newly:
+                continue
+            dx = abs(q.x_stud - p.x_stud)
+            dz = abs(q.z_stud - p.z_stud)
+            if max(dx, dz) > p.w_world + 1:                   # too far: different wall
+                continue
+            if _exterior_face(q) is None:
+                continue
+            newly[q] = [ch]
+    out.update(newly)
     return out
 
 
