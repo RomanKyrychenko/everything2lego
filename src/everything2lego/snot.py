@@ -158,16 +158,47 @@ def _mat_vec(m: tuple[int, ...], v: tuple[int, int, int]) -> tuple[int, int, int
             m[6]*v[0] + m[7]*v[1] + m[8]*v[2])
 
 
+# Yaw rotation matrices in LDraw world (y down, right-handed), used to rotate
+# A-frame SNOT offsets into world LDU.  Keyed by degrees; mirrors io_ldraw._ROT
+# but kept local so snot.py has no io_ldraw import at module load.
+_YAW_MAT = {
+    0:   (1, 0, 0,  0, 1, 0,  0, 0, 1),
+    90:  (0, 0, 1,  0, 1, 0, -1, 0, 0),
+    180: (-1, 0, 0, 0, 1, 0,  0, 0, -1),
+    270: (0, 0, -1, 0, 1, 0,  1, 0, 0),
+}
+
+
+def _bbox_LDU(p) -> tuple[int, int, int, int, int, int]:
+    """A placement's LDU bbox (x0, x1, y0, y1, z0, z1), y down.  Based on
+    the Placement's grid position and footprint; approximate (ignores
+    non-rectangular parts, part.origin shifts, etc)."""
+    x0 = p.x_stud * _LDU_STUD
+    x1 = (p.x_stud + p.w_world) * _LDU_STUD
+    z0 = p.z_stud * _LDU_STUD
+    z1 = (p.z_stud + p.d_world) * _LDU_STUD
+    y0 = -(p.y_plate + p.part.height_units) * _LDU_PLATE
+    y1 = -p.y_plate * _LDU_PLATE
+    return x0, x1, y0, y1, z0, z1
+
+
 def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
     """Post-process a list of Placements into a decorations dict (keyed
     by Placement, value is a list of SnotChild).  Each matching anchor
-    gets a child with probability `rate`, drawn by model-count weight.
-    `rate=0.2` targets real-set SNOT fraction (17-32% per OMR audit).
-    Doesn't need sampler state — works after any engine.
+    gets a child with probability `rate`, drawn by model-count weight,
+    IFF the child's world position doesn't fall inside another
+    placement's bbox (coarse sub-plate collision check).  `rate=0.2`
+    targets real-set SNOT fraction (17-32% per OMR audit).  Doesn't need
+    sampler state — works after any engine.
 
     Returns {} when snot_adj.json is absent / lacks the v2 `rot` field.
     Children inherit the anchor's colour (b_colour = palette()[anchor.color_idx].code)
-    unless and until a vocab-driven colour match is added."""
+    unless and until a vocab-driven colour match is added.
+
+    The collision check is coarse: compares the child's lo-corner LDU
+    point against each other placement's axis-aligned LDU bbox.  Catches
+    the common "SNOT fell inside a wall" case; doesn't guarantee full-
+    bbox non-overlap."""
     import random
     from .colors import palette
     pal = palette()
@@ -175,7 +206,9 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
     idx = by_a_ldraw()
     if not idx:
         return {}
+    bboxes = [(p,) + _bbox_LDU(p) for p in placements]
     out: dict = {}
+    rejected = 0
     for p in placements:
         if p in out:
             continue
@@ -197,14 +230,38 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
             if r <= acc:
                 tmpl = t
                 break
+        # Child's LDU lo-corner in world: parent position + yaw-rotated A-frame offset
+        parent_x = (2 * p.x_stud + p.w_world - 1) * (_LDU_STUD // 2)
+        parent_y = -(p.y_plate + p.part.height_units) * _LDU_PLATE
+        parent_z = (2 * p.z_stud + p.d_world - 1) * (_LDU_STUD // 2)
+        m = _YAW_MAT[(p.rotation_deg + p.part.yaw) % 360]
+        dxs = int(tmpl["dx_s"]) * _LDU_STUD
+        dys = int(tmpl["dy_s"]) * _LDU_PLATE
+        dzs = int(tmpl["dz_s"]) * _LDU_STUD
+        wdx = m[0] * dxs + m[1] * dys + m[2] * dzs
+        wdy = m[3] * dxs + m[4] * dys + m[5] * dzs
+        wdz = m[6] * dxs + m[7] * dys + m[8] * dzs
+        bx = parent_x + wdx
+        by = parent_y + wdy
+        bz = parent_z + wdz
+        collide = False
+        for q, qx0, qx1, qy0, qy1, qz0, qz1 in bboxes:
+            if q is p:
+                continue
+            if qx0 < bx < qx1 and qy0 < by < qy1 and qz0 < bz < qz1:
+                collide = True
+                break
+        if collide:
+            rejected += 1
+            continue
         anchor_code = pal[p.color_idx].code
         child = SnotChild(
             b_ldraw=tmpl["b_ldraw"],
             b_colour=anchor_code,
             rot=tmpl["rot"],
-            dy_LDU=int(tmpl["dy_s"]) * _LDU_PLATE,
-            dx_LDU=int(tmpl["dx_s"]) * _LDU_STUD,
-            dz_LDU=int(tmpl["dz_s"]) * _LDU_STUD,
+            dy_LDU=dys,
+            dx_LDU=dxs,
+            dz_LDU=dzs,
             models=int(tmpl.get("models", 0)),
         )
         out[p] = [child]
