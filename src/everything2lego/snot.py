@@ -279,52 +279,80 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
     rejected_cells = 0
     rejected_interior = 0
 
-    def _is_exterior_wall_anchor(p) -> bool:
-        """Anchor must have at least one empty ±x or ±z neighbour cell.  Keeps
-        side-wall anchors; rejects anchors buried inside the structure, and
-        the roof-top case where only ±y is open (would spawn floating-sky SNOT)."""
+    def _exterior_face(p) -> str | None:
+        """Which face of the anchor is exterior (±x or ±z neighbour empty).
+        Returns "+x", "-x", "+z", "-z", or None if buried.  First match wins
+        so bands on the same face stay consistent."""
         ys = p.y_plate - grid_origin[0]
         xs = p.x_stud - grid_origin[1]
         zs = p.z_stud - grid_origin[2]
         y_mid = ys + max(0, p.part.height_units // 2)
-        # scan sides of the anchor's footprint for a neighbouring empty cell
-        for dx in (-1, p.w_world):
+        z0 = max(0, zs); z1 = min(occ.shape[2], zs + p.d_world)
+        x0 = max(0, xs); x1 = min(occ.shape[1], xs + p.w_world)
+        for dx, face in ((p.w_world, "+x"), (-1, "-x")):
             x = xs + dx
-            if 0 <= x < occ.shape[1]:
-                z0 = max(0, zs); z1 = min(occ.shape[2], zs + p.d_world)
-                if z0 < z1 and not occ[y_mid, x, z0:z1].all():
-                    return True
-        for dz in (-1, p.d_world):
+            if 0 <= x < occ.shape[1] and z0 < z1 and not occ[y_mid, x, z0:z1].all():
+                return face
+        for dz, face in ((p.d_world, "+z"), (-1, "-z")):
             z = zs + dz
-            if 0 <= z < occ.shape[2]:
-                x0 = max(0, xs); x1 = min(occ.shape[1], xs + p.w_world)
-                if x0 < x1 and not occ[y_mid, x0:x1, z].all():
-                    return True
-        return False
+            if 0 <= z < occ.shape[2] and x0 < x1 and not occ[y_mid, x0:x1, z].all():
+                return face
+        return None
+
+    def _template_face_dir(tmpl) -> str | None:
+        """Which face the template's offset points toward (dominant axis of
+        A-frame offset dx_s, dz_s).  dy_s unused — bands are horizontal."""
+        dx = int(tmpl["dx_s"]); dz = int(tmpl["dz_s"])
+        if abs(dx) == 0 and abs(dz) == 0:
+            return None                                       # ambiguous
+        if abs(dx) >= abs(dz):
+            return "+x" if dx > 0 else "-x"
+        return "+z" if dz > 0 else "-z"
+
+    # Band cache: (face, y_plate, anchor_ldraw) -> chosen template.  First
+    # eligible anchor on a band picks the template; later anchors on the same
+    # band reuse it, so contiguous same-height anchors on the same face get a
+    # repeating decoration like real sets have.
+    band_template: dict[tuple, dict] = {}
     for p in placements:
         if p in out:
             continue
         tmpls = idx.get(p.part.ldraw)
         if not tmpls:
             continue
-        if rnd.random() >= rate:
-            continue
-        if not _is_exterior_wall_anchor(p):
+        face = _exterior_face(p)
+        if face is None:
             rejected_interior += 1
             continue
-        total = 0
-        for t in tmpls:
-            total += int(t.get("models", 1))
-        if total <= 0:
+        band_key = (face, p.y_plate, p.part.ldraw)
+        # Rate gate is per BAND, not per anchor — all anchors on a band
+        # either all decorate (same template) or none do.  Consistent
+        # bands look purposeful; per-anchor random looks scattered.
+        if band_key not in band_template:
+            if rnd.random() >= rate:
+                band_template[band_key] = None               # mark skipped
+                continue
+            face_tmpls = [t for t in tmpls if _template_face_dir(t) == face]
+            if not face_tmpls:
+                face_tmpls = tmpls                            # fallback
+            total = 0
+            for t in face_tmpls:
+                total += int(t.get("models", 1))
+            if total <= 0:
+                band_template[band_key] = None
+                continue
+            r = rnd.random() * total
+            acc = 0
+            tmpl = face_tmpls[-1]
+            for t in face_tmpls:
+                acc += int(t.get("models", 1))
+                if r <= acc:
+                    tmpl = t
+                    break
+            band_template[band_key] = tmpl
+        tmpl = band_template[band_key]
+        if tmpl is None:
             continue
-        r = rnd.random() * total
-        acc = 0
-        tmpl = tmpls[-1]
-        for t in tmpls:
-            acc += int(t.get("models", 1))
-            if r <= acc:
-                tmpl = t
-                break
         # Child's LDU lo-corner in world: parent position + yaw-rotated A-frame offset.
         # Correction: mining stored B.lo - A.lo (lo-corner-to-lo-corner in A's local
         # frame) but render_child needs B.origin - A.origin.  io_ldraw places the part
