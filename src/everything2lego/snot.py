@@ -262,14 +262,17 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
         parent_y = -(p.y_plate + p.part.height_units) * _LDU_PLATE
         parent_z = (2 * p.z_stud + p.d_world - 1) * (_LDU_STUD // 2)
         m = _YAW_MAT[(p.rotation_deg + p.part.yaw) % 360]
-        a_cx = (p.w_world - 1) * (_LDU_STUD // 2)
-        a_cz = (p.d_world - 1) * (_LDU_STUD // 2)
+        # A part at x_stud=0 has its world lo at x=-10 (half a stud left of the
+        # footprint centre); io_ldraw puts the LDraw origin at (w-1)*10.  So
+        # lo-to-origin = (w-1)*10 - (-10) = w*10.  Same for z.
+        a_cx = p.w_world * (_LDU_STUD // 2)
+        a_cz = p.d_world * (_LDU_STUD // 2)
         b_part = cat_by_ldraw.get(tmpl["b_ldraw"])
         if b_part is None:
             b_corr = (0, 0, 0)
         else:
-            b_cx = (b_part.footprint[0] - 1) * (_LDU_STUD // 2)
-            b_cz = (b_part.footprint[1] - 1) * (_LDU_STUD // 2)
+            b_cx = b_part.footprint[0] * (_LDU_STUD // 2)
+            b_cz = b_part.footprint[1] * (_LDU_STUD // 2)
             r = parse_rot(tmpl["rot"])
             # B's lo-to-origin vector in B's frame, rotated into A's frame
             b_corr = (r[0] * b_cx + r[2] * b_cz,
