@@ -82,10 +82,23 @@ def load_pairs() -> tuple[dict, ...]:
     studs-up, so A's frame in these records matches the sampler's
     placement frame and the stored (rot, dx, dy, dz) can be applied
     directly.  S+U records are dropped — handling those would need the
-    loader to swap A and B and invert the pose, future work."""
+    loader to swap A and B and invert the pose, future work.
+
+    Also filtered: B parts not in the brick catalogue are dropped.  The
+    mining passes through anything that `part_bbox` can measure, which
+    includes LDraw primitives like `rect3.dat`, `box5.dat`, `s/2431s01.dat`
+    — internal shapes used inside parts, which render as plain blocks
+    when placed on their own.  Keeping only catalogue parts ensures the
+    SNOT children are real bricks."""
     if not SNOT_PAIRS_PATH.exists():
         return ()
     rows = json.loads(SNOT_PAIRS_PATH.read_text())
+    # Lazy catalogue load so this module can import without bricks' deps.
+    try:
+        from .bricks import full_catalog
+        catalogue_ldraws = frozenset(p.ldraw for p in full_catalog())
+    except Exception:
+        catalogue_ldraws = frozenset()
     out = []
     for r in rows:
         rot = r.get("rot")
@@ -95,6 +108,8 @@ def load_pairs() -> tuple[dict, ...]:
             continue                                                   # A sideways: pose not in sampler-placeable frame
         a_ldraw = f"{r['a']}.dat"
         b_ldraw = f"{r['b']}.dat"
+        if catalogue_ldraws and (a_ldraw not in catalogue_ldraws or b_ldraw not in catalogue_ldraws):
+            continue                                                   # primitive or non-catalogue part — would render as a plain block
         out.append({
             "a_ldraw": a_ldraw,
             "b_ldraw": b_ldraw,
