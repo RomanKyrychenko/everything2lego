@@ -178,6 +178,7 @@ def main() -> None:
     ap.add_argument("--engine", default="auto", choices=["auto", "python", "native"], help="sampler engine (python = SNOT templates + hinges via snot_insert / hinge_swap; native = Rust fast path, no SNOT yet)")
     ap.add_argument("--snot-decorate", action=argparse.BooleanOptionalAction, default=False, help="after sampling, add SNOT children to anchors (snot.decorate); engine-agnostic.  OFF by default: current decorate() picks anchors blindly and the output looks like a brick explosion for the watermill mesh.  Needs an outward-facing / exterior-only filter before re-enabling.")
     ap.add_argument("--snot-rate", type=float, default=0.2, help="probability per eligible anchor to get a SNOT child; real sets run 17-32%% SNOT fraction")
+    ap.add_argument("--realism-best-of", type=int, default=1, help="run N seeds (seed, seed+1, ...), score each with tools/learn/realism and keep the highest-scoring build; 1 disables.  Needs $LEGO_DATA/analysis/realism/model.pt.")
     ap.add_argument("--cnn-prior", default=None, help="path to a per-option bias .npy from tools/cnn_prior.py (whole-target CNN score, added to each option's logprior)")
     ap.add_argument("--init-from-cnn", default=None, help="path to a cnn_decoder.pt checkpoint: run its greedy decode, then feed those placements as init to the sampler (composition: fast CNN seeds the Metropolis walk)")
     ap.add_argument("--init-prefer-length", type=float, default=1.0, help="--prefer-length passed to the CNN greedy seed; 1.0 is the sched-sampling champion")
@@ -220,38 +221,80 @@ def main() -> None:
                                        guidance_model=Path(a.init_guidance_model) if a.init_guidance_model else None,
                                        guidance=a.init_guidance)
         print(f"init: {len(init_placements)} placements from CNN", flush=True)
-    ps, info = sample(target, models, iters=iters, seed=a.seed, weights=Weights(style=a.style),
-                      tile_boost=a.tile_boost, snot_boost=a.snot_boost, opt_bias=opt_bias,
-                      init_placements=init_placements, engine=a.engine)
-    info["iters"] = iters
-    info["seconds"] = round(time.time() - t0, 1)
-    if a.prune_unsupported:
-        from everything2lego.supports import prune_unsupported
-        ps, pruned = prune_unsupported(list(ps))
-        info["pruned_unsupported"] = pruned
-    if a.drop_small_clusters > 0:
-        from everything2lego.supports import drop_isolated_clusters
-        ps, dropped = drop_isolated_clusters(list(ps), min_cluster=a.drop_small_clusters)
-        info["dropped_clusters"] = dropped
-    if a.apply_templates:
-        d = np.load(a.apply_templates, allow_pickle=True)
-        from everything2lego.region_templates import apply as apply_region_templates
-        ps, swaps = apply_region_templates(list(ps), d["label"])
-        info["template_swaps"] = swaps
-    info["parts"] = len(ps)
+    def _once(seed: int):
+        _t = time.time()
+        _ps, _info = sample(target, models, iters=iters, seed=seed, weights=Weights(style=a.style),
+                             tile_boost=a.tile_boost, snot_boost=a.snot_boost, opt_bias=opt_bias,
+                             init_placements=init_placements, engine=a.engine)
+        _info["iters"] = iters
+        _info["seconds"] = round(time.time() - _t, 1)
+        _info["seed"] = seed
+        if a.prune_unsupported:
+            from everything2lego.supports import prune_unsupported
+            _ps, pruned = prune_unsupported(list(_ps))
+            _info["pruned_unsupported"] = pruned
+        if a.drop_small_clusters > 0:
+            from everything2lego.supports import drop_isolated_clusters
+            _ps, dropped = drop_isolated_clusters(list(_ps), min_cluster=a.drop_small_clusters)
+            _info["dropped_clusters"] = dropped
+        if a.apply_templates:
+            d = np.load(a.apply_templates, allow_pickle=True)
+            from everything2lego.region_templates import apply as apply_region_templates
+            _ps, swaps = apply_region_templates(list(_ps), d["label"])
+            _info["template_swaps"] = swaps
+        _info["parts"] = len(_ps)
+        _deco = _info.pop("_snot_decorations", None) or {}
+        if a.snot_decorate:
+            from everything2lego import snot as _snot
+            extra = _snot.decorate(_ps, seed=seed, rate=a.snot_rate)
+            for p, kids in extra.items():
+                if p not in _deco:
+                    _deco[p] = list(kids)
+            _info["snot_decorations"] = sum(len(v) for v in _deco.values())
+        return _ps, _info, _deco
+
+    if a.realism_best_of > 1:
+        from tempfile import TemporaryDirectory
+        from everything2lego.io_ldraw import write_ldr as _wld
+        sys.path.insert(0, str(ROOT / "tools"))
+        from learn import realism as _real
+        best_score = -1.0
+        best = None
+        for k in range(a.realism_best_of):
+            seed = a.seed + k
+            print(f"realism-best-of {k+1}/{a.realism_best_of}: seed={seed}", flush=True)
+            cps, cinfo, cdeco = _once(seed)
+            with TemporaryDirectory() as td:
+                tmp = Path(td) / "model.ldr"
+                _wld(cps, tmp, decorations=cdeco or None)
+                try:
+                    feat = _real.extract(tmp)
+                except Exception:
+                    feat = None
+            score = 0.0
+            if feat is not None:
+                import torch, torch.nn as nn, torch.nn.functional as F
+                ckpt = torch.load(_real.MODEL_PT, map_location="cpu", weights_only=True)
+                net = nn.Sequential(nn.Linear(ckpt["feature_len"], 64), nn.ReLU(),
+                                     nn.Linear(64, 32), nn.ReLU(), nn.Linear(32, 2))
+                net.load_state_dict(ckpt["state_dict"]); net.eval()
+                with torch.no_grad():
+                    logits = net(torch.tensor(feat).unsqueeze(0))
+                    score = float(F.softmax(logits, dim=-1)[0, 1].item())
+            cinfo["realism"] = score
+            print(f"  realism={score:.3f}  parts={cinfo['parts']}", flush=True)
+            if score > best_score:
+                best_score = score
+                best = (cps, cinfo, cdeco)
+        ps, info, deco = best
+        info["realism_best_of"] = a.realism_best_of
+    else:
+        ps, info, deco = _once(a.seed)
     subs = None
     if a.subassemblies > 0:
         from everything2lego.subassemblies import split_by_y_bands
         subs = split_by_y_bands(list(ps), target_size=a.subassemblies)
         info["subassemblies"] = [len(g) for g in subs]
-    deco = info.pop("_snot_decorations", None) or {}
-    if a.snot_decorate:
-        from everything2lego import snot as _snot
-        extra = _snot.decorate(ps, seed=a.seed, rate=a.snot_rate)
-        for p, kids in extra.items():
-            if p not in deco:
-                deco[p] = list(kids)
-        info["snot_decorations"] = sum(len(v) for v in deco.values())
     write_ldr(ps, out / "model.ldr", subassemblies=subs, decorations=deco or None)
     (out / "info.json").write_text(json.dumps({k: v for k, v in info.items()}, indent=1, default=float))
     print(json.dumps({k: v for k, v in info.items() if k != "history"}, default=float))

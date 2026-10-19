@@ -54,9 +54,14 @@ class SplitDataset(Dataset):
         return self.tfm(img), y
 
 
+def _pngs(d: Path) -> list[Path]:
+    """Real .png files, skipping macOS AppleDouble sidecars (._*.png)."""
+    return [p for p in sorted(d.glob("*.png")) if not p.name.startswith("._")]
+
+
 def _build_splits(real_dir: Path, ours_dir: Path, val_frac: float, seed: int):
-    real_models = _group_by_model(sorted(real_dir.glob("*.png")))
-    ours_models = _group_by_model(sorted(ours_dir.glob("*.png")))
+    real_models = _group_by_model(_pngs(real_dir))
+    ours_models = _group_by_model(_pngs(ours_dir))
     rnd = random.Random(seed)
     rk = list(real_models); rnd.shuffle(rk)
     ok = list(ours_models); rnd.shuffle(ok)
