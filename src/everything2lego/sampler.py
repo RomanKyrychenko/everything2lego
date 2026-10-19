@@ -517,6 +517,7 @@ class Weights:
     # kwargs still override these if non-zero (for ablations).
     tile_boost: float = 0.0   # bias toward tile parts; +2 lands near real-set tile fraction 15-23%
     snot_boost: float = 0.0   # bias toward SNOT parts (brickS, plateS, tileS); +5 lands near real-set 17-32%
+    snot_bonus: float = 0.5   # energy -= snot_bonus * log(1 + models) per snot_insert child; makes the sampler prefer high-popularity SNOT templates
 
     @classmethod
     def learned(cls, kind: Optional[str] = None) -> "Weights":
@@ -540,6 +541,7 @@ class State:
         self.kindgrid = np.full(target.want.shape, -1, dtype=np.int64)
         self.items: dict[int, Item] = {}
         self.snot_children: dict[int, list[SnotChild]] = {}  # parent id -> SNOT decorations (slice 1 inert)
+        self.snot_bonus_total: float = 0.0  # Σ log(1+models) over snot children; -w.snot_bonus * this is subtracted from energy
         self.next_id = 0
         self.kl = RunningKL(stats.ref)
         self.loc = 0.0
@@ -807,7 +809,8 @@ class State:
                  + w.dens * math.log(n / self.n_ref) ** 2 / (2 * self.s.density_sd ** 2)
                  + w.cnt * _dens(len(self.items), self.p_ref, self.s.part_density_sd)) if n > 0 else 0.0
         return (w.cov * self.fid + w.sil * self.sil / SUB ** 2 + w.col * self.col
-                + w.style * self.n_ref * style + w.sup * len(self.unsup) + w.side * self.bare)
+                + w.style * self.n_ref * style + w.sup * len(self.unsup) + w.side * self.bare
+                - w.snot_bonus * self.snot_bonus_total)
 
     def kl3_entropy(self) -> float:
         """Shannon entropy (nats) of kl3's current count distribution."""
@@ -866,7 +869,8 @@ class State:
         self.fid -= self.fid_delta(ys, xs, zs, it.ori.bits)
         self.col -= self.colour_cost(ys, xs, zs, it.ori.o, it.colour)
         del self.items[i]
-        self.snot_children.pop(i, None)
+        for ch in self.snot_children.pop(i, ()):
+            self.snot_bonus_total -= math.log(1 + ch.models)
         self.unsup.discard(i)
         self._refresh_support(list(nb))
         return it
@@ -1524,13 +1528,15 @@ def snot_insert(state: "State", filler: "Filler", rnd: random.Random):
         models=int(tmpl.get("models", 0)),
     )
     state.snot_children.setdefault(i, []).append(child)
+    state.snot_bonus_total += math.log(1 + child.models)
 
     def undo(i=i, child=child):
         if i in state.snot_children:
             try:
                 state.snot_children[i].remove(child)
             except ValueError:
-                pass
+                return
+            state.snot_bonus_total -= math.log(1 + child.models)
             if not state.snot_children[i]:
                 del state.snot_children[i]
     return undo
