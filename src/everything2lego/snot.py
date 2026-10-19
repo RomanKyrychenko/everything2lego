@@ -207,8 +207,11 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
     sampler state — works after any engine.
 
     Returns {} when snot_adj.json is absent / lacks the v2 `rot` field.
-    Children inherit the anchor's colour (b_colour = palette()[anchor.color_idx].code)
-    unless and until a vocab-driven colour match is added.
+    Colour matching: child uses the anchor's colour if B is produced in
+    that colour (bricks._production), otherwise falls back to a colour
+    B is actually made in.  Position: offsets corrected for both A's
+    and B's lo-to-origin shifts (vocab-driven), so non-1x1 B parts
+    render at their true pose.
 
     The collision check is coarse: compares the child's lo-corner LDU
     point against each other placement's axis-aligned LDU bbox.  Catches
@@ -216,11 +219,14 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
     bbox non-overlap."""
     import random
     from .colors import palette
+    from .bricks import full_catalog, _production
     pal = palette()
     rnd = random.Random(seed)
     idx = by_a_ldraw()
     if not idx:
         return {}
+    cat_by_ldraw = {p.ldraw: p for p in full_catalog()}
+    production = _production()
     bboxes = [(p,) + _bbox_LDU(p) for p in placements]
     out: dict = {}
     rejected = 0
@@ -248,22 +254,30 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
         # Child's LDU lo-corner in world: parent position + yaw-rotated A-frame offset.
         # Correction: mining stored B.lo - A.lo (lo-corner-to-lo-corner in A's local
         # frame) but render_child needs B.origin - A.origin.  io_ldraw places the part
-        # origin at the "centre of the footprint, top of body" per its docstring; in
-        # LDU that offset-from-lo is ((w-1)*10, 0, (d-1)*10) using the post-yaw
-        # (w_world, d_world).  Subtracting A's lo-to-origin shift converts the mined
-        # lo-to-lo offset to A.origin-to-B.lo in A's frame; B's own lo-to-origin
-        # correction (which depends on B's shape AND B's rot vs A) is skipped — exact
-        # for 1x1 B (6141, 3024, 54200, 85861 — most building SNOT), approximate for
-        # larger B.  Full fix would need the vocab to look up B.footprint.
+        # origin at the "centre of the footprint, top of body"; in LDU that offset-
+        # from-lo is ((w-1)*10, 0, (d-1)*10).  Subtract A's and add B's lo-to-origin
+        # shifts (B's rotated into A's frame via `rot`) to turn the mined lo-to-lo
+        # offset into A.origin-to-B.origin.
         parent_x = (2 * p.x_stud + p.w_world - 1) * (_LDU_STUD // 2)
         parent_y = -(p.y_plate + p.part.height_units) * _LDU_PLATE
         parent_z = (2 * p.z_stud + p.d_world - 1) * (_LDU_STUD // 2)
         m = _YAW_MAT[(p.rotation_deg + p.part.yaw) % 360]
         a_cx = (p.w_world - 1) * (_LDU_STUD // 2)
         a_cz = (p.d_world - 1) * (_LDU_STUD // 2)
-        dxs = int(tmpl["dx_s"]) * _LDU_STUD - a_cx
-        dys = int(tmpl["dy_s"]) * _LDU_PLATE
-        dzs = int(tmpl["dz_s"]) * _LDU_STUD - a_cz
+        b_part = cat_by_ldraw.get(tmpl["b_ldraw"])
+        if b_part is None:
+            b_corr = (0, 0, 0)
+        else:
+            b_cx = (b_part.footprint[0] - 1) * (_LDU_STUD // 2)
+            b_cz = (b_part.footprint[1] - 1) * (_LDU_STUD // 2)
+            r = parse_rot(tmpl["rot"])
+            # B's lo-to-origin vector in B's frame, rotated into A's frame
+            b_corr = (r[0] * b_cx + r[2] * b_cz,
+                       r[3] * b_cx + r[5] * b_cz,
+                       r[6] * b_cx + r[8] * b_cz)
+        dxs = int(tmpl["dx_s"]) * _LDU_STUD - a_cx + b_corr[0]
+        dys = int(tmpl["dy_s"]) * _LDU_PLATE + b_corr[1]
+        dzs = int(tmpl["dz_s"]) * _LDU_STUD - a_cz + b_corr[2]
         wdx = m[0] * dxs + m[1] * dys + m[2] * dzs
         wdy = m[3] * dxs + m[4] * dys + m[5] * dzs
         wdz = m[6] * dxs + m[7] * dys + m[8] * dzs
@@ -281,9 +295,15 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
             rejected += 1
             continue
         anchor_code = pal[p.color_idx].code
+        b_colours = production.get(tmpl["b_ldraw"])
+        if b_colours and anchor_code not in b_colours:
+            # anchor's colour isn't made for B — pick the first colour B *is* made in
+            b_colour = next(iter(b_colours), anchor_code)
+        else:
+            b_colour = anchor_code
         child = SnotChild(
             b_ldraw=tmpl["b_ldraw"],
-            b_colour=anchor_code,
+            b_colour=b_colour,
             rot=tmpl["rot"],
             dy_LDU=dys,
             dx_LDU=dxs,
