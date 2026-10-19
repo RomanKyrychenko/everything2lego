@@ -556,6 +556,34 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
             if occ[exit_gy, exit_gx, exit_gz]:
                 rejected_inward += 1
                 continue
+        # Attachment check: every grid cell B occupies must have at least one
+        # solid 6-face neighbour (any placement, including the anchor).  Catches
+        # the "flying detail" case where B's far cell sits in open air with
+        # nothing to hold it.
+        if b_part is not None:
+            # grid cell range for B (already computed above for occupancy check)
+            flying = False
+            for gy in range(gy0, gy1):
+                for gx in range(gx0, gx1):
+                    for gz in range(gz0, gz1):
+                        has_neighbour = False
+                        for ny, nx, nz in ((gy-1,gx,gz),(gy+1,gx,gz),
+                                            (gy,gx-1,gz),(gy,gx+1,gz),
+                                            (gy,gx,gz-1),(gy,gx,gz+1)):
+                            if (0 <= ny < occ.shape[0] and 0 <= nx < occ.shape[1]
+                                    and 0 <= nz < occ.shape[2] and occ[ny, nx, nz]):
+                                has_neighbour = True
+                                break
+                        if not has_neighbour:
+                            flying = True
+                            break
+                    if flying:
+                        break
+                if flying:
+                    break
+            if flying:
+                rejected_cells += 1
+                continue
         anchor_code = pal[p.color_idx].code
         b_colours = production.get(tmpl["b_ldraw"])
         # Prefer the build's accent colour (second-most-common): looks
