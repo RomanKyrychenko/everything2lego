@@ -230,14 +230,25 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
             if r <= acc:
                 tmpl = t
                 break
-        # Child's LDU lo-corner in world: parent position + yaw-rotated A-frame offset
+        # Child's LDU lo-corner in world: parent position + yaw-rotated A-frame offset.
+        # Correction: mining stored B.lo - A.lo (lo-corner-to-lo-corner in A's local
+        # frame) but render_child needs B.origin - A.origin.  io_ldraw places the part
+        # origin at the "centre of the footprint, top of body" per its docstring; in
+        # LDU that offset-from-lo is ((w-1)*10, 0, (d-1)*10) using the post-yaw
+        # (w_world, d_world).  Subtracting A's lo-to-origin shift converts the mined
+        # lo-to-lo offset to A.origin-to-B.lo in A's frame; B's own lo-to-origin
+        # correction (which depends on B's shape AND B's rot vs A) is skipped — exact
+        # for 1x1 B (6141, 3024, 54200, 85861 — most building SNOT), approximate for
+        # larger B.  Full fix would need the vocab to look up B.footprint.
         parent_x = (2 * p.x_stud + p.w_world - 1) * (_LDU_STUD // 2)
         parent_y = -(p.y_plate + p.part.height_units) * _LDU_PLATE
         parent_z = (2 * p.z_stud + p.d_world - 1) * (_LDU_STUD // 2)
         m = _YAW_MAT[(p.rotation_deg + p.part.yaw) % 360]
-        dxs = int(tmpl["dx_s"]) * _LDU_STUD
+        a_cx = (p.w_world - 1) * (_LDU_STUD // 2)
+        a_cz = (p.d_world - 1) * (_LDU_STUD // 2)
+        dxs = int(tmpl["dx_s"]) * _LDU_STUD - a_cx
         dys = int(tmpl["dy_s"]) * _LDU_PLATE
-        dzs = int(tmpl["dz_s"]) * _LDU_STUD
+        dzs = int(tmpl["dz_s"]) * _LDU_STUD - a_cz
         wdx = m[0] * dxs + m[1] * dys + m[2] * dzs
         wdy = m[3] * dxs + m[4] * dys + m[5] * dzs
         wdz = m[6] * dxs + m[7] * dys + m[8] * dzs
