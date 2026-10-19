@@ -177,7 +177,7 @@ def main() -> None:
     ap.add_argument("--snot-boost", type=float, default=0.0, help="log-bonus on every SNOT option (brickS/plateS/tileS) at proposal time; real sets use 17-32%% SNOT vs our ~0%%")
     ap.add_argument("--engine", default="auto", choices=["auto", "python", "native"], help="sampler engine (python = SNOT templates + hinges via snot_insert / hinge_swap; native = Rust fast path, no SNOT yet)")
     ap.add_argument("--snot-decorate", action=argparse.BooleanOptionalAction, default=False, help="after sampling, add SNOT children to anchors (snot.decorate); engine-agnostic.  OFF by default: current decorate() picks anchors blindly and the output looks like a brick explosion for the watermill mesh.  Needs an outward-facing / exterior-only filter before re-enabling.")
-    ap.add_argument("--snot-rate", type=float, default=0.2, help="probability per eligible anchor to get a SNOT child; real sets run 17-32%% SNOT fraction")
+    ap.add_argument("--snot-rate", type=float, default=0.8, help="probability per eligible BAND to decorate; bands cap at 5 per key so this gates how many distinct bands fire, not raw count")
     ap.add_argument("--realism-best-of", type=int, default=1, help="run N seeds (seed, seed+1, ...), score each with tools/learn/realism and keep the highest-scoring build; 1 disables.  Needs $LEGO_DATA/analysis/realism/model.pt.")
     ap.add_argument("--cnn-prior", default=None, help="path to a per-option bias .npy from tools/cnn_prior.py (whole-target CNN score, added to each option's logprior)")
     ap.add_argument("--init-from-cnn", default=None, help="path to a cnn_decoder.pt checkpoint: run its greedy decode, then feed those placements as init to the sampler (composition: fast CNN seeds the Metropolis walk)")

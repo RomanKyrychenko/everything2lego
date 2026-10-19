@@ -303,11 +303,19 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
         pool = same_family if same_family else used
         if pool:
             accent_colour_idx = max(pool, key=lambda ic: abs(_lum(ic[0]) - primary_lum))[0]
+            # Secondary accent: next-best contrast, so alternating bands look
+            # like intentional 2-colour trim instead of monotone.
+            remaining = [ic for ic in pool if ic[0] != accent_colour_idx]
+            accent2_idx = (max(remaining, key=lambda ic: abs(_lum(ic[0]) - primary_lum))[0]
+                            if remaining else accent_colour_idx)
         else:
             accent_colour_idx = primary_idx
+            accent2_idx = primary_idx
     else:
         accent_colour_idx = 0
+        accent2_idx = 0
     accent_code = pal[accent_colour_idx].code
+    accent2_code = pal[accent2_idx].code
     # Cap decorations per band so a long row doesn't turn into a mechanical
     # repeat.  5 feels enough to read as "pattern" without feeling stamped.
     BAND_CAP = 5
@@ -320,9 +328,14 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
     rejected_interior = 0
 
     def _exterior_face(p) -> str | None:
-        """Which face of the anchor is exterior (±x or ±z neighbour empty).
-        Returns "+x", "-x", "+z", "-z", or None if buried.  First match wins
-        so bands on the same face stay consistent."""
+        """First exterior face (back-compat helper for gap-fill)."""
+        faces = _exterior_faces(p)
+        return faces[0] if faces else None
+
+    def _exterior_faces(p) -> list[str]:
+        """ALL exterior faces of p: a corner anchor can list both ±x and ±z.
+        Order is deterministic (±x then ±z) so bands stay consistent."""
+        out = []
         ys = p.y_plate - grid_origin[0]
         xs = p.x_stud - grid_origin[1]
         zs = p.z_stud - grid_origin[2]
@@ -332,12 +345,12 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
         for dx, face in ((p.w_world, "+x"), (-1, "-x")):
             x = xs + dx
             if 0 <= x < occ.shape[1] and z0 < z1 and not occ[y_mid, x, z0:z1].all():
-                return face
+                out.append(face)
         for dz, face in ((p.d_world, "+z"), (-1, "-z")):
             z = zs + dz
             if 0 <= z < occ.shape[2] and x0 < x1 and not occ[y_mid, x0:x1, z].all():
-                return face
-        return None
+                out.append(face)
+        return out
 
     def _template_face_dir(tmpl) -> str | None:
         """Which face the template's offset points toward (dominant axis of
@@ -376,8 +389,6 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
     for pp in placements:
         row_index.setdefault((pp.y_plate, pp.part.ldraw), []).append(pp)
     for p in placements:
-        if p in out:
-            continue
         tmpls = idx.get(p.part.ldraw)
         if not tmpls:
             continue
@@ -385,7 +396,6 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
         if face is None:
             rejected_interior += 1
             continue
-        # Try horizontal band first, then vertical, then unoriented (fallback).
         tmpl = None
         hit_band_key = None
         for band_key, keyed_for_face in ((_h_key(p, face), True),
@@ -586,11 +596,15 @@ def decorate(placements, seed: int = 0, rate: float = 0.2) -> dict:
                 continue
         anchor_code = pal[p.color_idx].code
         b_colours = production.get(tmpl["b_ldraw"])
-        # Prefer the build's accent colour (second-most-common): looks
-        # purposeful across many decorations.  Fall back to anchor's colour,
-        # then to any colour B is made in.
-        if b_colours and accent_code in b_colours:
-            b_colour = accent_code
+        # Alternate between the two accents by anchor y_plate parity so bands
+        # at adjacent heights read as a 2-colour trim.  Fall back to anchor's
+        # colour, then any colour B is made in.
+        wanted = accent_code if (p.y_plate // 2) % 2 == 0 else accent2_code
+        other = accent2_code if wanted == accent_code else accent_code
+        if b_colours and wanted in b_colours:
+            b_colour = wanted
+        elif b_colours and other in b_colours:
+            b_colour = other
         elif b_colours and anchor_code in b_colours:
             b_colour = anchor_code
         elif b_colours:
