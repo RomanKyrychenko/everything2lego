@@ -37,18 +37,52 @@ from realism import (CATEGORIES, COLOUR_BINS, _category, _colour_bin, _size_bin,
                      _generate_ours_from_omr, _degrade, OMR)
 
 NODE_DIM = len(CATEGORIES) + 5 + (len(COLOUR_BINS) + 1) + 4         # cat + size + colour (+other) + (y, snot, w, d)
+
+# Richer node features (v4): categorical ints + continuous.  Model turns
+# each int into a learned embedding, concatenates, feeds to the GNN.
+PART_VOCAB_SIZE = 500                                               # top 499 LDraws + "other"
+NODE_CAT_DIM = 4                                                     # (part_id, category, size, colour)
+NODE_CONT_DIM = 4                                                    # (y, snot, w, d)
+PART_INDEX_PATH = DATA / "analysis" / "realism_gnn" / "part_index.json"
+
+
+def _part_id_map() -> dict:
+    """Load (or build) ldraw → part_id map.  Covers the top PART_VOCAB_SIZE-1
+    most common LDraws across OMR; everything else maps to 0 ("other")."""
+    import json
+    if PART_INDEX_PATH.exists():
+        return {k: int(v) for k, v in json.loads(PART_INDEX_PATH.read_text()).items()}
+    # Build by scanning OMR corpus
+    from collections import Counter
+    sys.path.insert(0, str(ROOT / "tools" / "set_study"))
+    from ldraw_read import flatten
+    omr_files = sorted(OMR.glob("*.mpd"))[:500]                      # 500 samples is enough for a stable top-N
+    counts: Counter = Counter()
+    for f in omr_files:
+        try:
+            parts = flatten(f)
+            counts.update(p.name for p in parts)
+        except Exception:
+            continue
+    top = [name for name, _ in counts.most_common(PART_VOCAB_SIZE - 1)]
+    m = {"__other__": 0}
+    for i, name in enumerate(top, start=1):
+        m[name] = i
+    PART_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PART_INDEX_PATH.write_text(json.dumps(m))
+    return m
 EDGE_DIM = 3 + 3                                                      # direction one-hot + normalized offset
 
 
 def _augment_graph(graph, rng: random.Random):
-    """Return a copy of (nodes, edge_index, edge_attr) with on-the-fly
-    augmentation applied: (a) subgraph crop (keep contiguous 60-100%
-    of nodes via BFS from a random seed), (b) colour permutation
-    (swap two used colour columns).  Yaw rotation would require
-    re-encoding positions in edge_attr; skipped — the GNN is already
-    permutation-invariant over edges.  Returns None if the crop
-    leaves too few nodes."""
-    nodes, edge_index, edge_attr = graph
+    """Return an augmented copy: subgraph crop + colour permutation.
+    Handles 5-tuple graphs (v4: nodes, edges, edge_attr, node_cat, node_cont)
+    and legacy 3-tuples."""
+    if len(graph) == 5:
+        nodes, edge_index, edge_attr, node_cat, node_cont = graph
+    else:
+        nodes, edge_index, edge_attr = graph
+        node_cat = node_cont = None
     N = nodes.shape[0]
     # (a) subgraph crop
     keep_frac = rng.uniform(0.6, 1.0)
@@ -91,10 +125,15 @@ def _augment_graph(graph, rng: random.Random):
             return None
         new_edge_index = np.array(new_edges, dtype=np.int64).T
         new_edge_attr = np.array(new_attrs, dtype=np.float32)
+        kept_arr = np.array(kept, dtype=np.int64)
+        new_node_cat = node_cat[kept_arr].copy() if node_cat is not None else None
+        new_node_cont = node_cont[kept_arr].copy() if node_cont is not None else None
     else:
         new_nodes = nodes.copy()
         new_edge_index = edge_index.copy()
         new_edge_attr = edge_attr.copy()
+        new_node_cat = node_cat.copy() if node_cat is not None else None
+        new_node_cont = node_cont.copy() if node_cont is not None else None
     # (b) colour permutation: swap two used colour columns in the node features
     cat_bins = len(CATEGORIES)
     col_off = cat_bins + 5
@@ -105,12 +144,25 @@ def _augment_graph(graph, rng: random.Random):
         tmp = new_nodes[:, col_off + a].copy()
         new_nodes[:, col_off + a] = new_nodes[:, col_off + b]
         new_nodes[:, col_off + b] = tmp
+        if new_node_cat is not None:
+            # swap in categorical colour column too
+            mask_a = new_node_cat[:, 3] == a
+            mask_b = new_node_cat[:, 3] == b
+            new_node_cat[mask_a, 3] = b
+            new_node_cat[mask_b, 3] = a
+    if new_node_cat is not None:
+        return new_nodes, new_edge_index, new_edge_attr, new_node_cat, new_node_cont
     return new_nodes, new_edge_index, new_edge_attr
 
 
-def build_graph(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-    """Returns (node_features N×NODE_DIM, edge_index 2×E, edge_attr E×EDGE_DIM)
-    or None on parse failure.  Edges are undirected (both directions)."""
+def build_graph(path: Path, part_id_map: dict | None = None) -> tuple | None:
+    """Returns (node_features N×NODE_DIM, edge_index 2×E, edge_attr E×EDGE_DIM,
+    node_cat N×NODE_CAT_DIM (int64), node_cont N×NODE_CONT_DIM (float32))
+    or None on parse failure.  Edges are undirected (both directions).
+    First 3 items are the v3 format (back-compat); last 2 are v4 richer
+    features (part_id, cat, size, colour as ints; y, snot, w, d as floats)."""
+    if part_id_map is None:
+        part_id_map = _part_id_map()
     from ldraw_read import flatten, part_bbox
     try:
         parts = flatten(path)
@@ -134,18 +186,35 @@ def build_graph(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
     y_rng = max(1.0, y_max - y_min)
     N = len(items)
     nodes = np.zeros((N, NODE_DIM), dtype=np.float32)
+    node_cat = np.zeros((N, NODE_CAT_DIM), dtype=np.int64)
+    node_cont = np.zeros((N, NODE_CONT_DIM), dtype=np.float32)
     cat_bins = len(CATEGORIES)
     col_bins = len(COLOUR_BINS) + 1
     for i, (ldraw, colour, M, glo, ghi) in enumerate(items):
-        nodes[i, _category(ldraw)] = 1.0                        # category one-hot
-        sz = _size_bin(ldraw, bbox_cache)
-        nodes[i, cat_bins + sz] = 1.0                           # size one-hot
-        nodes[i, cat_bins + 5 + _colour_bin(colour)] = 1.0      # colour one-hot
+        cat_i = _category(ldraw)
+        sz_i = _size_bin(ldraw, bbox_cache)
+        col_i = _colour_bin(colour)
+        pid_i = part_id_map.get(ldraw, 0)                        # 0 = "other"
+        nodes[i, cat_i] = 1.0                                    # legacy v3 one-hot cat
+        nodes[i, cat_bins + sz_i] = 1.0                          # legacy v3 one-hot size
+        nodes[i, cat_bins + 5 + col_i] = 1.0                     # legacy v3 one-hot colour
         off = cat_bins + 5 + col_bins
-        nodes[i, off] = (glo[1] - y_min) / y_rng                # normalized y
-        nodes[i, off + 1] = 1.0 if _is_snot(M) else 0.0         # is_snot
-        nodes[i, off + 2] = (ghi[0] - glo[0]) / 10.0            # width proxy
-        nodes[i, off + 3] = (ghi[2] - glo[2]) / 10.0            # depth proxy
+        y_norm = (glo[1] - y_min) / y_rng
+        snot_f = 1.0 if _is_snot(M) else 0.0
+        w_p = (ghi[0] - glo[0]) / 10.0
+        d_p = (ghi[2] - glo[2]) / 10.0
+        nodes[i, off] = y_norm
+        nodes[i, off + 1] = snot_f
+        nodes[i, off + 2] = w_p
+        nodes[i, off + 3] = d_p
+        node_cat[i, 0] = pid_i
+        node_cat[i, 1] = cat_i
+        node_cat[i, 2] = sz_i
+        node_cat[i, 3] = col_i
+        node_cont[i, 0] = y_norm
+        node_cont[i, 1] = snot_f
+        node_cont[i, 2] = w_p
+        node_cont[i, 3] = d_p
     # Edges
     pairs = _neighbour_pairs(items)
     E = len(pairs) * 2
@@ -165,7 +234,7 @@ def build_graph(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
             edge_attr[k2, 3] = max(-5, min(5, dx))
             edge_attr[k2, 4] = max(-5, min(5, dy))
             edge_attr[k2, 5] = max(-5, min(5, dz))
-    return nodes, edge_index, edge_attr
+    return nodes, edge_index, edge_attr, node_cat, node_cont
 
 
 def cmd_build(a) -> None:
@@ -323,15 +392,33 @@ def cmd_train(a) -> None:
             return torch.relu(self.upd(torch.cat([x, agg], dim=-1)))
 
     class GNN(nn.Module):
+        """v4: per-part embedding over PART_VOCAB_SIZE, plus category / size /
+        colour embeddings and continuous features.  Falls back to legacy
+        NODE_DIM one-hot concatenation when node_cat / node_cont aren't
+        provided (back-compat)."""
         def __init__(self, hidden=32, n_layers=2):
             super().__init__()
-            self.embed = nn.Linear(NODE_DIM, hidden)
+            self.part_emb = nn.Embedding(PART_VOCAB_SIZE, 32)
+            self.cat_emb = nn.Embedding(len(CATEGORIES), 4)
+            self.size_emb = nn.Embedding(5, 4)
+            self.col_emb = nn.Embedding(len(COLOUR_BINS) + 1, 8)
+            embed_dim = 32 + 4 + 4 + 8 + NODE_CONT_DIM
+            self.embed = nn.Linear(embed_dim, hidden)
+            self.legacy_embed = nn.Linear(NODE_DIM, hidden)
             self.layers = nn.ModuleList([MP(hidden) for _ in range(n_layers)])
             self.head = nn.Sequential(nn.Linear(hidden, 32), nn.ReLU(),
                                        nn.Linear(32, 16), nn.ReLU(), nn.Linear(16, 2))
 
-        def forward(self, nodes, ei, ea):
-            x = torch.relu(self.embed(nodes))
+        def forward(self, nodes, ei, ea, node_cat=None, node_cont=None):
+            if node_cat is not None and node_cont is not None:
+                part_e = self.part_emb(node_cat[:, 0])
+                cat_e = self.cat_emb(node_cat[:, 1])
+                size_e = self.size_emb(node_cat[:, 2])
+                col_e = self.col_emb(node_cat[:, 3])
+                x = torch.cat([part_e, cat_e, size_e, col_e, node_cont], dim=-1)
+                x = torch.relu(self.embed(x))
+            else:
+                x = torch.relu(self.legacy_embed(nodes))
             for layer in self.layers:
                 x = layer(x, ei, ea)
             graph = x.mean(dim=0)
@@ -357,14 +444,21 @@ def cmd_train(a) -> None:
         order = rng_t.permutation(len(train))
         tr_hit = tr_n = tr_loss = 0.0
         for ix in order:
-            (nodes, ei, ea), y, _ = train[ix]
+            g, y, _ = train[ix]
+            if len(g) == 5:
+                nodes, ei, ea, nc, ncont = g
+            else:
+                nodes, ei, ea = g
+                nc = ncont = None
             if ei.shape[1] == 0 or nodes.shape[0] == 0:
-                continue                                     # MPS can't handle empty tensors
+                continue
             nodes_t = torch.tensor(nodes, device=device)
             ei_t = torch.tensor(ei, device=device, dtype=torch.long)
             ea_t = torch.tensor(ea, device=device)
+            nc_t = torch.tensor(nc, device=device, dtype=torch.long) if nc is not None else None
+            ncont_t = torch.tensor(ncont, device=device) if ncont is not None else None
             y_t = torch.tensor([y], device=device, dtype=torch.long)
-            logits = net(nodes_t, ei_t, ea_t)
+            logits = net(nodes_t, ei_t, ea_t, nc_t, ncont_t)
             loss = F.cross_entropy(logits, y_t, weight=class_w)
             opt.zero_grad(); loss.backward(); opt.step()
             tr_loss += loss.item(); tr_n += 1
@@ -373,13 +467,20 @@ def cmd_train(a) -> None:
         vl_hit = 0
         per: dict = {}
         with torch.no_grad():
-            for (nodes, ei, ea), y, s in val:
+            for g, y, s in val:
+                if len(g) == 5:
+                    nodes, ei, ea, nc, ncont = g
+                else:
+                    nodes, ei, ea = g
+                    nc = ncont = None
                 if ei.shape[1] == 0 or nodes.shape[0] == 0:
                     continue
                 nodes_t = torch.tensor(nodes, device=device)
                 ei_t = torch.tensor(ei, device=device, dtype=torch.long)
                 ea_t = torch.tensor(ea, device=device)
-                pred = int(net(nodes_t, ei_t, ea_t).argmax(-1).item())
+                nc_t = torch.tensor(nc, device=device, dtype=torch.long) if nc is not None else None
+                ncont_t = torch.tensor(ncont, device=device) if ncont is not None else None
+                pred = int(net(nodes_t, ei_t, ea_t, nc_t, ncont_t).argmax(-1).item())
                 vl_hit += int(pred == y)
                 per.setdefault(s, [0, 0])
                 per[s][1] += 1
@@ -389,13 +490,20 @@ def cmd_train(a) -> None:
         # Confusion for F1: positive = real (class 1).
         tp = fp = fn = tn = 0
         with torch.no_grad():
-            for (nodes, ei, ea), y, s in val:
+            for g, y, s in val:
+                if len(g) == 5:
+                    nodes, ei, ea, nc, ncont = g
+                else:
+                    nodes, ei, ea = g
+                    nc = ncont = None
                 if ei.shape[1] == 0 or nodes.shape[0] == 0:
                     continue
                 nodes_t = torch.tensor(nodes, device=device)
                 ei_t = torch.tensor(ei, device=device, dtype=torch.long)
                 ea_t = torch.tensor(ea, device=device)
-                pred = int(net(nodes_t, ei_t, ea_t).argmax(-1).item())
+                nc_t = torch.tensor(nc, device=device, dtype=torch.long) if nc is not None else None
+                ncont_t = torch.tensor(ncont, device=device) if ncont is not None else None
+                pred = int(net(nodes_t, ei_t, ea_t, nc_t, ncont_t).argmax(-1).item())
                 if y == 1 and pred == 1: tp += 1
                 elif y == 0 and pred == 1: fp += 1
                 elif y == 1 and pred == 0: fn += 1
@@ -424,7 +532,11 @@ def cmd_score(a) -> None:
     g = build_graph(a.path)
     if g is None:
         raise SystemExit(f"could not build graph from {a.path}")
-    nodes, ei, ea = g
+    if len(g) == 5:
+        nodes, ei, ea, nc, ncont = g
+    else:
+        nodes, ei, ea = g
+        nc = ncont = None
     ckpt = torch.load(MODEL_PT, map_location="cpu", weights_only=True)
     hidden = ckpt["hidden"]
     n_layers = ckpt.get("layers", 2)
@@ -447,20 +559,39 @@ def cmd_score(a) -> None:
     class GNN(nn.Module):
         def __init__(self):
             super().__init__()
-            self.embed = nn.Linear(NODE_DIM, hidden)
+            self.part_emb = nn.Embedding(PART_VOCAB_SIZE, 32)
+            self.cat_emb = nn.Embedding(len(CATEGORIES), 4)
+            self.size_emb = nn.Embedding(5, 4)
+            self.col_emb = nn.Embedding(len(COLOUR_BINS) + 1, 8)
+            embed_dim = 32 + 4 + 4 + 8 + NODE_CONT_DIM
+            self.embed = nn.Linear(embed_dim, hidden)
+            self.legacy_embed = nn.Linear(NODE_DIM, hidden)
             self.layers = nn.ModuleList([MP(hidden) for _ in range(n_layers)])
             self.head = nn.Sequential(nn.Linear(hidden, 32), nn.ReLU(),
                                        nn.Linear(32, 16), nn.ReLU(), nn.Linear(16, 2))
 
-        def forward(self, nodes, ei, ea):
-            x = torch.relu(self.embed(nodes))
+        def forward(self, nodes, ei, ea, nc=None, ncont=None):
+            if nc is not None and ncont is not None:
+                part_e = self.part_emb(nc[:, 0])
+                cat_e = self.cat_emb(nc[:, 1])
+                size_e = self.size_emb(nc[:, 2])
+                col_e = self.col_emb(nc[:, 3])
+                x = torch.cat([part_e, cat_e, size_e, col_e, ncont], dim=-1)
+                x = torch.relu(self.embed(x))
+            else:
+                x = torch.relu(self.legacy_embed(nodes))
             for layer in self.layers:
                 x = layer(x, ei, ea)
             return self.head(x.mean(dim=0)).unsqueeze(0)
 
     net = GNN(); net.load_state_dict(ckpt["state_dict"]); net.eval()
     with torch.no_grad():
-        logits = net(torch.tensor(nodes), torch.tensor(ei, dtype=torch.long), torch.tensor(ea))
+        nt = torch.tensor(nodes)
+        ei_t = torch.tensor(ei, dtype=torch.long)
+        ea_t = torch.tensor(ea)
+        nc_t = torch.tensor(nc, dtype=torch.long) if nc is not None else None
+        ncont_t = torch.tensor(ncont) if ncont is not None else None
+        logits = net(nt, ei_t, ea_t, nc_t, ncont_t)
         p_real = float(F.softmax(logits, dim=-1)[0, 1].item())
     print(f"{a.path}: realism = {p_real:.3f}")
 
