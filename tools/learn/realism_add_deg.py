@@ -70,6 +70,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=2000, help="target number of degraded samples to add")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--source", choices=["omr", "bricknet", "both"], default="both")
+    ap.add_argument("--n-bricknet", type=int, default=0, help="cap bricknet sources (0 = all SFT)")
     args = ap.parse_args()
 
     import tempfile
@@ -79,24 +81,54 @@ def main():
         bucket = pickle.load(f)
     print(f"existing: {dict((k, len(v)) for k, v in bucket.items())}", flush=True)
 
-    omr_files = [f for f in sorted(OMR.glob("*.mpd"))]
+    pre: list = []                                                     # list of parts lists
     rng = random.Random(args.seed)
-    rng.shuffle(omr_files)
-    omr_files = omr_files[:min(len(omr_files), args.n // 2)]
-    print(f"will degrade from {len(omr_files)} source OMR files", flush=True)
 
-    # Pre-load parts (avoid repeated flatten)
-    pre: list = []
-    for i, f in enumerate(omr_files):
-        try:
-            parts = flatten(f)
-            if parts:
-                pre.append(parts)
-        except Exception:
-            continue
-        if (i + 1) % 50 == 0:
-            print(f"  loaded {i+1}/{len(omr_files)}", flush=True)
-    print(f"loaded {len(pre)} parts lists", flush=True)
+    if args.source in ("omr", "both"):
+        omr_files = [f for f in sorted(OMR.glob("*.mpd"))]
+        rng.shuffle(omr_files)
+        omr_files = omr_files[:min(len(omr_files), args.n // 2)]
+        print(f"OMR: will degrade from {len(omr_files)} source files", flush=True)
+        for i, f in enumerate(omr_files):
+            try:
+                parts = flatten(f)
+                if parts:
+                    pre.append(parts)
+            except Exception:
+                continue
+            if (i + 1) % 100 == 0:
+                print(f"  OMR loaded {i+1}/{len(omr_files)}", flush=True)
+
+    if args.source in ("bricknet", "both"):
+        import bricknet
+        bn_npz = DATA / "bricknet" / "sft.npz"
+        if bn_npz.exists():
+            print(f"BrickNet: loading {bn_npz}...", flush=True)
+            bn_graphs = bricknet.load_graphs(str(bn_npz))
+            cap = args.n_bricknet if args.n_bricknet > 0 else min(len(bn_graphs), args.n * 2)
+            print(f"BrickNet: converting {cap} graphs to parts lists via graph_to_ldr → flatten", flush=True)
+            for i in range(cap):
+                try:
+                    text = bricknet.graph_to_ldr(bn_graphs[i])
+                except Exception:
+                    continue
+                if not text or "1 " not in text:
+                    continue
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".ldr", delete=False,
+                                                   dir=os.environ.get("TMPDIR")) as fh:
+                    fh.write(text)
+                    tmp = Path(fh.name)
+                try:
+                    parts = flatten(tmp)
+                    if parts:
+                        pre.append(parts)
+                except Exception:
+                    pass
+                finally:
+                    tmp.unlink(missing_ok=True)
+                if (i + 1) % 500 == 0:
+                    print(f"  BrickNet loaded {i+1}/{cap}", flush=True)
+    print(f"loaded {len(pre)} parts lists total", flush=True)
 
     kinds = ["replace", "colour", "position", "crop", "combined"]
     added = 0

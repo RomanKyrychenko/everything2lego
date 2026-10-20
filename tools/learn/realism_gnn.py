@@ -392,10 +392,9 @@ def cmd_train(a) -> None:
             return torch.relu(self.upd(torch.cat([x, agg], dim=-1)))
 
     class GNN(nn.Module):
-        """v4: per-part embedding over PART_VOCAB_SIZE, plus category / size /
-        colour embeddings and continuous features.  Falls back to legacy
-        NODE_DIM one-hot concatenation when node_cat / node_cont aren't
-        provided (back-compat)."""
+        """v4+batching: per-part embedding + category/size/colour + continuous.
+        forward accepts a `graph_id` tensor (per-node) for batched mean-pool;
+        when graph_id is None, treats input as one graph (back-compat)."""
         def __init__(self, hidden=32, n_layers=2):
             super().__init__()
             self.part_emb = nn.Embedding(PART_VOCAB_SIZE, 32)
@@ -409,7 +408,8 @@ def cmd_train(a) -> None:
             self.head = nn.Sequential(nn.Linear(hidden, 32), nn.ReLU(),
                                        nn.Linear(32, 16), nn.ReLU(), nn.Linear(16, 2))
 
-        def forward(self, nodes, ei, ea, node_cat=None, node_cont=None):
+        def forward(self, nodes, ei, ea, node_cat=None, node_cont=None,
+                     graph_id=None, n_graphs=None):
             if node_cat is not None and node_cont is not None:
                 part_e = self.part_emb(node_cat[:, 0])
                 cat_e = self.cat_emb(node_cat[:, 1])
@@ -421,8 +421,17 @@ def cmd_train(a) -> None:
                 x = torch.relu(self.legacy_embed(nodes))
             for layer in self.layers:
                 x = layer(x, ei, ea)
-            graph = x.mean(dim=0)
-            return self.head(graph).unsqueeze(0)                # (1, 2)
+            if graph_id is None:
+                graph = x.mean(dim=0)
+                return self.head(graph).unsqueeze(0)             # (1, 2)
+            # Batched: scatter-mean per graph_id
+            B = int(n_graphs) if n_graphs is not None else int(graph_id.max().item()) + 1
+            sums = torch.zeros(B, x.size(-1), device=x.device)
+            sums.index_add_(0, graph_id, x)
+            counts = torch.zeros(B, device=x.device).scatter_add_(
+                0, graph_id, torch.ones(graph_id.size(0), device=x.device))
+            graph_feats = sums / counts.clamp(min=1).unsqueeze(-1)
+            return self.head(graph_feats)                        # (B, 2)
 
     net = GNN(hidden=a.hidden, n_layers=a.layers).to(device)
     opt = torch.optim.Adam(net.parameters(), lr=a.lr)
@@ -443,26 +452,49 @@ def cmd_train(a) -> None:
         rng_t = np.random.default_rng(a.seed + ep)
         order = rng_t.permutation(len(train))
         tr_hit = tr_n = tr_loss = 0.0
-        for ix in order:
-            g, y, _ = train[ix]
-            if len(g) == 5:
-                nodes, ei, ea, nc, ncont = g
-            else:
-                nodes, ei, ea = g
-                nc = ncont = None
-            if ei.shape[1] == 0 or nodes.shape[0] == 0:
+        # Batched training: concat up to a.batch graphs per step with cumulative
+        # node-index offsets so edges stay valid.  Massive speedup over per-
+        # graph forward+backward on CPU/MPS.
+        B = a.batch
+        i = 0
+        while i < len(order):
+            batch_ix = order[i:i + B]
+            i += B
+            all_nodes, all_ei, all_ea, all_nc, all_ncont, all_gid, all_y = [], [], [], [], [], [], []
+            n_off = 0
+            kept = 0                                             # dense graph index after skips
+            for idx in batch_ix:
+                g, y, _ = train[idx]
+                if len(g) == 5:
+                    nodes, ei, ea, nc, ncont = g
+                else:
+                    nodes, ei, ea = g
+                    nc = ncont = None
+                if ei.shape[1] == 0 or nodes.shape[0] == 0:
+                    continue
+                all_nodes.append(nodes)
+                all_ei.append(ei + n_off)
+                all_ea.append(ea)
+                if nc is not None:
+                    all_nc.append(nc); all_ncont.append(ncont)
+                all_gid.append(np.full(nodes.shape[0], kept, dtype=np.int64))
+                all_y.append(y)
+                n_off += nodes.shape[0]
+                kept += 1
+            if not all_nodes:
                 continue
-            nodes_t = torch.tensor(nodes, device=device)
-            ei_t = torch.tensor(ei, device=device, dtype=torch.long)
-            ea_t = torch.tensor(ea, device=device)
-            nc_t = torch.tensor(nc, device=device, dtype=torch.long) if nc is not None else None
-            ncont_t = torch.tensor(ncont, device=device) if ncont is not None else None
-            y_t = torch.tensor([y], device=device, dtype=torch.long)
-            logits = net(nodes_t, ei_t, ea_t, nc_t, ncont_t)
+            nodes_t = torch.tensor(np.concatenate(all_nodes, axis=0), device=device)
+            ei_t = torch.tensor(np.concatenate(all_ei, axis=1), device=device, dtype=torch.long)
+            ea_t = torch.tensor(np.concatenate(all_ea, axis=0), device=device)
+            nc_t = torch.tensor(np.concatenate(all_nc, axis=0), device=device, dtype=torch.long) if all_nc else None
+            ncont_t = torch.tensor(np.concatenate(all_ncont, axis=0), device=device) if all_ncont else None
+            gid_t = torch.tensor(np.concatenate(all_gid, axis=0), device=device, dtype=torch.long)
+            y_t = torch.tensor(all_y, device=device, dtype=torch.long)
+            logits = net(nodes_t, ei_t, ea_t, nc_t, ncont_t, graph_id=gid_t, n_graphs=len(all_y))
             loss = F.cross_entropy(logits, y_t, weight=class_w)
             opt.zero_grad(); loss.backward(); opt.step()
-            tr_loss += loss.item(); tr_n += 1
-            tr_hit += int(logits.argmax(-1).item() == y)
+            tr_loss += loss.item() * len(all_y); tr_n += len(all_y)
+            tr_hit += (logits.argmax(-1) == y_t).sum().item()
         net.eval()
         vl_hit = 0
         per: dict = {}
@@ -613,6 +645,7 @@ def main() -> None:
     t.add_argument("--lr", type=float, default=5e-4)
     t.add_argument("--hidden", type=int, default=32)
     t.add_argument("--layers", type=int, default=2, help="number of message-passing layers")
+    t.add_argument("--batch", type=int, default=32, help="graphs per batched step (1 = unbatched)")
     t.add_argument("--val-frac", type=float, default=0.2)
     t.add_argument("--seed", type=int, default=0)
     t.add_argument("--device", default="cpu")
