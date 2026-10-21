@@ -71,7 +71,65 @@ def _part_id_map() -> dict:
     PART_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
     PART_INDEX_PATH.write_text(json.dumps(m))
     return m
-EDGE_DIM = 3 + 3                                                      # direction one-hot + normalized offset
+EDGE_FAMILIES = ("unknown", "stud", "hinge", "axle", "ball", "fixed")
+_FAM_IX = {f: i for i, f in enumerate(EDGE_FAMILIES)}
+EDGE_DIM = len(EDGE_FAMILIES) + 3                                     # 6-dim family one-hot + 3-dim offset
+
+
+def _subgraph_bootstrap(graph, target_n: int, rng: random.Random):
+    """BFS-sample up to `target_n` connected nodes from `graph`, return a new
+    5-tuple with reindexed edges.  Used to equalise graph sizes at training
+    time so the classifier can't exploit the real-vs-ours node-count gap.
+    If the graph has fewer than target_n nodes, returns the whole graph."""
+    if len(graph) == 5:
+        nodes, edge_index, edge_attr, node_cat, node_cont = graph
+    else:
+        nodes, edge_index, edge_attr = graph
+        node_cat = node_cont = None
+    N = nodes.shape[0]
+    if N <= target_n or N <= 10:
+        return graph                                               # too small to subsample
+    # Build undirected adjacency
+    adj: dict = {}
+    for k in range(edge_index.shape[1]):
+        s, d = int(edge_index[0, k]), int(edge_index[1, k])
+        adj.setdefault(s, []).append(d)
+    seed = rng.randrange(N)
+    kept = [seed]
+    kept_set = {seed}
+    frontier = [seed]
+    while len(kept) < target_n and frontier:
+        nxt = []
+        for u in frontier:
+            for v in adj.get(u, ()):
+                if v not in kept_set:
+                    kept_set.add(v); kept.append(v); nxt.append(v)
+                    if len(kept) >= target_n:
+                        break
+            if len(kept) >= target_n:
+                break
+        frontier = nxt
+    if len(kept) < 10:
+        return graph
+    remap = {old: new for new, old in enumerate(kept)}
+    kept_arr = np.array(kept, dtype=np.int64)
+    new_nodes = nodes[kept_arr]
+    new_ei = []
+    new_ea = []
+    for k in range(edge_index.shape[1]):
+        s, d = int(edge_index[0, k]), int(edge_index[1, k])
+        if s in kept_set and d in kept_set:
+            new_ei.append((remap[s], remap[d]))
+            new_ea.append(edge_attr[k])
+    if not new_ei:
+        return graph                                                # kept but disconnected — fall back
+    new_edge_index = np.array(new_ei, dtype=np.int64).T
+    new_edge_attr = np.array(new_ea, dtype=np.float32)
+    new_cat = node_cat[kept_arr] if node_cat is not None else None
+    new_cont = node_cont[kept_arr] if node_cont is not None else None
+    if new_cat is not None:
+        return new_nodes, new_edge_index, new_edge_attr, new_cat, new_cont
+    return new_nodes, new_edge_index, new_edge_attr
 
 
 def _augment_graph(graph, rng: random.Random):
@@ -216,24 +274,110 @@ def build_graph(path: Path, part_id_map: dict | None = None) -> tuple | None:
         node_cont[i, 2] = w_p
         node_cont[i, 3] = d_p
     # Edges
+    # Edges — OMR path, bbox adjacency, family defaults to "unknown".
+    # BrickNet-sourced graphs use bricknet_graph_to_ours() instead for typed
+    # connectors (stud/hinge/axle/ball/fixed).
     pairs = _neighbour_pairs(items)
     E = len(pairs) * 2
     edge_index = np.zeros((2, E), dtype=np.int64)
     edge_attr = np.zeros((E, EDGE_DIM), dtype=np.float32)
-    DIR_IX = {"up": 0, "down": 1, "level": 2}
-    for k, (i, j, d) in enumerate(pairs):
+    fam_off = _FAM_IX["unknown"]
+    for k, (i, j, _dir) in enumerate(pairs):
         for side, (a, b) in enumerate(((i, j), (j, i))):
             k2 = 2 * k + side
             edge_index[0, k2] = a
             edge_index[1, k2] = b
-            edge_attr[k2, DIR_IX[d]] = 1.0
-            # relative offset normalised by typical stud/plate units
+            edge_attr[k2, fam_off] = 1.0
             dx = (items[b][3][0] - items[a][3][0]) / 10.0
             dy = (items[b][3][1] - items[a][3][1]) / 10.0
             dz = (items[b][3][2] - items[a][3][2]) / 10.0
-            edge_attr[k2, 3] = max(-5, min(5, dx))
-            edge_attr[k2, 4] = max(-5, min(5, dy))
-            edge_attr[k2, 5] = max(-5, min(5, dz))
+            edge_attr[k2, len(EDGE_FAMILIES)] = max(-5, min(5, dx))
+            edge_attr[k2, len(EDGE_FAMILIES) + 1] = max(-5, min(5, dy))
+            edge_attr[k2, len(EDGE_FAMILIES) + 2] = max(-5, min(5, dz))
+    return nodes, edge_index, edge_attr, node_cat, node_cont
+
+
+def bricknet_graph_to_ours(g_bn, part_id_map: dict | None = None):
+    """Hybrid converter: use bricknet.graph_to_ldr to realise positions (since
+    BrickNet's Graph stores structure, not absolute transforms), then overlay
+    the TYPED connector families (stud/hinge/axle/ball/fixed) from g_bn.edges
+    onto our node ordering.  Keeps BrickNet's connector semantics instead of
+    rediscovering bbox adjacency."""
+    import bricknet
+    import tempfile
+    from ldraw_read import flatten, part_bbox
+    try:
+        text = bricknet.graph_to_ldr(g_bn)
+    except Exception:
+        return None
+    if not text or "1 " not in text:
+        return None
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".ldr", delete=False,
+                                       dir=os.environ.get("TMPDIR")) as fh:
+        fh.write(text)
+        tmp = Path(fh.name)
+    try:
+        parts = flatten(tmp)
+    except Exception:
+        parts = None
+    finally:
+        tmp.unlink(missing_ok=True)
+    if not parts:
+        return None
+    bbox_cache = {}
+    for p in parts:
+        if p.name not in bbox_cache:
+            try: bbox_cache[p.name] = part_bbox(p.name)
+            except Exception: bbox_cache[p.name] = None
+    # Build nodes the usual way (reuses position / colour / size logic).
+    items = _parts_with_grid(parts, bbox_cache)
+    if not items:
+        return None
+    if part_id_map is None:
+        part_id_map = _part_id_map()
+    N = len(items)
+    y_coords = [it[3][1] for it in items]
+    y_min, y_max = min(y_coords), max(y_coords)
+    y_rng = max(1.0, y_max - y_min)
+    nodes = np.zeros((N, NODE_DIM), dtype=np.float32)
+    node_cat = np.zeros((N, NODE_CAT_DIM), dtype=np.int64)
+    node_cont = np.zeros((N, NODE_CONT_DIM), dtype=np.float32)
+    cat_bins = len(CATEGORIES); col_bins = len(COLOUR_BINS) + 1
+    for i, (ldraw, colour, M, glo, ghi) in enumerate(items):
+        cat_i = _category(ldraw); sz_i = _size_bin(ldraw, bbox_cache); col_i = _colour_bin(colour)
+        pid_i = part_id_map.get(ldraw, 0)
+        nodes[i, cat_i] = 1.0; nodes[i, cat_bins + sz_i] = 1.0; nodes[i, cat_bins + 5 + col_i] = 1.0
+        off = cat_bins + 5 + col_bins
+        y_norm = (glo[1] - y_min) / y_rng
+        snot_f = 1.0 if _is_snot(M) else 0.0
+        w_p = (ghi[0] - glo[0]) / 10.0
+        d_p = (ghi[2] - glo[2]) / 10.0
+        nodes[i, off] = y_norm; nodes[i, off+1] = snot_f; nodes[i, off+2] = w_p; nodes[i, off+3] = d_p
+        node_cat[i, 0] = pid_i; node_cat[i, 1] = cat_i; node_cat[i, 2] = sz_i; node_cat[i, 3] = col_i
+        node_cont[i, 0] = y_norm; node_cont[i, 1] = snot_f; node_cont[i, 2] = w_p; node_cont[i, 3] = d_p
+    # Edges: typed families from g_bn.edges.  Indices (a, b) in g_bn match the
+    # order graph_to_ldr emits parts, which matches our flatten() output when
+    # the LDraw has no sub-models (bricknet renders a flat type-1 sequence).
+    bn_edges = g_bn.edges
+    valid_edges = [(int(e["a"]), int(e["b"]), str(e["family"]))
+                    for e in bn_edges
+                    if 0 <= int(e["a"]) < N and 0 <= int(e["b"]) < N and int(e["a"]) != int(e["b"])]
+    E = len(valid_edges) * 2
+    edge_index = np.zeros((2, E), dtype=np.int64)
+    edge_attr = np.zeros((E, EDGE_DIM), dtype=np.float32)
+    for k, (a, b, fam) in enumerate(valid_edges):
+        fam_i = _FAM_IX.get(fam, _FAM_IX["unknown"])
+        dx = (items[b][3][0] - items[a][3][0]) / 10.0
+        dy = (items[b][3][1] - items[a][3][1]) / 10.0
+        dz = (items[b][3][2] - items[a][3][2]) / 10.0
+        dx = max(-5, min(5, dx)); dy = max(-5, min(5, dy)); dz = max(-5, min(5, dz))
+        for side, (s, d, sign) in enumerate(((a, b, 1.0), (b, a, -1.0))):
+            kk = 2 * k + side
+            edge_index[0, kk] = s; edge_index[1, kk] = d
+            edge_attr[kk, fam_i] = 1.0
+            edge_attr[kk, len(EDGE_FAMILIES)] = sign * dx
+            edge_attr[kk, len(EDGE_FAMILIES) + 1] = sign * dy
+            edge_attr[kk, len(EDGE_FAMILIES) + 2] = sign * dz
     return nodes, edge_index, edge_attr, node_cat, node_cont
 
 
@@ -447,6 +591,19 @@ def cmd_train(a) -> None:
     class_w = torch.tensor([w_neg, w_pos], device=device, dtype=torch.float32)
     print(f"class weights: not-real={w_neg:.2f}  real={w_pos:.2f}  (counts {n_neg}/{n_pos})", flush=True)
 
+    # Strip typed-family one-hot columns from all edges to prevent a data leak:
+    # BrickNet-sourced graphs carry stud/hinge/axle/ball/fixed families, our
+    # OMR / ours / deg graphs have "unknown".  A classifier can trivially use
+    # the family column to separate classes.  Zero them out so the model
+    # must learn from node features + edge offsets only.
+    if a.strip_family:
+        n_fam = len(EDGE_FAMILIES)
+        for src in (train, val):
+            for g, _y, _s in src:
+                if len(g) >= 3 and g[2] is not None and g[2].shape[0] > 0:
+                    g[2][:, :n_fam] = 0.0
+        print(f"stripped {n_fam} family columns from edges", flush=True)
+
     # Pre-convert graphs to torch tensors once.  Each step becomes a concat +
     # offset of pre-made tensors instead of numpy→torch per batch — saves the
     # per-step allocation cost (~30-50% faster).
@@ -525,8 +682,11 @@ def cmd_train(a) -> None:
                 gid_t = torch.cat(all_gid, dim=0).to(device)
                 y_t = torch.tensor(all_y, device=device, dtype=torch.long)
             else:
+                _bootstrap_rng = random.Random(ep * 1000003 + i)
                 for idx in batch_ix:
                     g, y, _ = train[idx]
+                    if a.subgraph_nodes > 0:
+                        g = _subgraph_bootstrap(g, a.subgraph_nodes, _bootstrap_rng)
                     if len(g) == 5:
                         nodes, ei, ea, nc, ncont = g
                     else:
@@ -556,7 +716,10 @@ def cmd_train(a) -> None:
         vl_hit = 0
         per: dict = {}
         with torch.no_grad():
+            _val_rng = random.Random(ep * 2003)
             for g, y, s in val:
+                if a.subgraph_nodes > 0:
+                    g = _subgraph_bootstrap(g, a.subgraph_nodes, _val_rng)
                 if len(g) == 5:
                     nodes, ei, ea, nc, ncont = g
                 else:
@@ -576,10 +739,15 @@ def cmd_train(a) -> None:
                 per[s][0] += int(pred == y)
         va = vl_hit / max(1, len(val))
         tag = "  ".join(f"{k}={h/max(1,t):.3f}" for k, (h, t) in per.items())
-        # Confusion for F1: positive = real (class 1).
+        # Confusion for F1 + probs for ROC AUC: positive = real (class 1).
         tp = fp = fn = tn = 0
+        probs_pos: list = []    # P(class=real)
+        truths: list = []
         with torch.no_grad():
+            _val_rng2 = random.Random(ep * 2003 + 1)
             for g, y, s in val:
+                if a.subgraph_nodes > 0:
+                    g = _subgraph_bootstrap(g, a.subgraph_nodes, _val_rng2)
                 if len(g) == 5:
                     nodes, ei, ea, nc, ncont = g
                 else:
@@ -592,7 +760,11 @@ def cmd_train(a) -> None:
                 ea_t = torch.tensor(ea, device=device)
                 nc_t = torch.tensor(nc, device=device, dtype=torch.long) if nc is not None else None
                 ncont_t = torch.tensor(ncont, device=device) if ncont is not None else None
-                pred = int(net(nodes_t, ei_t, ea_t, nc_t, ncont_t).argmax(-1).item())
+                logits = net(nodes_t, ei_t, ea_t, nc_t, ncont_t)
+                p = float(F.softmax(logits, dim=-1)[0, 1].item())
+                probs_pos.append(p)
+                truths.append(y)
+                pred = 1 if p >= 0.5 else 0
                 if y == 1 and pred == 1: tp += 1
                 elif y == 0 and pred == 1: fp += 1
                 elif y == 1 and pred == 0: fn += 1
@@ -604,14 +776,33 @@ def cmd_train(a) -> None:
         rec_neg = tn / max(1, tn + fp)
         f1_neg = 2 * prec_neg * rec_neg / max(1e-9, prec_neg + rec_neg)
         f1_macro = (f1_pos + f1_neg) / 2
+        # ROC AUC: threshold-free discrimination.  Hand-rolled trapezoidal rule
+        # over sorted-by-probability pairs — avoids a sklearn dependency.
+        auc = 0.0
+        if probs_pos and 0 < sum(truths) < len(truths):
+            paired = sorted(zip(probs_pos, truths), reverse=True)
+            n_pos = sum(truths); n_neg = len(truths) - n_pos
+            tp_r = fp_r = 0
+            prev_p = None
+            prev_tp = prev_fp = 0
+            auc_acc = 0.0
+            for p, t in paired:
+                if prev_p is not None and p != prev_p:
+                    auc_acc += (fp_r - prev_fp) * (tp_r + prev_tp) / 2
+                    prev_tp = tp_r; prev_fp = fp_r
+                if t == 1: tp_r += 1
+                else: fp_r += 1
+                prev_p = p
+            auc_acc += (fp_r - prev_fp) * (tp_r + prev_tp) / 2
+            auc = auc_acc / max(1, n_pos * n_neg)
         print(f"ep {ep:02d}  tr loss {tr_loss/max(1,tr_n):.4f} acc {tr_hit/max(1,tr_n):.3f}  "
-              f"val acc {va:.3f}  F1_real={f1_pos:.3f} F1_notreal={f1_neg:.3f} F1_macro={f1_macro:.3f}  [{tag}]", flush=True)
-        if f1_macro > best:
-            best = f1_macro
+              f"val acc {va:.3f}  AUC={auc:.3f}  F1_macro={f1_macro:.3f} (real {f1_pos:.3f}, notreal {f1_neg:.3f})  [{tag}]", flush=True)
+        if auc > best:
+            best = auc
             import torch as _t
-            _t.save({"state_dict": net.state_dict(), "val_acc": va, "f1_macro": f1_macro,
+            _t.save({"state_dict": net.state_dict(), "val_acc": va, "auc": auc, "f1_macro": f1_macro,
                       "epoch": ep, "hidden": a.hidden, "layers": a.layers}, MODEL_PT)
-    print(f"best F1_macro {best:.3f}  saved -> {MODEL_PT}", flush=True)
+    print(f"best AUC {best:.3f}  saved -> {MODEL_PT}", flush=True)
 
 
 def cmd_score(a) -> None:
@@ -674,15 +865,32 @@ def cmd_score(a) -> None:
             return self.head(x.mean(dim=0)).unsqueeze(0)
 
     net = GNN(); net.load_state_dict(ckpt["state_dict"]); net.eval()
-    with torch.no_grad():
-        nt = torch.tensor(nodes)
-        ei_t = torch.tensor(ei, dtype=torch.long)
-        ea_t = torch.tensor(ea)
-        nc_t = torch.tensor(nc, dtype=torch.long) if nc is not None else None
-        ncont_t = torch.tensor(ncont) if ncont is not None else None
-        logits = net(nt, ei_t, ea_t, nc_t, ncont_t)
-        p_real = float(F.softmax(logits, dim=-1)[0, 1].item())
-    print(f"{a.path}: realism = {p_real:.3f}")
+    # Match training: strip family one-hot and average over K subgraph samples.
+    scores = []
+    rng = random.Random(0)
+    for _ in range(a.samples):
+        gs = _subgraph_bootstrap(g, a.subgraph_nodes, rng) if a.subgraph_nodes > 0 else g
+        if len(gs) == 5:
+            nodes2, ei2, ea2, nc2, ncont2 = gs
+        else:
+            nodes2, ei2, ea2 = gs
+            nc2 = ncont2 = None
+        if ea2.shape[0] == 0 or nodes2.shape[0] == 0:
+            continue
+        if a.strip_family and ea2.shape[1] >= len(EDGE_FAMILIES):
+            ea2 = ea2.copy(); ea2[:, :len(EDGE_FAMILIES)] = 0.0
+        with torch.no_grad():
+            nt = torch.tensor(nodes2)
+            ei_t = torch.tensor(ei2, dtype=torch.long)
+            ea_t = torch.tensor(ea2)
+            nc_t = torch.tensor(nc2, dtype=torch.long) if nc2 is not None else None
+            ncont_t = torch.tensor(ncont2) if ncont2 is not None else None
+            logits = net(nt, ei_t, ea_t, nc_t, ncont_t)
+            scores.append(float(F.softmax(logits, dim=-1)[0, 1].item()))
+    if not scores:
+        raise SystemExit(f"no valid subgraph samples from {a.path}")
+    p_mean = sum(scores) / len(scores)
+    print(f"{a.path}: realism = {p_mean:.3f}  (K={len(scores)} subgraph samples, min={min(scores):.3f} max={max(scores):.3f})")
 
 
 def main() -> None:
@@ -705,12 +913,17 @@ def main() -> None:
     t.add_argument("--batch", type=int, default=32, help="graphs per batched step (1 = unbatched)")
     t.add_argument("--subset", type=int, default=0, help="per-epoch random sample size (0 = full)")
     t.add_argument("--pre-convert", action=argparse.BooleanOptionalAction, default=True, help="pre-convert graphs to torch tensors once at startup (saves ~30-50%% per step)")
+    t.add_argument("--strip-family", action=argparse.BooleanOptionalAction, default=True, help="zero out the 6-dim family one-hot in all edge attrs (removes BrickNet-vs-ours trivial shortcut)")
+    t.add_argument("--subgraph-nodes", type=int, default=0, help="BFS-sample N connected nodes per training+val step (0 = whole graph).  Removes the node-count class leak so classifier learns from structure within equal-sized subgraphs.")
     t.add_argument("--val-frac", type=float, default=0.2)
     t.add_argument("--seed", type=int, default=0)
     t.add_argument("--device", default="cpu")
     t.set_defaults(func=cmd_train)
     s = sub.add_parser("score")
     s.add_argument("path", type=Path)
+    s.add_argument("--samples", type=int, default=5, help="subgraph samples averaged")
+    s.add_argument("--subgraph-nodes", type=int, default=50, help="BFS subgraph size (0 = whole graph)")
+    s.add_argument("--strip-family", action=argparse.BooleanOptionalAction, default=True, help="match training's --strip-family")
     s.set_defaults(func=cmd_score)
     args = ap.parse_args()
     args.func(args)

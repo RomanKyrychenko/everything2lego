@@ -25,7 +25,7 @@ DATA = Path(os.environ.get("LEGO_DATA", "/Volumes/PRO-G40/lego_data"))
 BRICKNET_DIR = DATA / "bricknet"
 GRAPHS_PKL = DATA / "analysis" / "realism_gnn" / "graphs.pkl"
 
-from realism_gnn import build_graph, _part_id_map
+from realism_gnn import build_graph, bricknet_graph_to_ours, _part_id_map
 
 
 def main() -> None:
@@ -54,23 +54,9 @@ def main() -> None:
     for i in range(cap):
         g_bn = graphs[i]
         try:
-            text = bricknet.graph_to_ldr(g_bn)
-        except Exception:
-            skipped += 1
-            continue
-        if not text or "1 " not in text:
-            skipped += 1
-            continue
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".ldr", delete=False,
-                                           dir=os.environ.get("TMPDIR")) as fh:
-            fh.write(text)
-            tmp = Path(fh.name)
-        try:
-            g_ours = build_graph(tmp, part_id_map=part_map)
+            g_ours = bricknet_graph_to_ours(g_bn, part_id_map=part_map)
         except Exception:
             g_ours = None
-        finally:
-            tmp.unlink(missing_ok=True)
         if g_ours is None:
             skipped += 1
             continue
