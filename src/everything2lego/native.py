@@ -94,6 +94,7 @@ class Problem(C.Structure):
         ("opt_class", _P(C.c_int32)), ("size_pref", _P(C.c_double)),
         ("n_snot_rows", C.c_int32), ("snot_rows", _P(C.c_int32)),      # sideways move (snot_options.pair_rows)
         ("w_sideways", C.c_double), ("p_sideways", C.c_double), ("opt_sideways", _P(C.c_uint8)),   # sideways-share KL term
+        ("w_out", _P(C.c_float)), ("w_in", _P(C.c_float)),             # surface fit (surface_fit.py); null = sample count
     ]
 
 
@@ -313,6 +314,11 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         from .sizes import N_CLASS, real_mix, size_class
         oc = arr([size_class(o.size[0], o.size[1], o.size[2]) for _, o in opts], np.int32); sp = arr(real_mix(kind), np.float64)
         size_fields = dict(w_size=weights.size, n_size_class=N_CLASS, opt_class=_ptr(oc, C.c_int32), size_pref=_ptr(sp, C.c_double))
+    if getattr(weights, "surface", 0.0) > 0:                                     # shape term weighted by distance to the surface
+        from .surface_fit import weights as _surface_weights
+        wo, wi = _surface_weights(target.bits, alpha=weights.surface)
+        wo, wi = arr(wo, np.float32), arr(wi, np.float32)
+        size_fields.update(w_out=_ptr(wo, C.c_float), w_in=_ptr(wi, C.c_float))
     if any(o.snot is not None for _, o in opts):                                 # sideways options present: the combined move
         from .snot_options import pair_rows
         sr = arr(pair_rows(opts), np.int32)

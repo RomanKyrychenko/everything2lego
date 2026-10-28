@@ -171,6 +171,11 @@ pub struct Problem {
     pub w_sideways: f64,
     pub p_sideways: f64,
     pub opt_sideways: *const u8, // n_opt: 1 = a sideways option
+    // surface fit (surface_fit.py): per cell and sample (bit order of the masks), the cost of LEGO there when the
+    // target is empty (grows with the distance to the target's surface) and the reward for covering it when the
+    // target is full (1 near the outer surface, ~0 deep inside); null = the plain count of wrong samples
+    pub w_out: *const f32, // h*x*z*64
+    pub w_in: *const f32,  // h*x*z*64
 }
 
 const INFO_LEN: usize = 20;
@@ -315,6 +320,9 @@ struct Data {
     w_sideways: f64,
     p_sideways: f64,
     opt_sideways: Vec<bool>,                              // n_opt (empty when off)
+    w_out: Vec<f32>,                                      // n*64 (empty: plain sample count)
+    w_in: Vec<f32>,
+    fid0: f64,                                            // the shape term of an empty build
 }
 
 unsafe fn v<T: Copy>(p: *const T, n: usize) -> Vec<T> {
@@ -489,7 +497,12 @@ impl Data {
             w_sideways: if p.opt_sideways.is_null() { 0.0 } else { p.w_sideways },
             p_sideways: p.p_sideways.clamp(1e-4, 1.0 - 1e-4),
             opt_sideways: if p.opt_sideways.is_null() { Vec::new() } else { v(p.opt_sideways, n_opt).iter().map(|&b| b != 0).collect() },
+            w_out: if p.w_out.is_null() || p.w_in.is_null() { Vec::new() } else { v(p.w_out, n * 64) },
+            w_in: if p.w_out.is_null() || p.w_in.is_null() { Vec::new() } else { v(p.w_in, n * 64) },
+            fid0: 0.0,
         };
+        d.fid0 = if d.w_in.is_empty() { d.fill.iter().sum() }
+                 else { (0..n).map(|c| (0..64).filter(|&b| d.tbits[c] >> b & 1 == 1).map(|b| d.w_in[c * 64 + b] as f64).sum::<f64>()).sum::<f64>() / NSAMP };
         let n_snot = p.n_snot_rows.max(0) as usize;
         if n_snot > 0 && !p.snot_rows.is_null() {
             let raw = v(p.snot_rows, n_snot * 7);
@@ -581,6 +594,20 @@ impl Data {
 
     /// Change in wrong samples (/64) from filling these empty cells so.
     fn fid_delta(&self, o: &Opt, oy: i32, ox: i32, oz: i32) -> f64 {
+        if !self.w_in.is_empty() {                       // surface fit: weighted by the distance to the target's surface
+            let mut s = 0f64;
+            for &(y, x, z, bits, _) in &o.cells {
+                let c = self.idx(oy + y, ox + x, oz + z);
+                let t = self.tbits[c];
+                let mut b = bits;
+                while b != 0 {
+                    let k = b.trailing_zeros() as usize;
+                    s += if t >> k & 1 == 1 { -(self.w_in[c * 64 + k] as f64) } else { self.w_out[c * 64 + k] as f64 };
+                    b &= b - 1;
+                }
+            }
+            return s / NSAMP;
+        }
         let mut s = 0i64;
         for &(y, x, z, bits, _) in &o.cells {
             let t = self.tbits[self.idx(oy + y, ox + x, oz + z)];
@@ -953,7 +980,7 @@ impl<'a> State<'a> {
             sil: d.tsil.iter().map(|t| t.iter().filter(|&&b| b).count() as i64).sum(),
             loc: 0.0,
             col: 0.0,
-            fid: d.fill.iter().sum(),
+            fid: d.fid0,
             bare: 0,
             size_n: vec![0.0; d.size_lpref.len()],
             n_side: 0.0,

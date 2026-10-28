@@ -522,6 +522,7 @@ class Weights:
     size: float = 0.0         # n_parts * KL(part-size mix || real sets', sizes.py); native engine only
     sideways: float = 0.0     # n_parts * KL(sideways share || p_sideways); with sample(snot=True), native engine only
     p_sideways: float = 0.10  # real buildings: ~15 % of parts not studs-up; the sideways options cover plates / tiles
+    surface: float = 0.0      # > 0: shape term weighted by distance to the target's surface (surface_fit.py, alpha); native only
 
     @classmethod
     def learned(cls, kind: Optional[str] = None) -> "Weights":
