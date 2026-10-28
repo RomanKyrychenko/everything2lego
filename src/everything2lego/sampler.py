@@ -526,6 +526,7 @@ class Weights:
     big: float = 0.0          # filler proposes bigger parts first: + big * ln(footprint, studs^2) on each candidate; native only
     stack: float = 0.0        # n_bricks * KL(share of bricks right on a same-footprint brick || p_stack); native only
     p_stack: float = 0.093    # real buildings' median (build_stats.py stacked_bricks)
+    bare_top: float = 0.0     # energy per top stud with nothing above and nothing to come (outside the target); native only
 
     @classmethod
     def learned(cls, kind: Optional[str] = None) -> "Weights":

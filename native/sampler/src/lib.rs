@@ -184,6 +184,9 @@ pub struct Problem {
     pub w_stack: f64,
     pub p_stack: f64,
     pub opt_brick: *const u8, // n_opt: a plain brick
+    // exposed studs: energy += w_bare_top per top stud whose cell above is empty and outside the target (nothing
+    // will ever sit on it: a tile or a slope belongs there); 0 = off
+    pub w_bare_top: f64,
 }
 
 const INFO_LEN: usize = 20;
@@ -332,6 +335,7 @@ struct Data {
     w_stack: f64,
     p_stack: f64,
     opt_brick: Vec<bool>,
+    w_bare_top: f64,
     w_out: Vec<f32>,                                      // n*64 (empty: plain sample count)
     w_in: Vec<f32>,
     fid0: f64,                                            // the shape term of an empty build
@@ -513,6 +517,7 @@ impl Data {
             w_stack: if p.opt_brick.is_null() { 0.0 } else { p.w_stack },
             p_stack: p.p_stack.clamp(1e-4, 1.0 - 1e-4),
             opt_brick: if p.opt_brick.is_null() { Vec::new() } else { v(p.opt_brick, n_opt).iter().map(|&b| b != 0).collect() },
+            w_bare_top: p.w_bare_top,
             w_out: if p.w_out.is_null() || p.w_in.is_null() { Vec::new() } else { v(p.w_out, n * 64) },
             w_in: if p.w_out.is_null() || p.w_in.is_null() { Vec::new() } else { v(p.w_in, n * 64) },
             fid0: 0.0,
@@ -952,6 +957,8 @@ struct State<'a> {
     n_side: f64,      // live sideways parts
     n_brick: f64,     // live plain bricks
     n_stack: f64,     // brick-on-same-footprint-brick pairs
+    bare_top: Vec<f64>, // per item: its exposed top studs (w_bare_top)
+    n_bare_top: f64,
     mark: Vec<u32>,
     gen: u32,
 }
@@ -1004,6 +1011,8 @@ impl<'a> State<'a> {
             n_side: 0.0,
             n_brick: 0.0,
             n_stack: 0.0,
+            bare_top: Vec::new(),
+            n_bare_top: 0.0,
             mark: Vec::new(),
             gen: 0,
         }
@@ -1418,6 +1427,7 @@ impl<'a> State<'a> {
             + d.w_size * self.size_kl()
             + d.w_sideways * self.sideways_kl()
             + d.w_stack * self.stack_kl()
+            + d.w_bare_top * self.n_bare_top
     }
 
     /// Bricks among `nb` that sit right on / under brick i with the same footprint (a lined-up joint).
@@ -1480,6 +1490,7 @@ impl<'a> State<'a> {
             None => {
                 self.items.push(None);
                 self.unsup.push(false);
+                self.bare_top.push(0.0);
                 self.live_pos.push(0);
                 self.adj.push(Vec::new());
                 self.items.len() - 1
@@ -1519,7 +1530,35 @@ impl<'a> State<'a> {
         let mut ids: Vec<usize> = nb.iter().map(|&(j, _)| j).collect();
         ids.push(i);
         self.refresh_support(&ids);
+        self.refresh_bare_top(&ids);
         i
+    }
+
+    /// Top studs of item j with nothing above them and nothing ever to come: the cell above is empty and not
+    /// part of the target (or off the grid).
+    fn count_bare_top(&self, j: usize) -> f64 {
+        let d = self.d;
+        let it = self.item(j);
+        let o = &d.opts[it.opt];
+        let y = it.y + o.h;
+        o.top.iter().filter(|&&(dx, dz)| {
+            let (x, z) = (it.x + dx, it.z + dz);
+            if y >= d.h { return true; }
+            if !d.inside(y, x, z) { return true; }
+            let c = d.idx(y, x, z);
+            self.owner[c] < 0 && !d.want[c]
+        }).count() as f64
+    }
+
+    fn refresh_bare_top(&mut self, ids: &[usize]) {
+        if self.d.w_bare_top == 0.0 { return; }
+        for &j in ids {
+            if self.items[j].is_some() {
+                let v = self.count_bare_top(j);
+                self.n_bare_top += v - self.bare_top[j];
+                self.bare_top[j] = v;
+            }
+        }
     }
 
     fn remove(&mut self, i: usize) -> Item {
@@ -1562,6 +1601,9 @@ impl<'a> State<'a> {
         self.free_ids.push(i);
         let ids: Vec<usize> = nb.iter().map(|&(j, _)| j).collect();
         self.refresh_support(&ids);
+        self.n_bare_top -= self.bare_top[i];                       // i is gone; its neighbours may now show studs
+        self.bare_top[i] = 0.0;
+        self.refresh_bare_top(&ids);
         it
     }
 
