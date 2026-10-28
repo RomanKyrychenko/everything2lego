@@ -279,17 +279,35 @@ def _rel_pose(e, parent_pid: int, child_pid: int) -> np.ndarray:
 
 @torch.no_grad()
 def generate_cover(model, vocab, cat, target: np.ndarray, grid, device, colours: np.ndarray | None = None, max_bricks=4000,
-                   comp_len=255, retries=6, k_parts=8, tau_out=0.15, seed=0, log_every=100):
+                   comp_len=255, retries=16, k_parts=32, tau_out=0.15, seed=0, log_every=100, attach=True, ctx=96,
+                   flat_area=32.0, out_cap=8, max_roots=1):
     """Fill a large target with many sub-assemblies.  Each sub-assembly is its own sequence (<= comp_len bricks) and
     re-encodes the volume with everything built so far in the state channel (exactly how training windows see their
     prefix).  Parts are re-ranked by how many still-empty target cells they cover; roots start on the lowest empty layer.
-    colours: (H,W,D) LDraw codes (-1 empty) from the mesh -> each brick takes the majority code of the cells it covers."""
+    colours: (H,W,D) LDraw codes (-1 empty) from the mesh -> each brick takes the majority code of the cells it covers.
+
+    attach: after the first root, a sub-assembly grows from up to `ctx` placed bricks that border empty target cells (the
+    sequence prefix, as m2b_refine / sample_infill pose it), so every new brick hangs on a real connector; a free root is
+    only allowed on the ground layers when nothing can attach, and at most `max_roots` free roots in all (without this,
+    every sub-assembly was its own loose piece; allowing ground roots freely gave ~180 islands, since bricks on the same
+    layer cannot connect to each other).
+    flat_area: thin parts (<= 1.6 plates) with a footprint >= this many studs^2 must lie studs-up (real sets: 90-98 %).
+    out_cap: at most this many cells of a part may stick out of the target (tau_out alone let a 16x16 plate overhang 38)."""
     from bricknet.core import Part
     from scipy.ndimage import binary_dilation
     H, W, D = grid; rng = np.random.default_rng(seed); dil = binary_dilation(target, iterations=1); off = np.array([W / 2, 0, D / 2], np.float32)
     scene = VoxelScene(grid, vocab.stems); build = np.zeros(grid, bool)
-    out_parts, out_mats, out_stems = [], [], []; rejected = {"collision": 0, "outside": 0, "nogain": 0}; n_comp = 0; fails = 0
+    out_parts, out_mats, out_stems, out_boxes = [], [], [], []
+    rejected = {"collision": 0, "outside": 0, "nogain": 0, "orient": 0}; n_comp = 0; n_ground = 0; fails = 0
     dead = None                                                                        # stride-2 cells where no root fits
+    dims = {}
+
+    def orient_ok(part, Mp) -> bool:
+        if part not in dims:
+            bb = _part_bbox(vocab.stems[part])
+            dims[part] = (0.0, 9.0) if bb is None else ((bb[1][0] - bb[0][0]) * (bb[1][2] - bb[0][2]) / 400, (bb[1][1] - bb[0][1]) / 8)
+        area, h = dims[part]
+        return not (h <= 1.6 and area >= flat_area) or Mp[1, 1] > 0.99
 
     def pick(logits, mask=None, greedy=True):
         l = logits.clone()
@@ -300,54 +318,40 @@ def generate_cover(model, vocab, cat, target: np.ndarray, grid, device, colours:
         return int(top.indices[rng.choice(len(p), p=p / p.sum())])
 
     def realise_check(part, Mp):
-        """-> (box cells, gain) or None when outside / colliding."""
+        """-> (box, cells, gain) or None when outside / colliding / wrongly oriented."""
+        if not orient_ok(part, Mp): rejected["orient"] += 1; return None
         bx = box_of(vocab.stems[part], Mp, grid); cells = boxes_to_grid(bx[None] - off, grid)
         mc, _ = mesh_grid(np.array([part]), Mp[None], vocab.stems, grid, bx[None] - off)
-        test = mc if mc.sum() else cells
-        if test.sum() == 0 or (test & ~dil).sum() / test.sum() > tau_out: rejected["outside"] += 1; return None
+        test = mc if mc.sum() else cells; out = int((test & ~dil).sum())
+        if test.sum() == 0 or out / test.sum() > tau_out or out > out_cap: rejected["outside"] += 1; return None
         if scene.check(part, Mp): rejected["collision"] += 1; return None
         gain = int((cells & target & ~build).sum())
         if gain == 0: rejected["nogain"] += 1; return None
         return bx, cells, gain
+
+    def borders_free(bx) -> bool:
+        """Does the box (grid units, centred x/z) grown by one cell touch an empty target cell?"""
+        (x0, y0, z0), (x1, y1, z1) = bx[0] + off - 1, bx[1] + off + 1
+        sl = (slice(max(0, int(np.floor(y0))), max(0, int(np.ceil(y1)))), slice(max(0, int(np.floor(x0))), max(0, int(np.ceil(x1)))),
+              slice(max(0, int(np.floor(z0))), max(0, int(np.ceil(z1)))))
+        return bool((target[sl] & ~build[sl]).any())
 
     def colour_of(cells, fallback):
         if colours is None: return fallback
         c = colours[cells & (colours >= 0)]
         return int(np.bincount(c).argmax()) if len(c) else fallback
 
-    while len(out_parts) < max_bricks and fails < 200:
-        free = target & ~build
-        if free.sum() < 4: break
-        vol = torch.from_numpy(np.stack([target, build]).astype(np.float32))[None].to(device)
-        M = model.memory(vol); h2, w2, d2 = M["shape"]
-        fc = free.reshape(h2, 2, w2, 2, d2, 2).any((1, 3, 5))
-        if dead is None: dead = np.zeros_like(fc)
-        fc &= ~dead; ys = np.nonzero(fc.any((1, 2)))[0]
-        if len(ys) == 0: break                                                         # every empty cell tried
-        band = np.zeros_like(fc); band[ys.min():ys.min() + 2] = fc[ys.min():ys.min() + 2]          # lowest empty layers first
-        # ---- root: best (part, sub-cell) by coverage among the model's top parts
-        ci = pick(M["root_logits"][0], band.ravel()); cell = np.array(np.unravel_index(ci, (h2, w2, d2)))
-        s = model.decode(torch.zeros(1, 0, model.d, device=device), M, torch.zeros(1, 1, 3, dtype=torch.long, device=device), torch.zeros(1, 1, dtype=torch.bool, device=device), torch.zeros(1, 0, dtype=torch.bool, device=device))
-        h0 = model.root_context(s[:, 0], M, torch.tensor(cell[None], device=device))[0]; rc = int(model.root_rot(h0).argmax())
-        ctx0 = torch.cat([h0, model.no_parent, model.pconn_emb.weight[NCONN]])
-        best = None
-        rots = [rc] + [r_ for r_ in (0, 1, 2, 3) if r_ != rc]                           # model's rotation, then yaw-only classes
-        for part in torch.topk(model.h_part(ctx0), 2 * k_parts).indices.tolist():
-            for rr in rots[:2]:
-                for o in np.ndindex(2, 2, 2):
-                    ay, ax, az = cell * 2 + np.array(o)
-                    if not free[ay, ax, az]: continue
-                    Mp = root_pose(vocab.stems[part], rr, (ax, ay, az), grid); r = realise_check(part, Mp)
-                    if r and (best is None or r[2] > best[3]): best = (part, Mp, r[0], r[2], r[1])
-        if best is None: dead[tuple(cell)] = True; fails += 1; continue
-        fails = 0; n_comp += 1
-        part, Mp, bx, _, cells = best
-        col = colour_of(cells, vocab.colors[int(model.h_color(torch.cat([ctx0, model.part_emb.weight[part], model.cconn_emb.weight[NCONN]])).argmax())])
-        cp, cm, cb, used = [Part(part, col)], [Mp], [bx], set()
-        scene.add(part, Mp); build |= cells; out_parts.append(cp[0]); out_mats.append(Mp); out_stems.append(vocab.stems[part])
-        # ---- grow this sub-assembly
+    def place(part, col, Mp, bx, cells):
+        scene.add(part, Mp); build[...] = build | cells
+        out_parts.append(Part(part, col)); out_mats.append(Mp); out_stems.append(vocab.stems[part]); out_boxes.append(bx)
+
+    def grow(cp, cm, cb, M) -> int:
+        """Extend the sequence (cp, cm, cb) brick by brick; parents must border empty target cells.  -> bricks added."""
+        used, added = set(), 0
         while len(cp) < comp_len and len(out_parts) < max_bricks:
             T = len(cp); b = np.stack(cb)
+            front = np.array([borders_free(x) for x in cb])
+            if not front.any(): break
             tok, _ = model.tokens(torch.tensor([[p.part_id for p in cp]], device=device), torch.tensor([[vocab.col_idx.get(p.color, 0) for p in cp]], device=device),
                                   torch.tensor((b[:, 0] + b[:, 1]) / 2)[None].to(device), torch.tensor(b[:, 1] - b[:, 0])[None].to(device),
                                   torch.tensor(np.stack(cm)[:, :3, :3], dtype=torch.float32)[None].to(device))
@@ -358,13 +362,15 @@ def generate_cover(model, vocab, cat, target: np.ndarray, grid, device, colours:
             ptr = (model.ptr_q(h) @ model.ptr_k(s[0, 1:T + 1]).T) / model.d ** 0.5
             best = None
             for attempt in range(retries):
-                parent = pick(ptr, greedy=attempt == 0); sp = s[0, 1 + parent]; ctx = torch.cat([h, sp])
+                parent = pick(ptr, front, greedy=attempt == 0)
+                if parent is None: break
+                sp = s[0, 1 + parent]; ctx_ = torch.cat([h, sp])
                 fr = np.arange(NCONN) < min(len(cat.conns[cp[parent].part_id]), NCONN)
                 for (b_, c_) in used:
                     if b_ == parent and c_ < NCONN: fr[c_] = False
-                pci = pick(model.h_pconn(ctx), fr, greedy=attempt == 0)
+                pci = pick(model.h_pconn(ctx_), fr, greedy=attempt == 0)
                 if pci is None: continue
-                pc = cat.conns[cp[parent].part_id][pci]; ctx1 = torch.cat([ctx, model.pconn_emb.weight[pci]])
+                pc = cat.conns[cp[parent].part_id][pci]; ctx1 = torch.cat([ctx_, model.pconn_emb.weight[pci]])
                 pl = model.h_part(ctx1); pl[~torch.as_tensor(cat.part_mask(pc))] = float("-inf")
                 for part in torch.topk(pl, k_parts).indices.tolist():
                     if not torch.isfinite(pl[part]): break
@@ -381,13 +387,52 @@ def generate_cover(model, vocab, cat, target: np.ndarray, grid, device, colours:
                     r = realise_check(part, Mq)
                     if r and (best is None or r[2] > best[3]): best = (part, Mq, r[0], r[2], r[1], parent, pci, cci, ctx3)
                 if best is not None: break
-            if best is None: break                                                     # sub-assembly is done
+            if best is None: break
             part, Mq, bx, _, cells, parent, pci, cci, ctx3 = best
             col = colour_of(cells, vocab.colors[int(model.h_color(ctx3).argmax())])
-            cp.append(Part(part, col)); cm.append(Mq); cb.append(bx); used |= {(parent, pci), (T, cci)}
-            scene.add(part, Mq); build |= cells; out_parts.append(cp[-1]); out_mats.append(Mq); out_stems.append(vocab.stems[part])
+            place(part, col, Mq, bx, cells); cp.append(out_parts[-1]); cm.append(Mq); cb.append(bx); used |= {(parent, pci), (T, cci)}; added += 1
             if len(out_parts) % log_every == 0:
-                print(f"  {len(out_parts)} bricks, {n_comp} sub-assemblies, filled {int((build & target).sum())}/{int(target.sum())}", flush=True)
+                print(f"  {len(out_parts)} bricks, {n_comp} free roots ({n_ground} on the ground), filled {int((build & target).sum())}/{int(target.sum())}", flush=True)
+        return added
+
+    while len(out_parts) < max_bricks and fails < 200:
+        free = target & ~build
+        if free.sum() < 4: break
+        vol = torch.from_numpy(np.stack([target, build]).astype(np.float32))[None].to(device)
+        M = model.memory(vol); h2, w2, d2 = M["shape"]
+        # ---- attach: grow from placed bricks that border the empty target (lowest first, as the refiner's prefix)
+        if attach and out_parts:
+            pre = sorted((i for i in range(len(out_parts)) if borders_free(out_boxes[i])), key=lambda i: (out_boxes[i][0][1], out_boxes[i][0][2], out_boxes[i][0][0]))
+            if any(grow([out_parts[i] for i in ch], [out_mats[i] for i in ch], [out_boxes[i] for i in ch], M)            # lowest border first
+                   for ch in (pre[k:k + ctx] for k in range(0, len(pre), ctx))):
+                fails = 0; continue
+        fc = free.reshape(h2, 2, w2, 2, d2, 2).any((1, 3, 5))
+        if dead is None: dead = np.zeros_like(fc)
+        fc &= ~dead; ys = np.nonzero(fc.any((1, 2)))[0]
+        if len(ys) == 0: break                                                         # every empty cell tried
+        if attach and out_parts and (ys.min() > 0 or n_comp >= max_roots): break     # nothing left that may start a new piece
+        band = np.zeros_like(fc); band[ys.min():ys.min() + 2] = fc[ys.min():ys.min() + 2]          # lowest empty layers first
+        # ---- root: best (part, sub-cell) by coverage among the model's top parts
+        ci = pick(M["root_logits"][0], band.ravel()); cell = np.array(np.unravel_index(ci, (h2, w2, d2)))
+        s = model.decode(torch.zeros(1, 0, model.d, device=device), M, torch.zeros(1, 1, 3, dtype=torch.long, device=device), torch.zeros(1, 1, dtype=torch.bool, device=device), torch.zeros(1, 0, dtype=torch.bool, device=device))
+        h0 = model.root_context(s[:, 0], M, torch.tensor(cell[None], device=device))[0]; rc = int(model.root_rot(h0).argmax())
+        ctx0 = torch.cat([h0, model.no_parent, model.pconn_emb.weight[NCONN]])
+        best = None
+        rots = [rc] + [r_ for r_ in (0, 1, 2, 3) if r_ != rc]                           # model's rotation, then yaw-only classes
+        for part in torch.topk(model.h_part(ctx0), 2 * k_parts).indices.tolist():
+            for rr in rots[:2]:
+                for o in np.ndindex(2, 2, 2):
+                    ay, ax, az = cell * 2 + np.array(o)
+                    if not free[ay, ax, az]: continue
+                    Mp = root_pose(vocab.stems[part], rr, (ax, ay, az), grid); r = realise_check(part, Mp)
+                    if r and (best is None or r[2] > best[3]): best = (part, Mp, r[0], r[2], r[1])
+        if best is None: dead[tuple(cell)] = True; fails += 1; continue
+        fails = 0; n_comp += 1; n_ground += int(cell[0] == 0)
+        part, Mp, bx, _, cells = best
+        col = colour_of(cells, vocab.colors[int(model.h_color(torch.cat([ctx0, model.part_emb.weight[part], model.cconn_emb.weight[NCONN]])).argmax())])
+        place(part, col, Mp, bx, cells)
+        grow([out_parts[-1]], [Mp], [bx], M)
     iou = (build & target).sum() / max(1, (build | target).sum())
     ldr = "".join(f"1 {p.color} " + " ".join(f"{v:.6g}" for v in [*Mm[:3, 3], *Mm[:3, :3].ravel()]) + f" {st}.dat\n" for p, Mm, st in zip(out_parts, out_mats, out_stems))
-    return {"n": len(out_parts), "iou": float(iou), "filled": int((build & target).sum()), "target": int(target.sum()), "components": n_comp, "rejected": rejected, "ldr": ldr}
+    return {"n": len(out_parts), "iou": float(iou), "filled": int((build & target).sum()), "target": int(target.sum()), "components": n_comp,
+            "ground_roots": n_ground, "rejected": rejected, "ldr": ldr}

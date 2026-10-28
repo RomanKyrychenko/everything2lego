@@ -38,7 +38,7 @@ def main() -> None:
     ap.add_argument("--mesh", type=Path, default=ROOT / "examples" / "pixellabs-watermill-3425.glb")
     ap.add_argument("--ckpt", type=Path); ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--max-studs", type=int, default=32); ap.add_argument("--grid-only", action="store_true")
-    ap.add_argument("--seed", type=int, default=0); ap.add_argument("--max-steps", type=int, default=400); ap.add_argument("--retries", type=int, default=8); ap.add_argument("--restart", action="store_true"); ap.add_argument("--max-comps", type=int, default=64); ap.add_argument("--cover", action="store_true"); ap.add_argument("--max-bricks", type=int, default=4000)
+    ap.add_argument("--seed", type=int, default=0); ap.add_argument("--max-steps", type=int, default=400); ap.add_argument("--retries", type=int, default=8); ap.add_argument("--restart", action="store_true"); ap.add_argument("--max-comps", type=int, default=64); ap.add_argument("--cover", action="store_true"); ap.add_argument("--max-bricks", type=int, default=4000); ap.add_argument("--max-roots", type=int, default=1)
     a = ap.parse_args(); a.out.mkdir(parents=True, exist_ok=True)
     target, colours = mesh_to_grid(a.mesh, max_studs=a.max_studs, with_colours=True); ys, xs, zs = np.nonzero(target)
     print(f"target: {target.sum()} cells ({target.mean():.2%})  y[{ys.min()},{ys.max()}] x[{xs.min()},{xs.max()}] z[{zs.min()},{zs.max()}]", flush=True)
@@ -54,7 +54,7 @@ def main() -> None:
     print(f"checkpoint step {ck.get('step')}  model {sum(p.numel() for p in model.parameters()) / 1e6:.1f} M", flush=True)
     if a.cover:
         from m2b_gen import generate_cover
-        r = generate_cover(model, vocab, cat, target, grid, torch.device("cpu"), colours=colours, max_bricks=a.max_bricks, seed=a.seed)
+        r = generate_cover(model, vocab, cat, target, grid, torch.device("cpu"), colours=colours, max_bricks=a.max_bricks, seed=a.seed, max_roots=a.max_roots)
     else: r = generate(model, vocab, cat, target, grid, torch.device("cpu"), max_steps=a.max_steps, seed=a.seed, retries=a.retries, restart=a.restart, max_comps=a.max_comps)
     ldr = a.out / "watermill.ldr"; ldr.write_text(r["ldr"])
     print(f"built {r['n']} bricks in {r.get('components', 1)} components  filled {r.get('filled', '?')}/{r.get('target', '?')}  IoU {r['iou']:.3f}  rejected {r['rejected']}", flush=True)
