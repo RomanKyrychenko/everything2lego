@@ -1,12 +1,13 @@
 """Scorecard: every judge on a set of builds of one target, ranked.
 
     connectivity  whole_checks: pieces / 100 parts, largest piece share, PASS = inside the real-set range
-    fill          IoU with the target grid (mesh voxelised as m2b_watermill.mesh_to_grid), best vertical offset
+    outline       silhouettes (top / side / front) vs the target: completeness; holes inside a model are fine
+    fill          volume IoU with the target grid (mesh voxelised as m2b_watermill.mesh_to_grid), best vertical offset
     v14           V14 local realism, mean over 10 seeds x 20 pieces of 50 bricks
-    render        graded render judge (render_grade.py), whole-model look, 0 = worse than a 60 %-damaged real set
+    render        graded render judge (render_grade.py), whole-model look; render_logit ranks where the 0-1 score is ~0
 
     BRICKNET_DATA=... .venv-arm/bin/python tools/learn/scorecard.py --target target.npy --out report/ a.ldr b.ldr ...
-Writes <out>/scorecard.csv (ranked: fill >= MIN_FILL first, then PASS, then render, then v14) and renders under <out>/png/.
+Writes <out>/scorecard.csv (ranked: outline >= MIN_OUTLINE first, then PASS, then render logit, then v14) and renders under <out>/png/.
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(HERE), str(HERE.parent / "set_study"), str(HERE.parents[1] / "src")]
 
 _V14 = None
-MIN_FILL = 0.3                    # below this a build is a fragment of the target (15-72-brick partial runs pass connectivity)
+MIN_OUTLINE = 0.8                 # silhouettes vs the target: the finished sampler watermill 0.94, an unfinished 306-brick build 0.55
 
 
 def _judge(args) -> dict:
@@ -71,18 +72,20 @@ def main() -> None:
     m = RJ.make_model(); m.load_state_dict(torch.load(G.MODEL_PT, weights_only=False)["state_dict"]); m.eval()   # our own checkpoint
     for r, (_, _, png) in zip(rows, jobs):
         r["png"] = png
-        if Path(png).exists(): r["render"] = float(G.predict(m, RJ.views(Path(png))[None])[0])
-    full = lambda r: r.get("fill", 1.0) >= MIN_FILL                                    # noqa: E731  fragments are not builds of the target
-    rows.sort(key=lambda r: (not full(r), not r.get("pass", False), -r.get("render", -1), -r.get("v14", -1)))
-    cols = ["build", "pass", "parts", "pieces_per_100", "largest", "fill", "v14", "render", "png", "error"]
+        if Path(png).exists():
+            with torch.no_grad(): lg = m(RJ.to_tensor(RJ.views(Path(png))[None]))[0]
+            r["render_logit"] = float(lg[1] - lg[0]); r["render"] = float(torch.sigmoid(lg[1] - lg[0]))   # logit still ranks where the 0-1 score is ~0
+    full = lambda r: r.get("outline", 1.0) >= MIN_OUTLINE                              # noqa: E731  complete outline (inner holes are fine)
+    rows.sort(key=lambda r: (not full(r), not r.get("pass", False), -r.get("render_logit", -99), -r.get("v14", -1)))
+    cols = ["build", "pass", "parts", "pieces_per_100", "largest", "outline", "fill", "v14", "render", "render_logit", "png", "error"]
     with open(a.out / "scorecard.csv", "w", newline="") as f:
         w = csv.DictWriter(f, cols, extrasaction="ignore"); w.writeheader(); w.writerows(rows)
     fmt = lambda v: f"{v:.3f}" if isinstance(v, float) else str(v)                    # noqa: E731
-    print(f"{'#':>3} {'pass':4} {'parts':>5} {'pc/100':>6} {'largest':>7} {'fill':>5} {'v14':>5} {'render':>6}  build")
+    print(f"{'#':>3} {'pass':4} {'parts':>5} {'pc/100':>6} {'largest':>7} {'outline':>7} {'v14':>5} {'logit':>6}  build")
     for i, r in enumerate(rows):
         if "error" in r: print(f"{i:>3} ERROR {r['error'][:80]}  {r['build']}"); continue
-        print(f"{i:>3} {'PASS' if r['pass'] else 'fail':4} {r['parts']:>5} {r['pieces_per_100']:>6.1f} {r['largest']:>7.2f} {fmt(r.get('fill', '-')):>5} "
-              f"{r['v14']:>5.3f} {fmt(r.get('render', '-')):>6}  {'/'.join(Path(r['build']).parts[-3:])}")
+        print(f"{i:>3} {'PASS' if r['pass'] else 'fail':4} {r['parts']:>5} {r['pieces_per_100']:>6.1f} {r['largest']:>7.2f} {fmt(r.get('outline', '-')):>7} "
+              f"{r['v14']:>5.3f} {r.get('render_logit', float('nan')):>6.2f}  {'/'.join(Path(r['build']).parts[-3:])}")
     print(f"-> {a.out / 'scorecard.csv'}")
 
 

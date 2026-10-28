@@ -5,6 +5,7 @@
     floating share of bricks in pieces that do not reach the ground (report only: real sets reach 0.77 at p90 —
              vehicles on wheels, accessories, clip / pin links the connector graph misses)
     fill     IoU of the build's occupancy with a target grid at the best vertical offset (only when a target is given)
+    outline  mean IoU of the top / side / front silhouettes with the target's (completeness; inner holes do not count)
     parsed   share of placed parts the connector graph could read (non-catalogue / scaled parts are dropped)
 
     BRICKNET_DATA=... .venv-arm/bin/python tools/learn/whole_checks.py build.ldr [--target target.npy]
@@ -57,7 +58,10 @@ def whole_checks(path: Path, target: np.ndarray | None = None) -> dict:
             io, it = np.nonzero(occ.any(tuple(i for i in range(3) if i != ax)))[0], np.nonzero(t.any(tuple(i for i in range(3) if i != ax)))[0]
             if len(io) and len(it): t = np.roll(t, int(round((io.min() + io.max()) / 2 - (it.min() + it.max()) / 2)), axis=ax)
         iou = lambda tt: (occ & tt).sum() / max(1, (occ | tt).sum())                              # noqa: E731
-        out["fill"] = float(max(iou(np.roll(t, dy, axis=0)) for dy in range(-t.shape[0] // 2, t.shape[0] // 2)))   # best vertical offset
+        dy = max(range(-t.shape[0] // 2, t.shape[0] // 2), key=lambda d: iou(np.roll(t, d, axis=0)))                 # best vertical offset
+        t = np.roll(t, dy, axis=0); out["fill"] = float(iou(t))
+        # outline: silhouettes from the front, the side and above; holes inside a model do not change them, missing walls do
+        out["outline"] = float(np.mean([(occ.any(ax) & t.any(ax)).sum() / max(1, (occ.any(ax) | t.any(ax)).sum()) for ax in (0, 1, 2)]))
     return out
 
 
