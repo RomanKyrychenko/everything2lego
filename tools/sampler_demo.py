@@ -167,6 +167,7 @@ def main() -> None:
     ap.add_argument("--kind", default=None)
     ap.add_argument("--style", type=float, default=1.0, help="style weight: real-set statistics against form")
     ap.add_argument("--size-weight", type=float, default=0.0, help="weight of the part-size mix term: n_parts * KL(our size classes || real sets', sizes.py); native engine")
+    ap.add_argument("--slope-courses", action="store_true", help="slopes may also be placed on a plate of their footprint (one option, two parts): rows climb one plate more each, e.g. 33 deg slopes -> ~39 deg roofs")
     ap.add_argument("--snot", action="store_true", help="small plates and tiles may also be placed on their side, held by side studs (snot_options; prior = real-set sideways share)")
     ap.add_argument("--sideways-weight", type=float, default=0.0, help="with --snot: weight of n_parts * KL(sideways share || --sideways-share)")
     ap.add_argument("--sideways-share", type=float, default=0.10, help="target share of sideways parts (real buildings ~0.15 not studs-up)")
@@ -246,7 +247,7 @@ def main() -> None:
         if a.sup_weight > 0: w.sup = a.sup_weight
         _ps, _info = sample(target, models, iters=iters, seed=seed, weights=w,
                              tile_boost=a.tile_boost, snot_boost=a.snot_boost, opt_bias=opt_bias,
-                             init_placements=init_placements, engine=a.engine, snot=a.snot, n_special=a.n_special)
+                             init_placements=init_placements, engine=a.engine, snot=a.snot, n_special=a.n_special, courses=a.slope_courses)
         _info["iters"] = iters
         _info["seconds"] = round(time.time() - _t, 1)
         _info["seed"] = seed

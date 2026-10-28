@@ -170,6 +170,7 @@ class Orient:
     halo: np.ndarray = None      # (m, 3): offsets of the cells next to its cells (26-neighbourhood), not its own
     pix: tuple = ()              # its outline along x, y, z: (sy, sz), (sx, sz), (sy, sx) sample pixels, box-local
     snot: Optional[tuple] = None  # sideways (snot_options): (LDraw 3x3 rotation, row-major; origin box-local LDU x, y-up, z)
+    stack: Optional[tuple] = None  # slope course (slope_courses): (the slope's yaw, the plate under it: Part, its yaw)
 
 
 def _halo(cells: np.ndarray, size) -> np.ndarray:
@@ -896,8 +897,8 @@ class State:
         return int((popcount(self.cur ^ self.t.bits) >= SUB ** 3 // 2).sum())
 
     def placements(self) -> list[Placement]:
-        return [Placement(it.vp.part, it.colour, it.x, it.z, it.y, it.W, it.D, it.ori.rot, snot=it.ori.snot)
-                for it in self.items.values()]
+        from .slope_courses import expand
+        return [p for it in self.items.values() for p in expand(it.vp.part, it.colour, it.x, it.z, it.y, it.ori)]
 
     def placements_and_decorations(self) -> tuple[list[Placement], dict[Placement, list[SnotChild]]]:
         """Placements plus per-placement SNOT children, keyed by the
@@ -907,8 +908,9 @@ class State:
         ps: list[Placement] = []
         deco: dict[Placement, list[SnotChild]] = {}
         for i, it in self.items.items():
-            p = Placement(it.vp.part, it.colour, it.x, it.z, it.y, it.W, it.D, it.ori.rot, snot=it.ori.snot)
-            ps.append(p)
+            from .slope_courses import expand
+            exp = expand(it.vp.part, it.colour, it.x, it.z, it.y, it.ori)
+            ps.extend(exp); p = exp[-1]                                # decorations hang on the part itself (a course's slope)
             kids = self.snot_children.get(i)
             if kids:
                 deco[p] = list(kids)
@@ -1570,7 +1572,8 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
            net: bool = True, stats: Optional["Stats"] = None,
            tile_boost: float = 0.0, snot_boost: float = 0.0,
            init_placements: Optional[list[Placement]] = None,
-           opt_bias: Optional[np.ndarray] = None, snot: bool = False) -> tuple[list[Placement], dict]:
+           opt_bias: Optional[np.ndarray] = None, snot: bool = False,
+           courses: bool = False) -> tuple[list[Placement], dict]:
     """The temperature comes from the data: the median energy change of
     `warmup` proposals (measured, then undone) is the scale; it anneals
     from `t_start_share` to `t_final_share` of it.  Monotony is the KL
@@ -1596,6 +1599,9 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
     if snot_boost == 0.0:
         snot_boost = getattr(weights, "snot_boost", 0.0)
     vocab = select_vocabulary(target.kind, n_special)
+    if courses:                                          # slopes may also come on a plate: roof rows of any pitch between
+        from .slope_courses import with_courses
+        vocab = with_courses(vocab)
     if snot:                                             # small plates / tiles also on their side, held by side studs
         from .snot_options import with_sideways
         vocab = with_sideways(vocab)
@@ -1611,7 +1617,8 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
                            + (opt_bias if opt_bias is not None else 0.0),
             net=net, tile_boost=tile_boost, snot_boost=snot_boost,
             init_placements=init_placements)
-        placements = [Placement(v.part, c, x, z, y, o.size[1], o.size[2], o.rot, snot=o.snot) for v, o, c, y, x, z in got]
+        from .slope_courses import expand
+        placements = [p for v, o, c, y, x, z in got for p in expand(v.part, c, x, z, y, o)]
         used = Counter(v.category for v, *_ in got)
         shapes = Counter(v.part.shape for v, *_ in got)
         n_ref = stats.density * float(target.fill.sum())
