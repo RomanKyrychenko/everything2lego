@@ -40,6 +40,10 @@ def placement_to_line(p: Placement, children: Iterable[SnotChild] = ()) -> str:
     pal = palette()
     ldraw_color = pal[p.color_idx].code
 
+    if p.snot is not None:                 # sideways: the pose comes with the option (snot_options)
+        R, (lx, ly, lz) = p.snot
+        x, y, z = p.x_stud * LDU_PER_STUD - LDU_PER_STUD // 2 + lx, -p.y_plate * LDU_PER_PLATE - ly, p.z_stud * LDU_PER_STUD - LDU_PER_STUD // 2 + lz
+        return f"1 {ldraw_color} {_fmt_num(x)} {_fmt_num(y)} {_fmt_num(z)} " + " ".join(_fmt_num(v) for v in R) + f" {p.part.ldraw}"
     x = (2 * p.x_stud + p.w_world - 1) * (LDU_PER_STUD // 2)
     z = (2 * p.z_stud + p.d_world - 1) * (LDU_PER_STUD // 2)
     y = -(p.y_plate + p.part.height_units) * LDU_PER_PLATE

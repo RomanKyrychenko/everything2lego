@@ -169,6 +169,7 @@ class Orient:
                                  # facing (dx, dz) — half studs / half plates from the box's corner
     halo: np.ndarray = None      # (m, 3): offsets of the cells next to its cells (26-neighbourhood), not its own
     pix: tuple = ()              # its outline along x, y, z: (sy, sz), (sx, sz), (sy, sx) sample pixels, box-local
+    snot: Optional[tuple] = None  # sideways (snot_options): (LDraw 3x3 rotation, row-major; origin box-local LDU x, y-up, z)
 
 
 def _halo(cells: np.ndarray, size) -> np.ndarray:
@@ -519,6 +520,8 @@ class Weights:
     snot_boost: float = 0.0   # bias toward SNOT parts (brickS, plateS, tileS); +5 lands near real-set 17-32%
     snot_bonus: float = 0.5   # energy -= snot_bonus * log(1 + models) per snot_insert child; makes the sampler prefer high-popularity SNOT templates
     size: float = 0.0         # n_parts * KL(part-size mix || real sets', sizes.py); native engine only
+    sideways: float = 0.0     # n_parts * KL(sideways share || p_sideways); with sample(snot=True), native engine only
+    p_sideways: float = 0.10  # real buildings: ~15 % of parts not studs-up; the sideways options cover plates / tiles
 
     @classmethod
     def learned(cls, kind: Optional[str] = None) -> "Weights":
@@ -888,7 +891,7 @@ class State:
         return int((popcount(self.cur ^ self.t.bits) >= SUB ** 3 // 2).sum())
 
     def placements(self) -> list[Placement]:
-        return [Placement(it.vp.part, it.colour, it.x, it.z, it.y, it.W, it.D, it.ori.rot)
+        return [Placement(it.vp.part, it.colour, it.x, it.z, it.y, it.W, it.D, it.ori.rot, snot=it.ori.snot)
                 for it in self.items.values()]
 
     def placements_and_decorations(self) -> tuple[list[Placement], dict[Placement, list[SnotChild]]]:
@@ -899,7 +902,7 @@ class State:
         ps: list[Placement] = []
         deco: dict[Placement, list[SnotChild]] = {}
         for i, it in self.items.items():
-            p = Placement(it.vp.part, it.colour, it.x, it.z, it.y, it.W, it.D, it.ori.rot)
+            p = Placement(it.vp.part, it.colour, it.x, it.z, it.y, it.W, it.D, it.ori.rot, snot=it.ori.snot)
             ps.append(p)
             kids = self.snot_children.get(i)
             if kids:
@@ -928,7 +931,19 @@ def option_logprior(vocab: tuple[VPart, ...], stats: Stats, kind: Optional[str],
         + 0.6 * math.log(float(o.o.sum()))
         + (tile_boost if _box_kind(v) == "tile" else 0.0)
         + (snot_boost if v.part.shape in snot_shapes else 0.0)
+        + _sideways_prior(v, o)
         for v in vocab for o in v.orients])
+
+
+def _sideways_prior(v: VPart, o: Orient) -> float:
+    """log of how often real sets mount this part sideways (snot_options) on a sideways option, of how often
+    not on its upright ones; 0 for parts without sideways options."""
+    if not any(x.snot is not None for x in v.orients):
+        return 0.0
+    from .snot_options import sideways_share
+    s = min(0.9, max(0.01, sideways_share().get(v.part.ldraw, 0.05)))
+    n_side = sum(x.snot is not None for x in v.orients)
+    return math.log(s / n_side) if o.snot is not None else math.log((1 - s) / (len(v.orients) - n_side))
 
 
 def net_tables(net: "proposals.Net", vocab: tuple[VPart, ...], kind: Optional[str],
@@ -1550,7 +1565,7 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
            net: bool = True, stats: Optional["Stats"] = None,
            tile_boost: float = 0.0, snot_boost: float = 0.0,
            init_placements: Optional[list[Placement]] = None,
-           opt_bias: Optional[np.ndarray] = None) -> tuple[list[Placement], dict]:
+           opt_bias: Optional[np.ndarray] = None, snot: bool = False) -> tuple[list[Placement], dict]:
     """The temperature comes from the data: the median energy change of
     `warmup` proposals (measured, then undone) is the scale; it anneals
     from `t_start_share` to `t_final_share` of it.  Monotony is the KL
@@ -1576,6 +1591,9 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
     if snot_boost == 0.0:
         snot_boost = getattr(weights, "snot_boost", 0.0)
     vocab = select_vocabulary(target.kind, n_special)
+    if snot:                                             # small plates / tiles also on their side, held by side studs
+        from .snot_options import with_sideways
+        vocab = with_sideways(vocab)
     if engine == "auto" and not native.available():
         warnings.warn(f"native sampler: {native.why_not()} (python -m everything2lego.native build); "
                       "running the Python walk, about a hundred times slower", stacklevel=2)
@@ -1588,7 +1606,7 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
                            + (opt_bias if opt_bias is not None else 0.0),
             net=net, tile_boost=tile_boost, snot_boost=snot_boost,
             init_placements=init_placements)
-        placements = [Placement(v.part, c, x, z, y, o.size[1], o.size[2], o.rot) for v, o, c, y, x, z in got]
+        placements = [Placement(v.part, c, x, z, y, o.size[1], o.size[2], o.rot, snot=o.snot) for v, o, c, y, x, z in got]
         used = Counter(v.category for v, *_ in got)
         shapes = Counter(v.part.shape for v, *_ in got)
         n_ref = stats.density * float(target.fill.sum())

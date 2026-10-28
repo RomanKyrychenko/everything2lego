@@ -92,6 +92,8 @@ class Problem(C.Structure):
         ("hist_cap", C.c_int32), ("hist_n", _P(C.c_int32)), ("hist", _P(C.c_double)),
         ("w_size", C.c_double), ("n_size_class", C.c_int32),      # part-size statistics (null = off)
         ("opt_class", _P(C.c_int32)), ("size_pref", _P(C.c_double)),
+        ("n_snot_rows", C.c_int32), ("snot_rows", _P(C.c_int32)),      # sideways move (snot_options.pair_rows)
+        ("w_sideways", C.c_double), ("p_sideways", C.c_double), ("opt_sideways", _P(C.c_uint8)),   # sideways-share KL term
     ]
 
 
@@ -311,6 +313,13 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         from .sizes import N_CLASS, real_mix, size_class
         oc = arr([size_class(o.size[0], o.size[1], o.size[2]) for _, o in opts], np.int32); sp = arr(real_mix(kind), np.float64)
         size_fields = dict(w_size=weights.size, n_size_class=N_CLASS, opt_class=_ptr(oc, C.c_int32), size_pref=_ptr(sp, C.c_double))
+    if any(o.snot is not None for _, o in opts):                                 # sideways options present: the combined move
+        from .snot_options import pair_rows
+        sr = arr(pair_rows(opts), np.int32)
+        size_fields.update(n_snot_rows=len(sr), snot_rows=_ptr(sr, C.c_int32))
+        if getattr(weights, "sideways", 0.0) > 0:
+            sf = arr([o.snot is not None for _, o in opts], np.uint8)
+            size_fields.update(w_sideways=weights.sideways, p_sideways=getattr(weights, "p_sideways", 0.10), opt_sideways=_ptr(sf, C.c_uint8))
     boxk = {"brick": 0, "plate": 1, "tile": 2}
     cs, ts, bs, ss, hs = [0], [0], [0], [0], [0]
     halo = []
@@ -358,7 +367,7 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         opt_size=_ptr(arr([o.size for _, o in opts], np.int32), C.c_int32),
         opt_first=_ptr(arr([o.first for _, o in opts], np.int32), C.c_int32),
         opt_logprior=_ptr(arr(opts_logprior, np.float64), C.c_double),
-        opt_box=_ptr(arr([boxk.get(v.box, -1) for v, _ in opts], np.int32), C.c_int32),
+        opt_box=_ptr(arr([-1 if o.snot is not None else boxk.get(v.box, -1) for v, o in opts], np.int32), C.c_int32),   # sideways: no merge / retile
         cell_start=_ptr(arr(cs, np.int32), C.c_int32),
         cell_yxz=_ptr(arr(np.concatenate(cyxz), np.int32), C.c_int32),
         cell_bits=_ptr(arr(np.concatenate(cbits), np.uint64), C.c_uint64),

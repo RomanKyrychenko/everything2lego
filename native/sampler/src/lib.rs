@@ -163,6 +163,14 @@ pub struct Problem {
     pub n_size_class: i32,
     pub opt_class: *const i32, // n_opt: size class of each option
     pub size_pref: *const f64, // n_size_class: the classes' share in real sets
+    // sideways building (snot_options.pair_rows): rows of 7 ints (plain brick option, its side-stud anchor option,
+    // a sideways plate / tile option, dy, dx, dz of the tile's box from the brick's, which anchor stud it hangs on)
+    pub n_snot_rows: i32,
+    pub snot_rows: *const i32,
+    // sideways share: energy += w_sideways * n_parts * KL(Bernoulli(build's sideways share) || p_sideways); 0 = off
+    pub w_sideways: f64,
+    pub p_sideways: f64,
+    pub opt_sideways: *const u8, // n_opt: 1 = a sideways option
 }
 
 const INFO_LEN: usize = 20;
@@ -302,6 +310,11 @@ struct Data {
     w_size: f64,
     opt_class: Vec<usize>,     // n_opt (empty when off)
     size_lpref: Vec<f64>,      // ln of the real sets' class shares
+    snot_rows: Vec<(usize, usize, i32, i32, i32, i32)>, // (anchor, tile, dy, dx, dz, stud)
+    snot_by_opt: Vec<Vec<usize>>,                         // brick option -> its rows (empty when off)
+    w_sideways: f64,
+    p_sideways: f64,
+    opt_sideways: Vec<bool>,                              // n_opt (empty when off)
 }
 
 unsafe fn v<T: Copy>(p: *const T, n: usize) -> Vec<T> {
@@ -471,7 +484,22 @@ impl Data {
             opt_class: if p.opt_class.is_null() { Vec::new() } else { v(p.opt_class, n_opt).iter().map(|&c| c as usize).collect() },
             size_lpref: if p.size_pref.is_null() { Vec::new() }
                         else { v(p.size_pref, p.n_size_class as usize).iter().map(|&q| q.max(1e-6).ln()).collect() },
+            snot_rows: Vec::new(),
+            snot_by_opt: Vec::new(),
+            w_sideways: if p.opt_sideways.is_null() { 0.0 } else { p.w_sideways },
+            p_sideways: p.p_sideways.clamp(1e-4, 1.0 - 1e-4),
+            opt_sideways: if p.opt_sideways.is_null() { Vec::new() } else { v(p.opt_sideways, n_opt).iter().map(|&b| b != 0).collect() },
         };
+        let n_snot = p.n_snot_rows.max(0) as usize;
+        if n_snot > 0 && !p.snot_rows.is_null() {
+            let raw = v(p.snot_rows, n_snot * 7);
+            d.snot_by_opt = vec![Vec::new(); n_opt];
+            for r in 0..n_snot {
+                let q = &raw[7 * r..7 * r + 7];
+                d.snot_by_opt[q[0] as usize].push(d.snot_rows.len());
+                d.snot_rows.push((q[1] as usize, q[2] as usize, q[3], q[4], q[5], q[6]));
+            }
+        }
         let n_hinge = p.n_hinge.max(0) as usize;
         if n_hinge > 0 {
             let raw = v(p.hinge_data, n_hinge * 5);
@@ -878,6 +906,7 @@ struct State<'a> {
     fid: f64,
     bare: i64,
     size_n: Vec<f64>, // live parts per size class
+    n_side: f64,      // live sideways parts
     mark: Vec<u32>,
     gen: u32,
 }
@@ -927,6 +956,7 @@ impl<'a> State<'a> {
             fid: d.fill.iter().sum(),
             bare: 0,
             size_n: vec![0.0; d.size_lpref.len()],
+            n_side: 0.0,
             mark: Vec::new(),
             gen: 0,
         }
@@ -1339,6 +1369,17 @@ impl<'a> State<'a> {
         let d = self.d;
         self.content() + self.style_loss() + d.w_sup * self.n_unsup as f64 + d.w_side * self.bare as f64
             + d.w_size * self.size_kl()
+            + d.w_sideways * self.sideways_kl()
+    }
+
+    /// n_parts * KL(Bernoulli(sideways share of the build) || Bernoulli(p_sideways))
+    fn sideways_kl(&self) -> f64 {
+        if self.d.w_sideways == 0.0 { return 0.0; }
+        let n = self.live.len() as f64;
+        if n <= 0.0 { return 0.0; }
+        let p = self.d.p_sideways;
+        let (k, m) = (self.n_side, n - self.n_side);
+        (if k > 0.0 { k * (k / n / p).ln() } else { 0.0 }) + (if m > 0.0 { m * (m / n / (1.0 - p)).ln() } else { 0.0 })
     }
 
     /// n_parts * KL(size-class mix of the build || of real sets) = sum_c n_c ln(n_c / (n p_c))
@@ -1382,6 +1423,7 @@ impl<'a> State<'a> {
         let o = &d.opts[it.opt];
         self.fid += d.fid_delta(o, it.y, it.x, it.z);
         if d.w_size != 0.0 { self.size_n[d.opt_class[it.opt]] += 1.0; }
+        if d.w_sideways != 0.0 && d.opt_sideways[it.opt] { self.n_side += 1.0; }
         for &(y, x, z, bits, _) in &o.cells {
             let c = d.idx(it.y + y, it.x + x, it.z + z);
             self.owner[c] = i as i32;
@@ -1430,6 +1472,7 @@ impl<'a> State<'a> {
         self.bare -= d.bare_sides(o, it.y, it.x, it.z);
         self.fid -= d.fid_delta(o, it.y, it.x, it.z);
         if d.w_size != 0.0 { self.size_n[d.opt_class[it.opt]] -= 1.0; }
+        if d.w_sideways != 0.0 && d.opt_sideways[it.opt] { self.n_side -= 1.0; }
         self.col -= d.colour_cost(o, it.y, it.x, it.z, it.colour);
         self.items[i] = None;
         self.set_unsup(i, false);
@@ -1928,7 +1971,77 @@ fn masonry_shift(st: &mut State, rng: &mut Rng) -> Option<Undo> {
     None
 }
 
+/// Sideways building in one step: a plain brick becomes its side-stud version, and a sideways plate / tile is hung
+/// on each of its side studs, the parts in their way removed (at most 3 per tile).  The energy takes or leaves it.
+fn snot_face(st: &mut State, rng: &mut Rng) -> Option<Undo> {
+    if st.live.is_empty() {
+        return None;
+    }
+    let d = st.d;
+    let i = st.live[rng.below(st.live.len())];
+    let a = *st.item(i);
+    let rows = &d.snot_by_opt[a.opt];
+    if rows.is_empty() {
+        return None;
+    }
+    let anchor = d.snot_rows[rows[rng.below(rows.len())]].0;
+    let ra = st.remove(i);
+    let k = st.add(Item { opt: anchor, colour: a.colour, y: a.y, x: a.x, z: a.z });
+    let mut added = vec![k];
+    let mut removed = vec![ra];
+    let mut studs: Vec<i32> = Vec::new();
+    for &r in rows.iter() {
+        let (an, tile, dy, dx, dz, stud) = d.snot_rows[r];
+        if an != anchor || studs.contains(&stud) {
+            continue;
+        }
+        let t = &d.opts[tile];
+        let (ty, tx, tz) = (a.y + dy, a.x + dx, a.z + dz);
+        let mut owners: Vec<usize> = Vec::new();
+        let mut ok = true;
+        for &(cy, cx, cz, _, _) in &t.cells {
+            let (y, x, z) = (ty + cy, tx + cx, tz + cz);
+            if !d.inside(y, x, z) {
+                ok = false;
+                break;
+            }
+            let o = st.owner[d.idx(y, x, z)];
+            if o >= 0 {
+                let o = o as usize;
+                if added.contains(&o) {
+                    ok = false;
+                    break;
+                }
+                if !owners.contains(&o) {
+                    owners.push(o);
+                }
+            }
+        }
+        if !ok || owners.len() > 3 {
+            continue;
+        }
+        let mut colour = a.colour;
+        for o in owners {
+            let it = st.remove(o);
+            colour = it.colour;                                  // the tile takes the colour of the face it replaces
+            removed.push(it);
+        }
+        added.push(st.add(Item { opt: tile, colour, y: ty, x: tx, z: tz }));
+        studs.push(stud);
+    }
+    if added.len() == 1 {
+        undo(st, Undo::Retile { added, removed });
+        return None;
+    }
+    Some(Undo::Retile { added, removed })
+}
+
 fn propose(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
+    if !st.d.snot_by_opt.is_empty() && rng.f64() < 0.05 {        // only drawn when sideways building is on
+        if let Some(u) = snot_face(st, rng) {
+            return Some(u);
+        }
+    }
     let r = rng.f64();
     if r < 0.02 { masonry_shift(st, rng) }
     else if r < 0.05 { hinge_swap(st, rng) }

@@ -167,6 +167,9 @@ def main() -> None:
     ap.add_argument("--kind", default=None)
     ap.add_argument("--style", type=float, default=1.0, help="style weight: real-set statistics against form")
     ap.add_argument("--size-weight", type=float, default=0.0, help="weight of the part-size mix term: n_parts * KL(our size classes || real sets', sizes.py); native engine")
+    ap.add_argument("--snot", action="store_true", help="small plates and tiles may also be placed on their side, held by side studs (snot_options; prior = real-set sideways share)")
+    ap.add_argument("--sideways-weight", type=float, default=0.0, help="with --snot: weight of n_parts * KL(sideways share || --sideways-share)")
+    ap.add_argument("--sideways-share", type=float, default=0.10, help="target share of sideways parts (real buildings ~0.15 not studs-up)")
     ap.add_argument("--whole-cells", action="store_true", help="match the mesh at whole-cell detail (every target cell a full cube) instead of 4x4x4 sub-cells: round 1x1 plates no longer win by tracing tiny curves")
     ap.add_argument("--sup-weight", type=float, default=0.0, help="energy per unsupported part (0 = keep the weights' own: 40 default, 100 learned); raise it when --size-weight would trade support for bigger parts")
     ap.add_argument("--learned-weights", action="store_true", help="energy weights fitted to real sets (Weights.learned(kind)) instead of the hand-set defaults")
@@ -234,11 +237,11 @@ def main() -> None:
     def _once(seed: int):
         _t = time.time()
         w = Weights.learned(target.kind) if a.learned_weights else Weights()
-        w.style = a.style; w.size = a.size_weight
+        w.style = a.style; w.size = a.size_weight; w.sideways = a.sideways_weight; w.p_sideways = a.sideways_share
         if a.sup_weight > 0: w.sup = a.sup_weight
         _ps, _info = sample(target, models, iters=iters, seed=seed, weights=w,
                              tile_boost=a.tile_boost, snot_boost=a.snot_boost, opt_bias=opt_bias,
-                             init_placements=init_placements, engine=a.engine)
+                             init_placements=init_placements, engine=a.engine, snot=a.snot)
         _info["iters"] = iters
         _info["seconds"] = round(time.time() - _t, 1)
         _info["seed"] = seed
