@@ -1,6 +1,7 @@
 """Mesh2Brick as a refiner (user's design, 2026-10-27): take a finished build, cut out a connected region of ~50 bricks,
 regenerate it with Mesh2Brick (the whole build's occupancy as target, the kept bricks as state, the kept neighbours as the
-sequence prefix the new bricks attach to), score the whole build with and without the patch (V13), keep the patch only if it raises it.
+sequence prefix the new bricks attach to), score the whole build with and without the patch (V13 / V14), keep the patch only if it raises it and adds no
+connector-graph pieces nor shrinks the largest one (whole_checks).
 
     BRICKNET_DATA=/Volumes/PRO-G40/lego_data/bricknet .venv/bin/python tools/learn/m2b_refine.py \
         --ldr build.ldr --ckpt model.pt --out $LEGO_DATA/analysis/m2b/refine/run --iters 40
@@ -42,7 +43,7 @@ def load_build(path: Path):
     stems, aliases = set(load_catalog().id_to_stem), load_aliases(); lines = []
     for p in flatten(path):
         st = p.name.removesuffix(".dat")
-        if (st not in stems and st not in aliases) or np.abs(np.linalg.norm(p.M[:3, :3], axis=0) - 1).max() > SCALE_TOL: continue
+        if (st not in stems and (st not in aliases or aliases[st][0] not in stems)) or np.abs(np.linalg.norm(p.M[:3, :3], axis=0) - 1).max() > SCALE_TOL: continue
         M = p.M; lines.append(f"1 {p.colour} " + " ".join(f"{v:.6g}" for v in [*M[:3, 3], *M[:3, :3].ravel()]) + f" {st}.dat")
     return parse_ldr("\n".join(lines) + "\n")
 
@@ -171,6 +172,9 @@ def main() -> None:
     (a.out / "before.ldr").write_text(to_ldr(pids, cols, mats, i2s, shift))
     log = open(a.out / "log.jsonl", "w"); acc = 0; t0 = time.time(); fit = range(a.seeds)
     s_old = whole(pids, cols, mats, fit); print(f"whole-build {a.scorer.upper()} at start: {s_old:.3f}", flush=True)
+    from whole_checks import whole_checks_text
+    chk = lambda p, c, m: whole_checks_text(to_ldr(p, c, m, i2s, shift))                     # noqa: E731  connector-graph pieces
+    c_old = chk(pids, cols, mats); print(f"pieces {c_old['pieces']}  largest {c_old['largest']:.3f}", flush=True)
     for it in range(a.iters):
         from bricknet.core import Graph  # noqa: F401  (graph rebuilt from the current bricks each iteration)
         from bricknet.graph import parse_ldr
@@ -203,6 +207,9 @@ def main() -> None:
         np_, nc, nm = [pids[i] for i in keep] + [x[0] for x in new], [cols[i] for i in keep] + [x[1] for x in new], [mats[i] for i in keep] + [x[2] for x in new]
         s_new = whole(np_, nc, nm, fit) if new and cover >= a.min_cover else float("nan")   # whole build with the patch in place
         ok = s_new == s_new and s_new > s_old + a.margin
+        if ok:                                                                          # a patch may not break the model apart
+            c_new = chk(np_, nc, nm); ok = c_new["pieces"] <= c_old["pieces"] and c_new["largest"] >= c_old["largest"]
+            if ok: c_old = c_new
         if ok:
             acc += 1; pids, cols, mats = np_, nc, nm; bxs = [bxs[i] for i in keep] + [x[3] for x in new]
         rec = {"iter": it, "region": len(region), "new": len(new), "cover": round(float(cover), 3), "old": round(s_old, 4), "new_score": round(s_new, 4), "accepted": bool(ok), "parts": len(pids)}
