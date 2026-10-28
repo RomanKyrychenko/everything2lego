@@ -528,6 +528,8 @@ class Weights:
     stack: float = 0.0        # n_bricks * KL(share of bricks right on a same-footprint brick || p_stack); native only
     p_stack: float = 0.093    # real buildings' median (build_stats.py stacked_bricks)
     bare_top: float = 0.0     # energy per top stud with nothing above and nothing to come (outside the target); native only
+    direction: float = 0.0    # surface direction (surface_dir.py): outward faces' area * (1 - cos) vs the mesh; native only
+    dir_thr: float = 0.5      # faces count as outward when cos > this (sides hidden by neighbours stay free)
 
     @classmethod
     def learned(cls, kind: Optional[str] = None) -> "Weights":

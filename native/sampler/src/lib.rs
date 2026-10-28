@@ -187,6 +187,15 @@ pub struct Problem {
     // exposed studs: energy += w_bare_top per top stud whose cell above is empty and outside the target (nothing
     // will ever sit on it: a tile or a slope belongs there); 0 = off
     pub w_bare_top: f64,
+    // diagnostics: options to watch (e.g. slope courses); stderr reports how often a move adds one and is accepted
+    pub opt_watch: *const u8, // n_opt or null
+    // surface direction (surface_dir.py): energy += w_dir * sum over a part's faces in outer-surface cells that face
+    // outward (cos > dir_thr against the target's direction there) of area * (1 - cos); null / 0 = off
+    pub w_dir: f64,
+    pub dir_thr: f64,
+    pub t_normal: *const f32, // h*x*z*3: unit outward direction (y, x, z) per surface cell, zeros elsewhere
+    pub dir_start: *const i32, // n_opt + 1
+    pub dir_rows: *const f32,  // rows of 7: cy, cx, cz, g (y, x, z), |g|  (area in stud tops)
 }
 
 const INFO_LEN: usize = 20;
@@ -336,6 +345,12 @@ struct Data {
     p_stack: f64,
     opt_brick: Vec<bool>,
     w_bare_top: f64,
+    opt_watch: Vec<bool>,
+    w_dir: f64,
+    dir_thr: f64,
+    t_normal: Vec<f32>,
+    dir_start: Vec<usize>,
+    dir_rows: Vec<[f32; 7]>,
     w_out: Vec<f32>,                                      // n*64 (empty: plain sample count)
     w_in: Vec<f32>,
     fid0: f64,                                            // the shape term of an empty build
@@ -518,10 +533,21 @@ impl Data {
             p_stack: p.p_stack.clamp(1e-4, 1.0 - 1e-4),
             opt_brick: if p.opt_brick.is_null() { Vec::new() } else { v(p.opt_brick, n_opt).iter().map(|&b| b != 0).collect() },
             w_bare_top: p.w_bare_top,
+            opt_watch: if p.opt_watch.is_null() { Vec::new() } else { v(p.opt_watch, n_opt).iter().map(|&b| b != 0).collect() },
+            w_dir: if p.dir_rows.is_null() || p.t_normal.is_null() { 0.0 } else { p.w_dir },
+            dir_thr: p.dir_thr,
+            t_normal: if p.t_normal.is_null() { Vec::new() } else { v(p.t_normal, n * 3) },
+            dir_start: if p.dir_start.is_null() { Vec::new() } else { v(p.dir_start, n_opt + 1).iter().map(|&s| s as usize).collect() },
+            dir_rows: Vec::new(),
             w_out: if p.w_out.is_null() || p.w_in.is_null() { Vec::new() } else { v(p.w_out, n * 64) },
             w_in: if p.w_out.is_null() || p.w_in.is_null() { Vec::new() } else { v(p.w_in, n * 64) },
             fid0: 0.0,
         };
+        if d.w_dir != 0.0 {
+            let m = *d.dir_start.last().unwrap();
+            let raw = v(p.dir_rows, m * 7);
+            d.dir_rows = (0..m).map(|r| [raw[7 * r], raw[7 * r + 1], raw[7 * r + 2], raw[7 * r + 3], raw[7 * r + 4], raw[7 * r + 5], raw[7 * r + 6]]).collect();
+        }
         d.fid0 = if d.w_in.is_empty() { d.fill.iter().sum() }
                  else { (0..n).map(|c| (0..64).filter(|&b| d.tbits[c] >> b & 1 == 1).map(|b| d.w_in[c * 64 + b] as f64).sum::<f64>()).sum::<f64>() / NSAMP };
         let n_snot = p.n_snot_rows.max(0) as usize;
@@ -614,6 +640,22 @@ impl Data {
     }
 
     /// Change in wrong samples (/64) from filling these empty cells so.
+    /// Surface direction cost of option k placed at (oy, ox, oz): its outward faces in surface cells, area * (1 - cos).
+    fn dir_cost(&self, k: usize, oy: i32, ox: i32, oz: i32) -> f64 {
+        if self.w_dir == 0.0 { return 0.0; }
+        let mut s = 0f64;
+        for r in &self.dir_rows[self.dir_start[k]..self.dir_start[k + 1]] {
+            let (y, x, z) = (oy + r[0] as i32, ox + r[1] as i32, oz + r[2] as i32);
+            if !self.inside(y, x, z) { continue; }
+            let c = 3 * self.idx(y, x, z);
+            let (ny, nx, nz) = (self.t_normal[c], self.t_normal[c + 1], self.t_normal[c + 2]);
+            if ny == 0.0 && nx == 0.0 && nz == 0.0 { continue; }
+            let dot = (r[3] * ny + r[4] * nx + r[5] * nz) as f64;
+            if dot > self.dir_thr * r[6] as f64 { s += r[6] as f64 - dot; }
+        }
+        s
+    }
+
     fn fid_delta(&self, o: &Opt, oy: i32, ox: i32, oz: i32) -> f64 {
         if !self.w_in.is_empty() {                       // surface fit: weighted by the distance to the target's surface
             let mut s = 0f64;
@@ -958,6 +1000,7 @@ struct State<'a> {
     n_brick: f64,     // live plain bricks
     n_stack: f64,     // brick-on-same-footprint-brick pairs
     bare_top: Vec<f64>, // per item: its exposed top studs (w_bare_top)
+    dirp: f64,          // surface direction cost of all live parts
     n_bare_top: f64,
     mark: Vec<u32>,
     gen: u32,
@@ -1012,6 +1055,7 @@ impl<'a> State<'a> {
             n_brick: 0.0,
             n_stack: 0.0,
             bare_top: Vec::new(),
+            dirp: 0.0,
             n_bare_top: 0.0,
             mark: Vec::new(),
             gen: 0,
@@ -1428,6 +1472,7 @@ impl<'a> State<'a> {
             + d.w_sideways * self.sideways_kl()
             + d.w_stack * self.stack_kl()
             + d.w_bare_top * self.n_bare_top
+            + d.w_dir * self.dirp
     }
 
     /// Bricks among `nb` that sit right on / under brick i with the same footprint (a lined-up joint).
@@ -1502,6 +1547,7 @@ impl<'a> State<'a> {
         let d = self.d;
         let o = &d.opts[it.opt];
         self.fid += d.fid_delta(o, it.y, it.x, it.z);
+        self.dirp += d.dir_cost(it.opt, it.y, it.x, it.z);
         if d.w_size != 0.0 { self.size_n[d.opt_class[it.opt]] += 1.0; }
         if d.w_sideways != 0.0 && d.opt_sideways[it.opt] { self.n_side += 1.0; }
         for &(y, x, z, bits, _) in &o.cells {
@@ -1587,6 +1633,7 @@ impl<'a> State<'a> {
         }
         self.bare -= d.bare_sides(o, it.y, it.x, it.z);
         self.fid -= d.fid_delta(o, it.y, it.x, it.z);
+        self.dirp -= d.dir_cost(it.opt, it.y, it.x, it.z);
         if d.w_size != 0.0 { self.size_n[d.opt_class[it.opt]] -= 1.0; }
         if d.w_sideways != 0.0 && d.opt_sideways[it.opt] { self.n_side -= 1.0; }
         self.col -= d.colour_cost(o, it.y, it.x, it.z, it.colour);
@@ -1693,7 +1740,7 @@ impl Filler {
             let resid = wrong as f64 / NSAMP;
             // style and content weighed as in the energy
             let lp = prior.map_or(o.logprior, |p| p[k]);
-            out.push((d.style * lp - d.w_cov * resid, k, oy, ox, oz, resid));
+            out.push((d.style * lp - d.w_cov * resid - d.w_dir * d.dir_cost(k, oy, ox, oz), k, oy, ox, oz, resid));
         }
         let k = d.top_k;
         if out.len() > k {
@@ -1732,7 +1779,7 @@ impl Filler {
                         None => Filler::stat_score(st, k, oy, ox, oz),
                     }
                     + d.w_big * ((o.w * o.d) as f64).ln();                // footprint: longer / wider, not taller
-                let mut fit = -d.w_cov * resid
+                let mut fit = -d.w_dir * d.dir_cost(k, oy, ox, oz) - d.w_cov * resid
                     - d.w_sil * st.sil_delta(o, oy, ox, oz) as f64 / (SUB * SUB) as f64
                     - d.w_col * d.colour_cost(o, oy, ox, oz, colour);
                 if !Filler::held(st, o, oy, ox, oz) {
@@ -2241,23 +2288,50 @@ unsafe fn run(p: &Problem) -> i32 {
     };
     let (t_start, t_final) = (scale * p.t_start_share, scale * p.t_final_share);
     let mut accepted = 0i64;
+    let (mut w_prop, mut w_acc, mut w_de) = (0i64, 0i64, 0f64);
+    let mut w_terms = [0f64; 6];                       // shape, outline, colour, statistics, support+studs, size+joints
+    let terms = |st: &State| -> [f64; 6] {
+        let d = st.d;
+        [d.w_cov * st.fid, d.w_sil * st.sil as f64 / (SUB * SUB) as f64, d.w_col * st.col, st.style_loss(),
+         d.w_sup * st.n_unsup as f64 + d.w_side * st.bare as f64 + d.w_bare_top * st.n_bare_top,
+         d.w_size * st.size_kl() + d.w_sideways * st.sideways_kl() + d.w_stack * st.stack_kl()]
+    };
     let iters = p.iters.max(0);
     for it in 0..iters {
         let t = t_start * (t_final / t_start).powf(it as f64 / (iters - 1).max(1) as f64);
+        let before = if d.opt_watch.is_empty() { [0f64; 6] } else { terms(&st) };
         let u = match propose(&mut st, &mut filler, &mut rng) {
             Some(u) => u,
             None => continue,
         };
+        let watched = !d.opt_watch.is_empty() && match &u {
+            Undo::Retile { added, .. } => added.iter().any(|&i| st.items[i].map_or(false, |it| d.opt_watch[it.opt])),
+            _ => false,
+        };
         let e2 = st.energy();
+        if watched {
+            w_prop += 1; w_de += e2 - e;
+            let after = terms(&st);
+            for k in 0..6 { w_terms[k] += after[k] - before[k]; }
+        }
         if e2 <= e || rng.f64() < (-(e2 - e) / t).exp() {
             e = e2;
             accepted += 1;
+            if watched { w_acc += 1; }
         } else {
             undo(&mut st, u);
         }
         if p.log_every > 0 && (it + 1) % p.log_every == 0 {
             history.push(e);
         }
+    }
+    if !d.opt_watch.is_empty() {
+        let live_w = st.live.iter().filter(|&&i| d.opt_watch[st.item(i).opt]).count();
+        eprintln!("watched options: proposed in {} moves, accepted {} ({:.1} %), mean energy change {:.2}; in the final build {}",
+                  w_prop, w_acc, 100.0 * w_acc as f64 / w_prop.max(1) as f64, w_de / w_prop.max(1) as f64, live_w);
+        let m = w_prop.max(1) as f64;
+        eprintln!("  mean change per term: shape {:.1}  outline {:.1}  colour {:.1}  statistics {:.1}  support+studs {:.1}  size+joints {:.1}",
+                  w_terms[0] / m, w_terms[1] / m, w_terms[2] / m, w_terms[3] / m, w_terms[4] / m, w_terms[5] / m);
     }
     // outputs
     let n = st.live.len().min(p.out_cap as usize);

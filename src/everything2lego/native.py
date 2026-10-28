@@ -98,6 +98,9 @@ class Problem(C.Structure):
         ("w_big", C.c_double),                                          # filler: bigger parts first (0 = off)
         ("w_stack", C.c_double), ("p_stack", C.c_double), ("opt_brick", _P(C.c_uint8)),   # stacked-joints KL term
         ("w_bare_top", C.c_double),                                     # exposed top studs (0 = off)
+        ("opt_watch", _P(C.c_uint8)),                                   # diagnostics: options to report on (stderr)
+        ("w_dir", C.c_double), ("dir_thr", C.c_double), ("t_normal", _P(C.c_float)),   # surface direction (surface_dir.py)
+        ("dir_start", _P(C.c_int32)), ("dir_rows", _P(C.c_float)),
     ]
 
 
@@ -317,6 +320,15 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         from .sizes import N_CLASS, real_mix, size_class
         oc = arr([size_class(o.size[0], o.size[1], o.size[2]) for _, o in opts], np.int32); sp = arr(real_mix(kind), np.float64)
         size_fields = dict(w_size=weights.size, n_size_class=N_CLASS, opt_class=_ptr(oc, C.c_int32), size_pref=_ptr(sp, C.c_double))
+    if getattr(weights, "direction", 0.0) > 0:                                   # faces pointing the way the surface does
+        from .surface_dir import tables, target_normals
+        ds, dr = tables(opts); tn = target_normals(target.bits, target.want)
+        ds, dr, tn = arr(ds, np.int32), arr(dr, np.float32), arr(tn, np.float32)
+        size_fields.update(w_dir=weights.direction, dir_thr=getattr(weights, "dir_thr", 0.5), t_normal=_ptr(tn, C.c_float),
+                           dir_start=_ptr(ds, C.c_int32), dir_rows=_ptr(dr, C.c_float))
+    if any(getattr(o, "stack", None) is not None for _, o in opts):              # report how slope courses fare (stderr)
+        ow = arr([o.stack is not None for _, o in opts], np.uint8)
+        size_fields.update(opt_watch=_ptr(ow, C.c_uint8))
     if getattr(weights, "stack", 0.0) > 0:                                       # lined-up joints: brick on same-footprint brick
         ob = arr([v.box == "brick" and o.snot is None for v, o in opts], np.uint8)
         size_fields.update(w_stack=weights.stack, p_stack=getattr(weights, "p_stack", 0.093), opt_brick=_ptr(ob, C.c_uint8))
