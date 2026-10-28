@@ -224,14 +224,15 @@ class Mesh2Brick(nn.Module):
 
 def loss_and_acc(out, b, pad, rc, nconn_part, grid):
     """Sum of CE over the factors present at each step (+ op / root). Returns (loss, {name: acc})."""
-    valid = ~pad; B, T = valid.shape; H, W, D = grid
+    seq = ~pad; B, T = seq.shape; H, W, D = grid
+    valid = seq & b["sup"] if "sup" in b else seq                                   # infill: context bricks are input only
     def ce(logits, tgt, m):
         if m.sum() == 0: return logits.sum() * 0, float("nan")
         l = F.cross_entropy(logits[m], tgt[m]); a = (logits[m].argmax(-1) == tgt[m]).float().mean().item()
         return l, a
     acc, loss = {}, 0.0
     # op: PLACE at every valid step, STOP at the first padded position (state T_i)
-    op_t = torch.ones(B, T + 1, dtype=torch.long, device=pad.device); n = valid.sum(1); op_t[torch.arange(B), n] = 1; op_t[:, :T][valid] = 0
+    op_t = torch.ones(B, T + 1, dtype=torch.long, device=pad.device); n = seq.sum(1); op_t[torch.arange(B), n] = 1; op_t[:, :T][valid] = 0
     op_m = torch.cat([valid, torch.zeros(B, 1, dtype=torch.bool, device=pad.device)], 1); op_m[torch.arange(B), n] = True
     l, acc["op"] = ce(out["op"], op_t, op_m); loss = loss + l
     m0 = valid[:, 0]; h2, w2, d2 = H // 2, W // 2, D // 2; rcell = b["root_cell"][:, 0]
