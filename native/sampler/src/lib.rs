@@ -179,6 +179,11 @@ pub struct Problem {
     // bigger parts first: the filler adds w_big * ln(cells a part fills) to each candidate's score (a proposal
     // preference; the energy still accepts or rejects); 0 = off
     pub w_big: f64,
+    // stacked joints: energy += w_stack * n_bricks * KL(Bernoulli(stacked pairs / bricks) || p_stack), a stacked pair
+    // = a brick right on a brick of the same footprint (joints line up instead of overlapping); null / 0 = off
+    pub w_stack: f64,
+    pub p_stack: f64,
+    pub opt_brick: *const u8, // n_opt: a plain brick
 }
 
 const INFO_LEN: usize = 20;
@@ -324,6 +329,9 @@ struct Data {
     p_sideways: f64,
     opt_sideways: Vec<bool>,                              // n_opt (empty when off)
     w_big: f64,
+    w_stack: f64,
+    p_stack: f64,
+    opt_brick: Vec<bool>,
     w_out: Vec<f32>,                                      // n*64 (empty: plain sample count)
     w_in: Vec<f32>,
     fid0: f64,                                            // the shape term of an empty build
@@ -502,6 +510,9 @@ impl Data {
             p_sideways: p.p_sideways.clamp(1e-4, 1.0 - 1e-4),
             opt_sideways: if p.opt_sideways.is_null() { Vec::new() } else { v(p.opt_sideways, n_opt).iter().map(|&b| b != 0).collect() },
             w_big: p.w_big,
+            w_stack: if p.opt_brick.is_null() { 0.0 } else { p.w_stack },
+            p_stack: p.p_stack.clamp(1e-4, 1.0 - 1e-4),
+            opt_brick: if p.opt_brick.is_null() { Vec::new() } else { v(p.opt_brick, n_opt).iter().map(|&b| b != 0).collect() },
             w_out: if p.w_out.is_null() || p.w_in.is_null() { Vec::new() } else { v(p.w_out, n * 64) },
             w_in: if p.w_out.is_null() || p.w_in.is_null() { Vec::new() } else { v(p.w_in, n * 64) },
             fid0: 0.0,
@@ -939,6 +950,8 @@ struct State<'a> {
     bare: i64,
     size_n: Vec<f64>, // live parts per size class
     n_side: f64,      // live sideways parts
+    n_brick: f64,     // live plain bricks
+    n_stack: f64,     // brick-on-same-footprint-brick pairs
     mark: Vec<u32>,
     gen: u32,
 }
@@ -989,6 +1002,8 @@ impl<'a> State<'a> {
             bare: 0,
             size_n: vec![0.0; d.size_lpref.len()],
             n_side: 0.0,
+            n_brick: 0.0,
+            n_stack: 0.0,
             mark: Vec::new(),
             gen: 0,
         }
@@ -1402,6 +1417,28 @@ impl<'a> State<'a> {
         self.content() + self.style_loss() + d.w_sup * self.n_unsup as f64 + d.w_side * self.bare as f64
             + d.w_size * self.size_kl()
             + d.w_sideways * self.sideways_kl()
+            + d.w_stack * self.stack_kl()
+    }
+
+    /// Bricks among `nb` that sit right on / under brick i with the same footprint (a lined-up joint).
+    fn stacked(&self, i: usize, nb: &[(usize, u8)]) -> f64 {
+        let d = self.d;
+        let a = self.item(i);
+        let oa = &d.opts[a.opt];
+        nb.iter().filter(|&&(j, dir)| {
+            if dir == LEVEL || !d.opt_brick[self.item(j).opt] { return false; }
+            let b = self.item(j);
+            let ob = &d.opts[b.opt];
+            b.x == a.x && b.z == a.z && ob.w == oa.w && ob.d == oa.d && (b.y == a.y + oa.h || a.y == b.y + ob.h)
+        }).count() as f64
+    }
+
+    /// n_bricks * KL(Bernoulli(stacked pairs / bricks) || Bernoulli(p_stack))
+    fn stack_kl(&self) -> f64 {
+        if self.d.w_stack == 0.0 || self.n_brick <= 0.0 { return 0.0; }
+        let (n, p) = (self.n_brick, self.d.p_stack);
+        let q = (self.n_stack / n).clamp(1e-9, 1.0 - 1e-9);
+        n * (q * (q / p).ln() + (1.0 - q) * ((1.0 - q) / (1.0 - p)).ln())
     }
 
     /// n_parts * KL(Bernoulli(sideways share of the build) || Bernoulli(p_sideways))
@@ -1474,6 +1511,10 @@ impl<'a> State<'a> {
             self.adj[j].push((i, flip(dir)));
         }
         self.adj[i] = nb.clone();
+        if d.w_stack != 0.0 && d.opt_brick[it.opt] {
+            self.n_brick += 1.0;
+            self.n_stack += self.stacked(i, &nb);
+        }
         self.paths4(i, &nb, 1.0);                                      // after adj update (closed walks need adj[c] to contain i)
         let mut ids: Vec<usize> = nb.iter().map(|&(j, _)| j).collect();
         ids.push(i);
@@ -1485,6 +1526,10 @@ impl<'a> State<'a> {
         let it = *self.item(i);
         // Snapshot adj containing i for paths4 reverse-counting (closed walks).
         let nb_live: Vec<(usize, u8)> = self.adj[i].clone();
+        if self.d.w_stack != 0.0 && self.d.opt_brick[it.opt] {
+            self.n_brick -= 1.0;
+            self.n_stack -= self.stacked(i, &nb_live);
+        }
         self.paths4(i, &nb_live, -1.0);                                // before adj cleanup
         let nb = std::mem::take(&mut self.adj[i]);
         for &(j, _) in &nb {
@@ -1644,7 +1689,7 @@ impl Filler {
                         Some(p) => p[k],
                         None => Filler::stat_score(st, k, oy, ox, oz),
                     }
-                    + d.w_big * (o.cells.len() as f64).ln();
+                    + d.w_big * ((o.w * o.d) as f64).ln();                // footprint: longer / wider, not taller
                 let mut fit = -d.w_cov * resid
                     - d.w_sil * st.sil_delta(o, oy, ox, oz) as f64 / (SUB * SUB) as f64
                     - d.w_col * d.colour_cost(o, oy, ox, oz, colour);

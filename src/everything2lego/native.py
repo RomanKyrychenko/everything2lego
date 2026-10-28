@@ -96,6 +96,7 @@ class Problem(C.Structure):
         ("w_sideways", C.c_double), ("p_sideways", C.c_double), ("opt_sideways", _P(C.c_uint8)),   # sideways-share KL term
         ("w_out", _P(C.c_float)), ("w_in", _P(C.c_float)),             # surface fit (surface_fit.py); null = sample count
         ("w_big", C.c_double),                                          # filler: bigger parts first (0 = off)
+        ("w_stack", C.c_double), ("p_stack", C.c_double), ("opt_brick", _P(C.c_uint8)),   # stacked-joints KL term
     ]
 
 
@@ -315,6 +316,9 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         from .sizes import N_CLASS, real_mix, size_class
         oc = arr([size_class(o.size[0], o.size[1], o.size[2]) for _, o in opts], np.int32); sp = arr(real_mix(kind), np.float64)
         size_fields = dict(w_size=weights.size, n_size_class=N_CLASS, opt_class=_ptr(oc, C.c_int32), size_pref=_ptr(sp, C.c_double))
+    if getattr(weights, "stack", 0.0) > 0:                                       # lined-up joints: brick on same-footprint brick
+        ob = arr([v.box == "brick" and o.snot is None for v, o in opts], np.uint8)
+        size_fields.update(w_stack=weights.stack, p_stack=getattr(weights, "p_stack", 0.093), opt_brick=_ptr(ob, C.c_uint8))
     if getattr(weights, "surface", 0.0) > 0:                                     # shape term weighted by distance to the surface
         from .surface_fit import weights as _surface_weights
         wo, wi = _surface_weights(target.bits, alpha=weights.surface)
