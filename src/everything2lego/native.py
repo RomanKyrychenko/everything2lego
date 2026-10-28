@@ -90,6 +90,8 @@ class Problem(C.Structure):
         ("out_y", _P(C.c_int32)), ("out_x", _P(C.c_int32)), ("out_z", _P(C.c_int32)),
         ("info", _P(C.c_double)),
         ("hist_cap", C.c_int32), ("hist_n", _P(C.c_int32)), ("hist", _P(C.c_double)),
+        ("w_size", C.c_double), ("n_size_class", C.c_int32),      # part-size statistics (null = off)
+        ("opt_class", _P(C.c_int32)), ("size_pref", _P(C.c_double)),
     ]
 
 
@@ -304,6 +306,11 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
     # options
     pid = {id(v): i for i, v in enumerate(vocab)}
     opts = [(v, o) for v in vocab for o in v.orients]
+    size_fields = {}                                                             # part-size mix term (sizes.py); off when weight 0
+    if getattr(weights, "size", 0.0) > 0:
+        from .sizes import N_CLASS, real_mix, size_class
+        oc = arr([size_class(o.size[0], o.size[1], o.size[2]) for _, o in opts], np.int32); sp = arr(real_mix(kind), np.float64)
+        size_fields = dict(w_size=weights.size, n_size_class=N_CLASS, opt_class=_ptr(oc, C.c_int32), size_pref=_ptr(sp, C.c_double))
     boxk = {"brick": 0, "plate": 1, "tile": 2}
     cs, ts, bs, ss, hs = [0], [0], [0], [0], [0]
     halo = []
@@ -392,6 +399,7 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         out_y=_ptr(out["y"], C.c_int32), out_x=_ptr(out["x"], C.c_int32), out_z=_ptr(out["z"], C.c_int32),
         info=_ptr(info, C.c_double),
         hist_cap=hist_cap, hist_n=_ptr(hist_n, C.c_int32), hist=_ptr(hist, C.c_double),
+        **size_fields,
     )
     from . import proposals
     from .sampler import net_tables
@@ -487,7 +495,7 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
     keys = ("energy", "accepted", "t_start", "kl", "local_per_pair", "fidelity", "bad_cells",
             "unsupported", "bare_side_connectors", "parts", "pairs", "energy_recomputed",
             "kl_paths", "outline", "content_loss", "style_loss",
-            "kl_paths4", "entropy_paths4", "revkl_paths4", "_reserved19")
+            "kl_paths4", "entropy_paths4", "revkl_paths4", "size_kl")
     inf = {k: float(v) for k, v in zip(keys, info)}
     for k in ("bad_cells", "unsupported", "bare_side_connectors", "parts"):
         inf[k] = int(inf[k])

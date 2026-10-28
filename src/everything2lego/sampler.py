@@ -518,6 +518,7 @@ class Weights:
     tile_boost: float = 0.0   # bias toward tile parts; +2 lands near real-set tile fraction 15-23%
     snot_boost: float = 0.0   # bias toward SNOT parts (brickS, plateS, tileS); +5 lands near real-set 17-32%
     snot_bonus: float = 0.5   # energy -= snot_bonus * log(1 + models) per snot_insert child; makes the sampler prefer high-popularity SNOT templates
+    size: float = 0.0         # n_parts * KL(part-size mix || real sets', sizes.py); native engine only
 
     @classmethod
     def learned(cls, kind: Optional[str] = None) -> "Weights":

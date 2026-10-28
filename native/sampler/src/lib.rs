@@ -157,6 +157,12 @@ pub struct Problem {
     pub hist_cap: i32,
     pub hist_n: *mut i32,
     pub hist: *mut f64,
+    // part-size statistics: energy += w_size * n_parts * KL(build's size-class mix || real sets'),
+    // classes by footprint and height (sizes.py); null / 0 = off
+    pub w_size: f64,
+    pub n_size_class: i32,
+    pub opt_class: *const i32, // n_opt: size class of each option
+    pub size_pref: *const f64, // n_size_class: the classes' share in real sets
 }
 
 const INFO_LEN: usize = 20;
@@ -293,6 +299,9 @@ struct Data {
     hinge_pose: Vec<[i32; 3]>, // (dy, dx, dz)
     hinge_by_a: std::collections::HashMap<usize, Vec<usize>>, // opt_a -> indices into hinge_a/b/pose
     region_label: Vec<i32>,    // H*X*Z or empty
+    w_size: f64,
+    opt_class: Vec<usize>,     // n_opt (empty when off)
+    size_lpref: Vec<f64>,      // ln of the real sets' class shares
 }
 
 unsafe fn v<T: Copy>(p: *const T, n: usize) -> Vec<T> {
@@ -458,6 +467,10 @@ impl Data {
             hinge_by_a: std::collections::HashMap::new(),
             region_label: if p.region_label.is_null() { Vec::new() }
                           else { v(p.region_label, n) },
+            w_size: if p.opt_class.is_null() { 0.0 } else { p.w_size },
+            opt_class: if p.opt_class.is_null() { Vec::new() } else { v(p.opt_class, n_opt).iter().map(|&c| c as usize).collect() },
+            size_lpref: if p.size_pref.is_null() { Vec::new() }
+                        else { v(p.size_pref, p.n_size_class as usize).iter().map(|&q| q.max(1e-6).ln()).collect() },
         };
         let n_hinge = p.n_hinge.max(0) as usize;
         if n_hinge > 0 {
@@ -864,6 +877,7 @@ struct State<'a> {
     col: f64,
     fid: f64,
     bare: i64,
+    size_n: Vec<f64>, // live parts per size class
     mark: Vec<u32>,
     gen: u32,
 }
@@ -912,6 +926,7 @@ impl<'a> State<'a> {
             col: 0.0,
             fid: d.fill.iter().sum(),
             bare: 0,
+            size_n: vec![0.0; d.size_lpref.len()],
             mark: Vec::new(),
             gen: 0,
         }
@@ -1323,6 +1338,14 @@ impl<'a> State<'a> {
     fn energy(&self) -> f64 {
         let d = self.d;
         self.content() + self.style_loss() + d.w_sup * self.n_unsup as f64 + d.w_side * self.bare as f64
+            + d.w_size * self.size_kl()
+    }
+
+    /// n_parts * KL(size-class mix of the build || of real sets) = sum_c n_c ln(n_c / (n p_c))
+    fn size_kl(&self) -> f64 {
+        let n: f64 = self.size_n.iter().sum();
+        if n <= 0.0 { return 0.0; }
+        self.size_n.iter().zip(&self.d.size_lpref).filter(|(&c, _)| c > 0.0).map(|(&c, &lp)| c * ((c / n).ln() - lp)).sum()
     }
 
     fn set_unsup(&mut self, j: usize, v: bool) {
@@ -1358,6 +1381,7 @@ impl<'a> State<'a> {
         let d = self.d;
         let o = &d.opts[it.opt];
         self.fid += d.fid_delta(o, it.y, it.x, it.z);
+        if d.w_size != 0.0 { self.size_n[d.opt_class[it.opt]] += 1.0; }
         for &(y, x, z, bits, _) in &o.cells {
             let c = d.idx(it.y + y, it.x + x, it.z + z);
             self.owner[c] = i as i32;
@@ -1405,6 +1429,7 @@ impl<'a> State<'a> {
         }
         self.bare -= d.bare_sides(o, it.y, it.x, it.z);
         self.fid -= d.fid_delta(o, it.y, it.x, it.z);
+        if d.w_size != 0.0 { self.size_n[d.opt_class[it.opt]] -= 1.0; }
         self.col -= d.colour_cost(o, it.y, it.x, it.z, it.colour);
         self.items[i] = None;
         self.set_unsup(i, false);
@@ -2043,7 +2068,7 @@ unsafe fn run(p: &Problem) -> i32 {
         if d.paths4_enabled() && !st.kl3.pref.is_empty() && st.kl3.n > 1e-9 {
             -st.kl3.s_plogc + st.kl3.tot_pref * st.kl3.n.ln()
         } else { 0.0 },
-        0.0,                                                           // reserved
+        st.size_kl() / (st.live.len().max(1) as f64),                  // size-class KL to real sets
     ];
     for (k, v) in info.iter().enumerate().take(INFO_LEN) {
         *p.info.add(k) = *v;

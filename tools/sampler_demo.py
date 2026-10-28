@@ -166,6 +166,9 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--kind", default=None)
     ap.add_argument("--style", type=float, default=1.0, help="style weight: real-set statistics against form")
+    ap.add_argument("--size-weight", type=float, default=0.0, help="weight of the part-size mix term: n_parts * KL(our size classes || real sets', sizes.py); native engine")
+    ap.add_argument("--learned-weights", action="store_true", help="energy weights fitted to real sets (Weights.learned(kind)) instead of the hand-set defaults")
+    ap.add_argument("--colour-smooth", type=float, default=0.0, help="Potts-MRF colour smoothing of the target (colour_mrf.smooth beta, Lab units; ~40-80): fewer colour specks, so same-colour parts can merge")
     ap.add_argument("--stand", type=int, default=0, help="pad base plate by N studs (for figures or small objects)")
     ap.add_argument("--regions", default=None, help='JSON file mapping palette codes to kinds, e.g. {"0":"road_vehicle","4":"object"} — gives different sampler weights per colour region')
     ap.add_argument("--segmentation", default=None, help="npz from tools/segment_mesh.py: per-voxel region_kind (overrides --regions)")
@@ -206,6 +209,9 @@ def main() -> None:
     target = target_from_mesh(a.mesh, a.studs, a.shell, a.kind, stand=a.stand, regions=regions,
                               seg_label=seg_label, seg_kind_of=seg_kind_of, carve=carve,
                               smooth=a.smooth)
+    if a.colour_smooth > 0:
+        from everything2lego.colour_mrf import smooth
+        target.colour = smooth(target.colour, target.want, beta=a.colour_smooth)
     models = load_models()
     t0 = time.time()
     from everything2lego.sampler import Weights
@@ -223,7 +229,9 @@ def main() -> None:
         print(f"init: {len(init_placements)} placements from CNN", flush=True)
     def _once(seed: int):
         _t = time.time()
-        _ps, _info = sample(target, models, iters=iters, seed=seed, weights=Weights(style=a.style),
+        w = Weights.learned(target.kind) if a.learned_weights else Weights()
+        w.style = a.style; w.size = a.size_weight
+        _ps, _info = sample(target, models, iters=iters, seed=seed, weights=w,
                              tile_boost=a.tile_boost, snot_boost=a.snot_boost, opt_bias=opt_bias,
                              init_placements=init_placements, engine=a.engine)
         _info["iters"] = iters
