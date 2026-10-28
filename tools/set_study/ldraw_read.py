@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
+
+from functools import lru_cache
 
 import numpy as np
 
@@ -62,6 +65,41 @@ def _read_mpd(path: Path) -> tuple[str, dict[str, list[str]]]:
     return main, files
 
 
+_EXPORT_PREFIX = re.compile(r"^.+? - ")
+_LSYNTH = re.compile(r"^ls\d+[a-z]?\.dat$")                                 # LSynth hose/cable segments and constraints
+
+
+def _title(lines: list[str]) -> str:
+    return next((t[1:].strip() for t in lines if t.startswith("0")), "")
+
+
+def _org(lines: list[str]) -> str | None:
+    """Kind of an MPD-embedded file from its !LDRAW_ORG header: part/shortcut/subpart/primitive, None for models."""
+    for t in lines[:20]:
+        tok = t.lower().split()
+        if len(tok) > 2 and tok[:2] == ["0", "!ldraw_org"]:
+            kind = tok[2].removeprefix("unofficial_")
+            return None if kind == "model" else kind
+    return None
+
+
+@lru_cache(maxsize=None)
+def _is_fragment(name: str) -> bool:
+    """Primitive or subpart reference (p/, p/48, parts/s), or a "~" part (hose / cable / tube segment that only
+    draws a flexible element): real parts live flat in parts/ and their title doesn't start with "~"."""
+    if "/" in name:
+        return True
+    lib = [root / d / name for root in (LDRAW_OFFICIAL, LDRAW) for d in ("parts", "UnOfficial/parts")]
+    f = next((q for q in lib if q.exists()), None)
+    if f is None:
+        return any((root / d / name).exists() for root in (LDRAW_OFFICIAL, LDRAW) for d in ("p", "UnOfficial/p"))
+    with f.open(errors="replace") as fh:
+        title = fh.readline().strip()
+    if title.lower().startswith("0 ~moved to "):                         # renamed part: judge by its new name
+        return _is_fragment(title.split()[-1].lower().removesuffix(".dat") + ".dat")
+    return title.startswith("0 ~")
+
+
 def _find(name: str) -> Path | None:
     name = name.replace("\\", "/")
     for d in SEARCH:
@@ -92,10 +130,16 @@ def flatten(path: str | Path) -> list[Part]:
             c = colour if c == 16 else c
             sub = " ".join(tok[14:]).lower().replace("\\", "/")
             W = M @ _matrix(tok[2:14])
-            if sub in files:
+            org = _org(files[sub]) if sub in files else None
+            if sub in files and org is None:                               # a sub-model: open it
                 walk(sub, W, c, trail + (sub,))
-            else:
-                out.append(Part(sub, c, W, step[0], trail))
+            elif org in ("part", "shortcut"):                                 # a part embedded by the exporter
+                base = _EXPORT_PREFIX.sub("", sub)                              # Studio: "42131 - 61332.dat" -> "61332.dat"
+                if not (_LSYNTH.match(base) or _title(files[sub]).startswith("~")):
+                    out.append(Part(base, c, W, step[0], trail))
+            elif org is None and not _is_fragment(sub):
+                out.append(Part(sub, c, W, step[0], trail))                # a library part
+            # else a primitive / subpart drawn straight into a model (strings, hoses): geometry, not a part
 
     walk(main, np.eye(4), 16, ())
     return out

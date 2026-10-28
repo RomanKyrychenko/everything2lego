@@ -51,7 +51,7 @@ def _part_id_map() -> dict:
     most common LDraws across OMR; everything else maps to 0 ("other")."""
     import json
     if PART_INDEX_PATH.exists():
-        return {k: int(v) for k, v in json.loads(PART_INDEX_PATH.read_text()).items()}
+        return _with_bricknet_aliases({k: int(v) for k, v in json.loads(PART_INDEX_PATH.read_text()).items()})
     # Build by scanning OMR corpus
     from collections import Counter
     sys.path.insert(0, str(ROOT / "tools" / "set_study"))
@@ -70,10 +70,46 @@ def _part_id_map() -> dict:
         m[name] = i
     PART_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
     PART_INDEX_PATH.write_text(json.dumps(m))
+    return _with_bricknet_aliases(m)
+
+
+def _with_bricknet_aliases(m: dict) -> dict:
+    """BrickNet's loader renames some LDraw parts (3023 -> 3023b); give each new name its original's id,
+    else the scorers see "other" and score those builds higher than the same build in LDraw names."""
+    try:
+        from bricknet.data import load_aliases
+        aliases = load_aliases()
+    except Exception:                                                  # noqa: BLE001  (no BRICKNET_DATA: nothing to alias)
+        return m
+    for src, (dst, _) in aliases.items():
+        if f"{src}.dat" in m and f"{dst}.dat" not in m: m[f"{dst}.dat"] = m[f"{src}.dat"]
     return m
 EDGE_FAMILIES = ("unknown", "stud", "hinge", "axle", "ball", "fixed")
 _FAM_IX = {f: i for i, f in enumerate(EDGE_FAMILIES)}
-EDGE_DIM = len(EDGE_FAMILIES) + 3                                     # 6-dim family one-hot + 3-dim offset
+EDGE_DIM = len(EDGE_FAMILIES) + 3                                     # 6-dim family one-hot + 3-dim offset (STORED)
+# v16 augmentation: edge colour-pair one-hot (src_col, dst_col) prepended at
+# training/scoring time only.  Stored edge_attr keeps EDGE_DIM=9 shape so
+# existing graphs.pkl stays valid; _augment_edges() computes the extra
+# columns from node_cat on the fly.
+EDGE_COLPAIR_DIM = 2 * (len(COLOUR_BINS) + 1)                         # 62 dims = 2 x 31-bin colour one-hot
+EDGE_FULL_DIM = EDGE_DIM + EDGE_COLPAIR_DIM                           # what the MP layer actually sees
+
+
+def _augment_edges(ea, ei, nc):
+    """Return edge_attr augmented with (src_col, dst_col) one-hot — the
+    direct 'colour combinations matter' signal.  Pure torch, GPU-friendly."""
+    import torch
+    E = ea.shape[0]
+    if E == 0:
+        return ea.new_zeros((0, EDGE_FULL_DIM))
+    col_bins = len(COLOUR_BINS) + 1
+    src_col = nc[ei[0], 3].clamp(0, col_bins - 1)
+    dst_col = nc[ei[1], 3].clamp(0, col_bins - 1)
+    src_onehot = torch.zeros(E, col_bins, device=ea.device, dtype=ea.dtype)
+    dst_onehot = torch.zeros(E, col_bins, device=ea.device, dtype=ea.dtype)
+    src_onehot.scatter_(1, src_col.unsqueeze(1), 1.0)
+    dst_onehot.scatter_(1, dst_col.unsqueeze(1), 1.0)
+    return torch.cat([ea, src_onehot, dst_onehot], dim=-1)
 
 
 def _subgraph_bootstrap(graph, target_n: int, rng: random.Random):
@@ -238,7 +274,19 @@ def build_graph(path: Path, part_id_map: dict | None = None) -> tuple | None:
         return None
     if len(items) > 2500:
         items = items[:2500]
-    # Node features
+    return items_to_graph(items, bbox_cache, part_id_map)
+
+
+def items_to_graph(items: list, bbox_cache: dict, part_map: dict,
+                    pairs: list | None = None) -> tuple | None:
+    """Post-flatten graph construction, factored out so in-memory callers
+    (the refiner) can skip the flatten + _parts_with_grid round-trip and
+    build the graph directly from a modified items list.
+
+    `pairs` optional pre-computed neighbour pairs; skips _neighbour_pairs
+    (the dominant cost per profile) when caller has an up-to-date cache."""
+    if not items:
+        return None
     y_coords = [it[3][1] for it in items]
     y_min, y_max = min(y_coords), max(y_coords)
     y_rng = max(1.0, y_max - y_min)
@@ -252,32 +300,23 @@ def build_graph(path: Path, part_id_map: dict | None = None) -> tuple | None:
         cat_i = _category(ldraw)
         sz_i = _size_bin(ldraw, bbox_cache)
         col_i = _colour_bin(colour)
-        pid_i = part_id_map.get(ldraw, 0)                        # 0 = "other"
-        nodes[i, cat_i] = 1.0                                    # legacy v3 one-hot cat
-        nodes[i, cat_bins + sz_i] = 1.0                          # legacy v3 one-hot size
-        nodes[i, cat_bins + 5 + col_i] = 1.0                     # legacy v3 one-hot colour
+        pid_i = part_map.get(ldraw, 0)
+        nodes[i, cat_i] = 1.0
+        nodes[i, cat_bins + sz_i] = 1.0
+        nodes[i, cat_bins + 5 + col_i] = 1.0
         off = cat_bins + 5 + col_bins
         y_norm = (glo[1] - y_min) / y_rng
         snot_f = 1.0 if _is_snot(M) else 0.0
         w_p = (ghi[0] - glo[0]) / 10.0
         d_p = (ghi[2] - glo[2]) / 10.0
-        nodes[i, off] = y_norm
-        nodes[i, off + 1] = snot_f
-        nodes[i, off + 2] = w_p
-        nodes[i, off + 3] = d_p
-        node_cat[i, 0] = pid_i
-        node_cat[i, 1] = cat_i
-        node_cat[i, 2] = sz_i
-        node_cat[i, 3] = col_i
-        node_cont[i, 0] = y_norm
-        node_cont[i, 1] = snot_f
-        node_cont[i, 2] = w_p
-        node_cont[i, 3] = d_p
-    # Edges
-    # Edges — OMR path, bbox adjacency, family defaults to "unknown".
-    # BrickNet-sourced graphs use bricknet_graph_to_ours() instead for typed
-    # connectors (stud/hinge/axle/ball/fixed).
-    pairs = _neighbour_pairs(items)
+        nodes[i, off] = y_norm; nodes[i, off + 1] = snot_f
+        nodes[i, off + 2] = w_p; nodes[i, off + 3] = d_p
+        node_cat[i, 0] = pid_i; node_cat[i, 1] = cat_i
+        node_cat[i, 2] = sz_i; node_cat[i, 3] = col_i
+        node_cont[i, 0] = y_norm; node_cont[i, 1] = snot_f
+        node_cont[i, 2] = w_p; node_cont[i, 3] = d_p
+    if pairs is None:
+        pairs = _neighbour_pairs(items)
     E = len(pairs) * 2
     edge_index = np.zeros((2, E), dtype=np.int64)
     edge_attr = np.zeros((E, EDGE_DIM), dtype=np.float32)
@@ -501,6 +540,23 @@ def cmd_train(a) -> None:
     import torch.nn.functional as F
     with GRAPHS_PKL.open("rb") as f:
         bucket = pickle.load(f)
+    # OMR upweighting: OMR graphs are the first N entries of bucket['real']
+    # (cmd_build appends OMR first; bricknet_to_graphs.py extends after).
+    # Oversample them N× to shift the model's 'real' prior toward OMR
+    # architectural patterns and away from BrickNet MOC statistics.
+    if a.oversample_omr > 1:
+        omr_n = int(a.omr_count)
+        omr_subset = bucket["real"][:omr_n]
+        before = len(bucket["real"])
+        extra = []
+        aug_rng = random.Random(a.seed + 1000)
+        for _ in range(a.oversample_omr - 1):
+            for g in omr_subset:
+                ag = _augment_graph(g, aug_rng)                           # subgraph crop + colour perm
+                if ag is not None:
+                    extra.append(ag)
+        bucket["real"] = bucket["real"] + extra
+        print(f"oversampled OMR {a.oversample_omr}x (augmented): real {before} -> {len(bucket['real'])}", flush=True)
     # Flatten with labels; label 1 = real, 0 = everything else; keep source tag.
     items = []
     for src in ("real", "ours", "deg", "ours_omr"):
@@ -521,7 +577,7 @@ def cmd_train(a) -> None:
         node_j via GRU-ish gated residual."""
         def __init__(self, dim: int):
             super().__init__()
-            self.msg = nn.Linear(dim + EDGE_DIM, dim)
+            self.msg = nn.Linear(dim + EDGE_FULL_DIM, dim)
             self.upd = nn.Linear(dim * 2, dim)
 
         def forward(self, x, ei, ea):
@@ -561,10 +617,12 @@ def cmd_train(a) -> None:
                 col_e = self.col_emb(node_cat[:, 3])
                 x = torch.cat([part_e, cat_e, size_e, col_e, node_cont], dim=-1)
                 x = torch.relu(self.embed(x))
+                ea_full = _augment_edges(ea, ei, node_cat)
             else:
                 x = torch.relu(self.legacy_embed(nodes))
+                ea_full = torch.cat([ea, ea.new_zeros((ea.shape[0], EDGE_COLPAIR_DIM))], dim=-1)
             for layer in self.layers:
-                x = layer(x, ei, ea)
+                x = layer(x, ei, ea_full)
             if graph_id is None:
                 graph = x.mean(dim=0)
                 return self.head(graph).unsqueeze(0)             # (1, 2)
@@ -707,6 +765,15 @@ def cmd_train(a) -> None:
                 ncont_t = torch.tensor(np.concatenate(all_ncont, axis=0), device=device) if all_ncont else None
                 gid_t = torch.tensor(np.concatenate(all_gid, axis=0), device=device, dtype=torch.long)
                 y_t = torch.tensor(all_y, device=device, dtype=torch.long)
+            if a.permute_palette and nc_t is not None:
+                # Per-graph random permutation of the colour column (nc[:, 3]).
+                # Forces the model to be invariant to absolute colour identity:
+                # it can only use colour through adjacency patterns (which the
+                # same permutation preserves) rather than "colour N is real".
+                _cb = len(COLOUR_BINS) + 1
+                _perm = torch.stack([torch.randperm(_cb, device=device) for _ in range(len(all_y))])
+                nc_t = nc_t.clone()
+                nc_t[:, 3] = _perm[gid_t, nc_t[:, 3]]
             logits = net(nodes_t, ei_t, ea_t, nc_t, ncont_t, graph_id=gid_t, n_graphs=len(all_y))
             loss = F.cross_entropy(logits, y_t, weight=class_w)
             opt.zero_grad(); loss.backward(); opt.step()
@@ -824,7 +891,7 @@ def cmd_score(a) -> None:
     class MP(nn.Module):
         def __init__(self, dim: int):
             super().__init__()
-            self.msg = nn.Linear(dim + EDGE_DIM, dim)
+            self.msg = nn.Linear(dim + EDGE_FULL_DIM, dim)
             self.upd = nn.Linear(dim * 2, dim)
 
         def forward(self, x, ei, ea):
@@ -858,10 +925,12 @@ def cmd_score(a) -> None:
                 col_e = self.col_emb(nc[:, 3])
                 x = torch.cat([part_e, cat_e, size_e, col_e, ncont], dim=-1)
                 x = torch.relu(self.embed(x))
+                ea_full = _augment_edges(ea, ei, nc)
             else:
                 x = torch.relu(self.legacy_embed(nodes))
+                ea_full = torch.cat([ea, ea.new_zeros((ea.shape[0], EDGE_COLPAIR_DIM))], dim=-1)
             for layer in self.layers:
-                x = layer(x, ei, ea)
+                x = layer(x, ei, ea_full)
             return self.head(x.mean(dim=0)).unsqueeze(0)
 
     net = GNN(); net.load_state_dict(ckpt["state_dict"]); net.eval()
@@ -915,6 +984,9 @@ def main() -> None:
     t.add_argument("--pre-convert", action=argparse.BooleanOptionalAction, default=True, help="pre-convert graphs to torch tensors once at startup (saves ~30-50%% per step)")
     t.add_argument("--strip-family", action=argparse.BooleanOptionalAction, default=True, help="zero out the 6-dim family one-hot in all edge attrs (removes BrickNet-vs-ours trivial shortcut)")
     t.add_argument("--subgraph-nodes", type=int, default=0, help="BFS-sample N connected nodes per training+val step (0 = whole graph).  Removes the node-count class leak so classifier learns from structure within equal-sized subgraphs.")
+    t.add_argument("--permute-palette", action=argparse.BooleanOptionalAction, default=True, help="per-graph random palette permutation at training time: forces colour-identity invariance, so the model can only use colour through adjacency patterns.")
+    t.add_argument("--oversample-omr", type=int, default=1, help="duplicate the OMR portion of bucket['real'] N times before training, so OMR architectural patterns dominate over BrickNet MOC statistics (1 = no oversampling)")
+    t.add_argument("--omr-count", type=int, default=7156, help="number of OMR graphs at the start of bucket['real'] (hardcoded from the build order)")
     t.add_argument("--val-frac", type=float, default=0.2)
     t.add_argument("--seed", type=int, default=0)
     t.add_argument("--device", default="cpu")
