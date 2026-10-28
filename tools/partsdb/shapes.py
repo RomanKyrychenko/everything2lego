@@ -46,8 +46,9 @@ from everything2lego.sampler import SUB, pack  # noqa: E402  (one bit order for 
 CATEGORIES = ("Bricks", "Plates", "Tiles", "Bricks Sloped", "Bricks Curved", "Bricks Round and Cones",
               "Tiles Round and Curved", "Plates Round Curved and Dishes", "Bricks Wedged", "Plates Wedged",
               "Bricks Special", "Plates Special", "Tiles Special",
-              "Hinges, Arms and Turntables", "Technic Bricks", "Technic Beams")
-MIN_SETS = 30
+              "Hinges, Arms and Turntables", "Technic Bricks", "Technic Beams",
+              "Windows and Doors", "Panels", "Bars, Ladders and Fences", "Baseplates")
+MIN_SETS = 10                 # sets ever (older moulds the official models still use count too)
 TOL = 1.0                     # LDU a body may miss the grid by
 
 
@@ -269,7 +270,7 @@ def wheel_assemblies(con) -> dict[str, dict]:
 def main() -> None:
     con = sqlite3.connect(DB)
     q = f"""SELECT p.part_num, MIN(g.ldraw) FROM part p JOIN geometry g ON g.part_num = p.part_num
-            WHERE p.category IN ({",".join("?" * len(CATEGORIES))}) AND p.n_sets_recent >= ?
+            WHERE p.category IN ({",".join("?" * len(CATEGORIES))}) AND p.n_sets >= ?
             AND g.ldraw IS NOT NULL GROUP BY p.part_num"""
     studs = {}
     for pn, x, z in con.execute("SELECT part_num, x, z FROM connector "

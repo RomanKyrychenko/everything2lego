@@ -95,6 +95,7 @@ class Problem(C.Structure):
         ("n_snot_rows", C.c_int32), ("snot_rows", _P(C.c_int32)),      # sideways move (snot_options.pair_rows)
         ("w_sideways", C.c_double), ("p_sideways", C.c_double), ("opt_sideways", _P(C.c_uint8)),   # sideways-share KL term
         ("w_out", _P(C.c_float)), ("w_in", _P(C.c_float)),             # surface fit (surface_fit.py); null = sample count
+        ("w_big", C.c_double),                                          # filler: bigger parts first (0 = off)
     ]
 
 
@@ -414,6 +415,7 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         out_y=_ptr(out["y"], C.c_int32), out_x=_ptr(out["x"], C.c_int32), out_z=_ptr(out["z"], C.c_int32),
         info=_ptr(info, C.c_double),
         hist_cap=hist_cap, hist_n=_ptr(hist_n, C.c_int32), hist=_ptr(hist, C.c_double),
+        w_big=getattr(weights, "big", 0.0),
         **size_fields,
     )
     from . import proposals

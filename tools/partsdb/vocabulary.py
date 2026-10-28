@@ -40,7 +40,7 @@ from build import DB, NON_SYSTEM  # noqa: E402
 from features import token  # noqa: E402
 
 OUT = REPO / "src/everything2lego/data/vocabulary.json"
-MIN_SETS = 30
+MIN_SETS = 10              # sets ever, as shapes.py
 MIN_COLOUR_SETS = 2
 MIN_KIND_SETS = 3
 
@@ -52,12 +52,17 @@ def main() -> None:
         FROM part_shape s JOIN part p ON p.part_num = s.part_num
         JOIN (SELECT part_num, w_studs, d_studs, h_plates FROM geometry GROUP BY part_num) g
              ON g.part_num = s.part_num
-        WHERE p.n_sets_recent >= ?""", con, params=(MIN_SETS,))
+        WHERE p.n_sets >= ?""", con, params=(MIN_SETS,))
     sh = sh[~sh.category.isin(NON_SYSTEM)]
     pc = pd.read_sql("""SELECT part_num, CAST(ldraw_code AS INT) AS code, n_sets_current AS n
                         FROM part_colour WHERE ldraw_code IS NOT NULL AND n_sets_current >= ?""",
                      con, params=(MIN_COLOUR_SETS,))
     colours = {pn: dict(zip(g.code.astype(str), g.n.astype(int))) for pn, g in pc.groupby("part_num")}
+    # parts no longer made: the colours they came in, ever (else every older mould has none and is dropped)
+    pa = pd.read_sql("""SELECT part_num, CAST(ldraw_code AS INT) AS code, n_sets AS n
+                        FROM part_colour WHERE ldraw_code IS NOT NULL AND n_sets >= ?""", con, params=(MIN_COLOUR_SETS,))
+    for pn, g in pa.groupby("part_num"):
+        colours.setdefault(pn, dict(zip(g.code.astype(str), g.n.astype(int))))
     pk = pd.read_sql("SELECT part_num, kind, n_sets, set_share, lift FROM part_kind WHERE n_sets >= ?",
                      con, params=(MIN_KIND_SETS,))
     kinds = {pn: {k: {"sets": int(n), "set_share": round(float(ss), 4), "lift": round(float(l), 3)}
@@ -73,7 +78,7 @@ def main() -> None:
                     "origin": [r.origin_x, r.origin_y, r.origin_z], "fill": round(float(r.fill), 3),
                     "occ": json.loads(r.occ), "bits": json.loads(r.bits), "studs_top": json.loads(r.studs_top),
                     "holes_bottom": json.loads(r.holes_bottom), "sides": json.loads(r.sides),
-                    "n_sets": int(r.n_sets_recent), "colours": colours[r.part_num],
+                    "n_sets": int(r.n_sets_recent) if r.n_sets_recent == r.n_sets_recent else 0, "colours": colours[r.part_num],
                     "kinds": kinds.get(r.part_num, {}),
                     "companion": r.companion if isinstance(getattr(r, "companion", None), str) else None})
     best = {}

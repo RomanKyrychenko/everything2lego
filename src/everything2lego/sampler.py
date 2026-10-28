@@ -523,6 +523,7 @@ class Weights:
     sideways: float = 0.0     # n_parts * KL(sideways share || p_sideways); with sample(snot=True), native engine only
     p_sideways: float = 0.10  # real buildings: ~15 % of parts not studs-up; the sideways options cover plates / tiles
     surface: float = 0.0      # > 0: shape term weighted by distance to the target's surface (surface_fit.py, alpha); native only
+    big: float = 0.0          # filler proposes bigger parts first: + big * ln(cells it fills) on each candidate; native only
 
     @classmethod
     def learned(cls, kind: Optional[str] = None) -> "Weights":

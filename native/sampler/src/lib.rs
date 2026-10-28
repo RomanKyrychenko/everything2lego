@@ -176,6 +176,9 @@ pub struct Problem {
     // target is full (1 near the outer surface, ~0 deep inside); null = the plain count of wrong samples
     pub w_out: *const f32, // h*x*z*64
     pub w_in: *const f32,  // h*x*z*64
+    // bigger parts first: the filler adds w_big * ln(cells a part fills) to each candidate's score (a proposal
+    // preference; the energy still accepts or rejects); 0 = off
+    pub w_big: f64,
 }
 
 const INFO_LEN: usize = 20;
@@ -320,6 +323,7 @@ struct Data {
     w_sideways: f64,
     p_sideways: f64,
     opt_sideways: Vec<bool>,                              // n_opt (empty when off)
+    w_big: f64,
     w_out: Vec<f32>,                                      // n*64 (empty: plain sample count)
     w_in: Vec<f32>,
     fid0: f64,                                            // the shape term of an empty build
@@ -497,6 +501,7 @@ impl Data {
             w_sideways: if p.opt_sideways.is_null() { 0.0 } else { p.w_sideways },
             p_sideways: p.p_sideways.clamp(1e-4, 1.0 - 1e-4),
             opt_sideways: if p.opt_sideways.is_null() { Vec::new() } else { v(p.opt_sideways, n_opt).iter().map(|&b| b != 0).collect() },
+            w_big: p.w_big,
             w_out: if p.w_out.is_null() || p.w_in.is_null() { Vec::new() } else { v(p.w_out, n * 64) },
             w_in: if p.w_out.is_null() || p.w_in.is_null() { Vec::new() } else { v(p.w_in, n * 64) },
             fid0: 0.0,
@@ -1638,7 +1643,8 @@ impl Filler {
                     * match &prior {
                         Some(p) => p[k],
                         None => Filler::stat_score(st, k, oy, ox, oz),
-                    };
+                    }
+                    + d.w_big * (o.cells.len() as f64).ln();
                 let mut fit = -d.w_cov * resid
                     - d.w_sil * st.sil_delta(o, oy, ox, oz) as f64 / (SUB * SUB) as f64
                     - d.w_col * d.colour_cost(o, oy, ox, oz, colour);
