@@ -7,7 +7,12 @@ off the grid (half-stud jumpers, sideways, hinged) are left out.  Two parts touc
 overlapping footprints, or they share a side face at overlapping heights; a pattern is a part with one or two of the
 parts it touches, kept by its parts' relative cells and turns, counted by how many sets have it.
 
-    .venv-arm/bin/python tools/learn/motifs.py [--n 150 --min-sets 8 --top 3000]
+Bigger patterns grow level by level (Apriori, as in frequent-subgraph mining): a k-part group is a frequent (k-1)-part
+group's instance plus a part one of its members touches, and only the groups in at least --min-sets sets are grown
+further; from four parts up a group of one part alike (a tiled floor, a column of 1x1 bricks) is not kept -- the
+sampler's merge / retile moves make those.  The parts' cells fix the geometry, so the relative-cell key is canonical and no graph matching is needed.
+
+    .venv-arm/bin/python tools/learn/motifs.py [--n 150 --min-sets 8 --max-size 6 --top 1500]
         -> src/everything2lego/data/motifs.json
 """
 from __future__ import annotations
@@ -118,48 +123,82 @@ def overlaps(items, members) -> bool:
     return False
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--kind", default="building"); ap.add_argument("--n", type=int, default=150)
-    ap.add_argument("--min-parts", type=int, default=200); ap.add_argument("--min-sets", type=int, default=8)
-    ap.add_argument("--top", type=int, default=3000)
-    a = ap.parse_args()
-    poses = option_poses(a.kind)
+def mine(sets: list, min_sets: int, max_size: int, cap: int = 40) -> dict:
+    """{size: Counter(key -> sets)} of groups of 2..max_size touching parts in at least `min_sets` of `sets`
+    ((items, touching, on): only parts with on[i] count).  At most `cap` instances of a group per set are grown."""
+    import random
+    rnd = random.Random(0)
+    out = {}
+    inst = []                                            # per set: key -> member tuples
+    for items, nb, on in sets:
+        g = defaultdict(set)
+        for i in range(len(items)):
+            if on[i]:
+                for j in nb[i]:
+                    if j > i and on[j]:
+                        g[key(items, (i, j))].add((i, j))
+        inst.append(g)
+    for k in range(2, max_size + 1):
+        n = Counter(kk for g in inst for kk in g
+                    if k < 4 or len({p[:2] for p in kk}) > 1)       # 4+ alike parts: a plain floor / column, retile's job
+        keep = {kk for kk, c in n.items() if c >= min_sets}
+        out[k] = Counter({kk: n[kk] for kk in keep})
+        print(f"  size {k}: {len(n)} groups, {len(keep)} in >= {min_sets} sets", flush=True)
+        if k == max_size or not keep:
+            break
+        nxt = []
+        for (items, nb, on), g in zip(sets, inst):
+            h = defaultdict(set)
+            for kk in keep & g.keys():
+                ms = list(g[kk])
+                for m in (rnd.sample(ms, cap) if len(ms) > cap else ms):
+                    for j in {j for i in m for j in nb[i]} - set(m):
+                        if on[j]:
+                            mm = tuple(sorted(m + (j,)))
+                            if not overlaps(items, mm):
+                                h[key(items, mm)].add(mm)
+            nxt.append(h)
+        inst = nxt
+    return out
+
+
+def load_sets(kind: str, n: int, min_parts: int, poses) -> list:
+    """Up to n real sets of this kind with at least min_parts parts on the grid: (file, items, touching)."""
     kinds = {r["id"]: r["kind"] for r in csv.DictReader(open(DATA / "analysis" / "set_kinds.csv"))}
-    files = [f for f in sorted((DATA / "omr" / "files").glob("*.mpd")) if kinds.get(f.stem.split("_")[0]) == a.kind]
-    sets = Counter(); occ = Counter(); used = 0; mapped = []
+    files = [f for f in sorted((DATA / "omr" / "files").glob("*.mpd")) if kinds.get(f.stem.split("_")[0]) == kind]
+    out = []
     for f in files:
         try:
             items = grid_items(f, poses)
         except Exception:                                                     # noqa: BLE001
             continue
-        if len(items) < a.min_parts:
-            continue
-        used += 1; mapped.append(len(items))
-        nb = touching(items)
-        seen = set()
-        for i in range(len(items)):
-            for j in nb[i]:
-                if j > i:
-                    seen.add(key(items, (i, j)))
-            ns = sorted(nb[i])
-            for p in range(len(ns)):                                         # i with two of its neighbours: paths and corners
-                for q in range(p + 1, len(ns)):
-                    m = (i, ns[p], ns[q])
-                    if not overlaps(items, m):
-                        seen.add(key(items, m))
-        for k in seen:
-            sets[k] += 1
-        if used >= a.n:
+        if len(items) >= min_parts:
+            out.append((f, items, touching(items)))
+        if len(out) >= n:
             break
-    keep = [(k, n) for k, n in sets.most_common() if n >= a.min_sets][:a.top]
-    OUT.write_text(json.dumps({"source": "tools/learn/motifs.py", "kind": a.kind, "sets": used,
-                               "motifs": [{"parts": [list(p) for p in k], "sets": n} for k, n in keep]}))
-    print(f"{used} {a.kind} sets, {np.mean(mapped):.0f} grid parts each; {len(sets)} patterns, "
-          f"{len(keep)} in >= {a.min_sets} sets -> {OUT}")
-    for k, n in keep[:15]:
-        print(f"  {n:4d} sets  " + "  ".join(f"{p[0]}@{p[1]}+{p[2:]}" for p in k))
+    return out
 
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--kind", default="building"); ap.add_argument("--n", type=int, default=150)
+    ap.add_argument("--min-parts", type=int, default=200); ap.add_argument("--min-sets", type=int, default=8)
+    ap.add_argument("--max-size", type=int, default=6); ap.add_argument("--top", type=int, default=1500, help="per size")
+    a = ap.parse_args()
+    poses = option_poses(a.kind)
+    sets = load_sets(a.kind, a.n, a.min_parts, poses)
+    found = mine([(items, nb, [True] * len(items)) for _, items, nb in sets], a.min_sets, a.max_size)
+    keep = [(kk, c) for k in sorted(found) for kk, c in found[k].most_common(a.top)]
+    old = json.loads(OUT.read_text()) if OUT.exists() else {}
+    typed = [m for m in old.get("motifs", []) if m.get("type", 0) != 0]          # roof / flat-top patterns (roof_mix.py)
+    OUT.write_text(json.dumps({**{k: v for k, v in old.items() if k != "motifs"},
+                               "source": "tools/learn/motifs.py", "kind": a.kind, "sets": len(sets),
+                               "motifs": [{"parts": [list(p) for p in kk], "sets": c} for kk, c in keep] + typed}))
+    print(f"{len(sets)} {a.kind} sets, {np.mean([len(i) for _, i, _ in sets]):.0f} grid parts each; "
+          f"{len(keep)} patterns kept -> {OUT}")
+    for k in sorted(found):
+        for kk, c in found[k].most_common(3):
+            print(f"  {c:4d} sets  " + "  ".join(f"{p[0]}@{p[1]}+{p[2:]}" for p in kk))
 
 if __name__ == "__main__":
     main()

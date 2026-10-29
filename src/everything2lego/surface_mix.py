@@ -81,16 +81,22 @@ def roof_mix(kind: str | None = "building") -> np.ndarray | None:
     return c / c.sum()
 
 
-def pitched_columns(occ: np.ndarray, lo: float = 0.9, hi: float = 4.3, min_cols: int = 30) -> np.ndarray:
-    """(X, Z) bool: stud columns under a pitched roof -- the largest connected area where the top of the model rises
-    steadily, lo..hi plates per stud (20-60 deg), when it covers at least `min_cols` columns (else none)."""
-    from scipy.ndimage import label, median_filter
+def _tops(occ: np.ndarray):
+    """Per stud column: filled, the top cell's height, its 3x3 median, and the median's slope (plates per stud)."""
+    from scipy.ndimage import median_filter
     H = occ.shape[0]
     filled = occ.any(0)
     top = np.where(filled, H - 1 - np.argmax(occ[::-1], axis=0), -1).astype(float)
     sm = median_filter(np.where(filled, top, np.nan_to_num(top)), size=3)
     gy, gx = np.gradient(sm)
-    g = np.hypot(gy, gx)
+    return filled, top, sm, np.hypot(gy, gx)
+
+
+def pitched_columns(occ: np.ndarray, lo: float = 0.9, hi: float = 4.3, min_cols: int = 30) -> np.ndarray:
+    """(X, Z) bool: stud columns under a pitched roof -- the largest connected area where the top of the model rises
+    steadily, lo..hi plates per stud (20-60 deg), when it covers at least `min_cols` columns (else none)."""
+    from scipy.ndimage import label, median_filter
+    filled, top, sm, g = _tops(occ)
     near = median_filter(filled.astype(np.uint8), size=3).astype(bool)
     jump = np.abs(top - sm) > 3                                      # a wall's edge, not a slope
     pitched = filled & near & ~jump & (g >= lo) & (g <= hi)
@@ -109,3 +115,26 @@ def roof_cells(occ: np.ndarray, depth: int = 4) -> np.ndarray:
     top = H - 1 - np.argmax(occ[::-1], axis=0)
     y = np.arange(H)[:, None, None]
     return cols[None] & (y <= top[None]) & (y > top[None] - depth)
+
+
+def flat_cells(occ: np.ndarray, depth: int = 2, max_rise: float = 4.3) -> np.ndarray:
+    """(H, X, Z) bool: the top `depth` plates of each column whose top is not under the pitched roof and not a
+    wall's edge (rise at most `max_rise` plates per stud, a pitched roof's upper bound): flat roofs, ledges, and the
+    ground or base around a building, level or sloping."""
+    filled, top, sm, g = _tops(occ)
+    cols = filled & (g <= max_rise) & (np.abs(top - sm) <= 1) & ~pitched_columns(occ)
+    t = top.astype(int)
+    y = np.arange(occ.shape[0])[:, None, None]
+    return cols[None] & (y <= t[None]) & (y > t[None] - depth)
+
+
+def flat_mix(kind: str | None = "building") -> np.ndarray | None:
+    """(len(CLASSES),) P(class) on real sets' flat tops (flat_cells; tools/learn/roof_mix.py), or None when not mined."""
+    f = DATA.with_name("roof_mix.json")
+    if not f.exists():
+        return None
+    d = json.loads(f.read_text())
+    if (kind is not None and d.get("kind") != kind) or "flat_counts" not in d:
+        return None
+    c = np.array(d["flat_counts"], float) + 1.0
+    return c / c.sum()

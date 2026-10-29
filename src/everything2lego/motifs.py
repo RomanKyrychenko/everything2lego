@@ -2,16 +2,17 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
 
-DATA = Path(__file__).parent / "data" / "motifs.json"
+DATA = Path(os.environ.get("E2L_MOTIFS", Path(__file__).parent / "data" / "motifs.json"))   # env: another pattern file (A/B runs)
 
 
 def tables(opts, kind: str | None = "building"):
     """(start (n + 1,) int32, rows (m, 4) int32 of option, dy, dx, dz, weight (n,) = sets that use it, type (n,)
-    0 anywhere / 1 on a pitched roof) for the patterns whose parts are all among these options (upright, as mined)."""
+    0 anywhere / 1 on a pitched roof / 2 on a flat top) for the patterns whose parts are all among these options (upright, as mined)."""
     none = np.zeros(1, np.int32), np.zeros((0, 4), np.int32), np.zeros(0), np.zeros(0, np.uint8)
     if not DATA.exists():
         return none

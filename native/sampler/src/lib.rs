@@ -372,7 +372,7 @@ struct Data {
     motif_start: Vec<usize>,
     motif_rows: Vec<(usize, i32, i32, i32)>,
     motif_cum: Vec<f64>, // cumulative weights, for drawing a pattern by how many sets use it
-    motif_by_type: [(Vec<usize>, Vec<f64>); 2], // per type (0 anywhere, 1 roof): patterns and cumulative weights
+    motif_by_type: [(Vec<usize>, Vec<f64>); 3], // per type (0 anywhere, 1 pitched roof, 2 flat top): patterns and cumulative weights
     w_stack: f64,
     p_stack: f64,
     opt_brick: Vec<bool>,
@@ -575,7 +575,7 @@ impl Data {
             motif_start: Vec::new(),
             motif_rows: Vec::new(),
             motif_cum: Vec::new(),
-            motif_by_type: [(Vec::new(), Vec::new()), (Vec::new(), Vec::new())],
+            motif_by_type: [(Vec::new(), Vec::new()), (Vec::new(), Vec::new()), (Vec::new(), Vec::new())],
             w_stack: if p.opt_brick.is_null() { 0.0 } else { p.w_stack },
             p_stack: p.p_stack.clamp(1e-4, 1.0 - 1e-4),
             opt_brick: if p.opt_brick.is_null() { Vec::new() } else { v(p.opt_brick, n_opt).iter().map(|&b| b != 0).collect() },
@@ -599,7 +599,7 @@ impl Data {
             let w = v(p.motif_w, n_motif);
             d.motif_cum = w.iter().map(|w| { acc += w; acc }).collect();
             let ty = if p.motif_type.is_null() { vec![0u8; n_motif] } else { v(p.motif_type, n_motif) };
-            for t in 0..2 {
+            for t in 0..3 {
                 let mut acc = 0.0;
                 let ms: Vec<usize> = (0..n_motif).filter(|&m| ty[m] as usize == t).collect();
                 d.motif_by_type[t].1 = ms.iter().map(|&m| { acc += w[m]; acc }).collect();
@@ -2525,9 +2525,10 @@ fn motif(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
     }
     let c = d.want_cells[rng.below(d.want_cells.len())] as i32;
     let (cy, cx, cz) = (c / (d.x * d.z), (c / d.z) % d.x, c % d.z);
-    // on the target's pitched roof, roof patterns (when there are any); elsewhere the rest
-    let on_roof = !d.cell_type.is_empty() && d.cell_type[c as usize] == 1 && !d.motif_by_type[1].0.is_empty();
-    let (ms, cum) = &d.motif_by_type[on_roof as usize];
+    // on the target's pitched roof or flat tops, that surface's patterns (when there are any); elsewhere the rest
+    let t = if d.cell_type.is_empty() { 0 } else { d.cell_type[c as usize].clamp(0, 2) as usize };
+    let t = if d.motif_by_type[t].0.is_empty() { 0 } else { t };
+    let (ms, cum) = &d.motif_by_type[t];
     if ms.is_empty() {
         return None;
     }

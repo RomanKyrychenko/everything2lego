@@ -321,6 +321,21 @@ def select_vocabulary(kind: Optional[str], n: int = 160) -> tuple[VPart, ...]:
     return tuple(plain + rest)
 
 
+
+def target_colours(colour: np.ndarray, show: np.ndarray, share: float) -> frozenset:
+    """LDraw codes of the colours that cover at least `share` of the target's coloured cells that show."""
+    c = colour[show & (colour >= 0)]
+    if not c.size:
+        return frozenset()
+    n = np.bincount(c, minlength=len(palette()))
+    return frozenset(palette()[i].code for i in np.flatnonzero(n >= share * c.size))
+
+
+def only_colours(vocab: tuple[VPart, ...], codes: frozenset) -> tuple[VPart, ...]:
+    """Each part in just the colours it is made in that the target has; parts made in none of them dropped."""
+    from dataclasses import replace
+    return tuple(replace(v, colours=v.colours & codes) for v in vocab if v.colours & codes)
+
 # ---------------------------------------------------------------------------
 # target and statistics
 # ---------------------------------------------------------------------------
@@ -527,6 +542,7 @@ class Weights:
     big: float = 0.0          # filler proposes bigger parts first: + big * ln(footprint, studs^2) on each candidate; native only
     big_end: float = -1.0     # big falls linearly to this over the run (big parts first, smaller later); < 0 = constant
     roof_mix: float = 0.0     # part mix on the target's pitched roof vs real pitched roofs (surface_mix.roof_mix)
+    flat_mix: bool = False    # with roof_mix: the other tops too, vs real sets' flat tops (surface_mix.flat_mix)
     surface_mix: float = 0.0  # part mix by surface type: + w * sum_t n_t * KL(mix in t || real sets'); native only
     motif: float = 0.0        # share of moves that place a building pattern of real sets (motifs.py); native only
     stack: float = 0.0        # n_bricks * KL(share of bricks right on a same-footprint brick || p_stack); native only
@@ -1579,7 +1595,7 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
            tile_boost: float = 0.0, snot_boost: float = 0.0,
            init_placements: Optional[list[Placement]] = None,
            opt_bias: Optional[np.ndarray] = None, snot: bool = False,
-           courses: bool = False) -> tuple[list[Placement], dict]:
+           courses: bool = False, colour_share: float = 0.0) -> tuple[list[Placement], dict]:
     """The temperature comes from the data: the median energy change of
     `warmup` proposals (measured, then undone) is the scale; it anneals
     from `t_start_share` to `t_final_share` of it.  Monotony is the KL
@@ -1587,6 +1603,9 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
 
     `net`: propose parts with the learned network (proposals.py) when there
     is one, else by the pair statistics.
+
+    `colour_share`: when > 0, parts come only in the colours covering at least that share of the target's visible
+    cells (a part made in none of them is left out).
 
     `engine`: "native" runs the walk in Rust (native/sampler, everything2lego.native),
     "python" here; "auto" the native one when it is built."""
@@ -1605,6 +1624,9 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
     if snot_boost == 0.0:
         snot_boost = getattr(weights, "snot_boost", 0.0)
     vocab = select_vocabulary(target.kind, n_special)
+    codes = target_colours(target.colour, target.want & target.visible, colour_share or 0.005)   # also reported in info
+    if colour_share > 0 and codes:                       # parts only in the colours the target has
+        vocab = only_colours(vocab, codes)
     if courses:                                          # slopes may also come on a plate: roof rows of any pitch between
         from .slope_courses import with_courses
         vocab = with_courses(vocab)
@@ -1633,7 +1655,7 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
                      "shapes": dict(shapes), "n_ref": n_ref,
                      "dens": _dens(info["pairs"], n_ref, stats.density_sd),
                      "cnt": _dens(info["parts"], p_ref, stats.part_density_sd),
-                     "references": [r["model"] for r in refs[:10]], "engine": "native"})
+                     "references": [r["model"] for r in refs[:10]], "engine": "native", "target_colours": sorted(codes)})
         return placements, info
     rnd = random.Random(seed)
     st = State(target, stats, weights)

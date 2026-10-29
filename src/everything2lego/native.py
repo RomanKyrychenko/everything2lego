@@ -337,13 +337,18 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
                            dir_start=_ptr(ds, C.c_int32), dir_rows=_ptr(dr, C.c_float))
     if getattr(weights, "roof_mix", 0.0) > 0:                                    # part mix on the target's pitched roof
         from . import surface_mix as sm
-        roof = sm.roof_mix(kind)
+        roof, flat = sm.roof_mix(kind), sm.flat_mix(kind)
         if roof is not None:
-            ct = arr(sm.roof_cells(target.want).reshape(-1).astype(np.int8), np.int8)
+            ct = sm.roof_cells(target.want).astype(np.int8)
+            rows = [np.log(sm.all_mix(kind)), np.log(roof)]
+            if flat is not None and getattr(weights, "flat_mix", False):           # flat tops: real sets' flat-top mix
+                ct[sm.flat_cells(target.want) & (ct == 0)] = 2
+                rows.append(np.log(flat))
+            ct = arr(ct.reshape(-1), np.int8)
             oc = arr([sm.part_class(v.category) for v, _ in opts], np.int32)
-            lm = np.log(sm.all_mix(kind))
-            lp = arr(np.stack([lm, np.log(roof)]).reshape(-1), np.float64)   # type 0 is not scored (lift 0)
-            size_fields.update(w_surf=weights.roof_mix, n_stype=2, n_pclass=len(sm.CLASSES),
+            lm = rows[0]
+            lp = arr(np.stack(rows).reshape(-1), np.float64)                    # type 0 is not scored (lift 0)
+            size_fields.update(w_surf=weights.roof_mix, n_stype=len(rows), n_pclass=len(sm.CLASSES),
                                cell_type=_ptr(ct, C.c_int8), opt_pclass=_ptr(oc, C.c_int32),
                                surf_lpref=_ptr(lp, C.c_double), surf_lmarg=_ptr(arr(lm, np.float64), C.c_double))
     elif getattr(weights, "surface_mix", 0.0) > 0:                               # part mix by surface type
