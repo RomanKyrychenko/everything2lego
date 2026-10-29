@@ -312,6 +312,7 @@ struct Data {
     nll: Vec<f64>,
     logp: Vec<f64>,
     snap: Vec<i32>,
+    part_colours: Vec<Vec<usize>>, // per part, the colours it is made in (snap[c] == c)
     opts: Vec<Opt>,
     boxes: std::collections::HashMap<(i32, i32, i32, i32), usize>,
     variants: std::collections::HashMap<i32, Vec<usize>>,
@@ -502,6 +503,10 @@ impl Data {
             nll: v(p.nll, n_tok * n_tok * 3),
             logp: v(p.logp, n_tok * n_tok * 3),
             snap: v(p.snap, p.n_part as usize * n_col),
+            part_colours: (0..p.n_part as usize).map(|q| {
+                let row = v(p.snap, p.n_part as usize * n_col);
+                (0..n_col).filter(|&c| row[q * n_col + c] == c as i32).collect()
+            }).collect(),
             opts,
             boxes,
             variants,
@@ -827,25 +832,27 @@ impl Data {
     }
 
     /// The target's commonest colour over its cells, as the part is made in it.
-    fn colour_for(&self, o: &Opt, oy: i32, ox: i32, oz: i32, counts: &mut Vec<u32>) -> i32 {
-        counts.iter_mut().for_each(|c| *c = 0);
-        let mut any = false;
-        for &(y, x, z, _, _) in &o.cells {
-            let c = self.tcolour[self.idx(oy + y, ox + x, oz + z)];
-            if c >= 0 {
-                counts[c as usize] += 1;
-                any = true;
-            }
-        }
-        let mut best = 0usize;
-        if any {
-            for c in 0..self.n_col {
-                if counts[c] > counts[best] {
-                    best = c;
+    /// The colour the part is made in that is nearest the target over its cells (Lab distance summed): a 2x4 slope
+    /// over dark orange and reddish brown cells is reddish brown, not the red nearest dark orange alone.
+    fn colour_for(&self, o: &Opt, oy: i32, ox: i32, oz: i32, _counts: &mut Vec<u32>) -> i32 {
+        let cols = &self.part_colours[o.part];
+        let mut best = (f64::INFINITY, -1i32);
+        for &k in cols {
+            let lab = &self.pal_lab[3 * k..3 * k + 3];
+            let mut s = 0f64;
+            for &(y, x, z, _, _) in &o.cells {
+                let i = self.idx(oy + y, ox + x, oz + z);
+                if self.tcolour[i] >= 0 {
+                    let t = &self.tlab[3 * i..3 * i + 3];
+                    let (a, b, c) = ((t[0] - lab[0]) as f64, (t[1] - lab[1]) as f64, (t[2] - lab[2]) as f64);
+                    s += (a * a + b * b + c * c).sqrt();
                 }
             }
+            if s < best.0 {
+                best = (s, k as i32);
+            }
         }
-        self.snap[o.part * self.n_col + best]
+        if best.1 >= 0 { best.1 } else { self.snap[o.part * self.n_col] }
     }
 }
 
@@ -1769,6 +1776,7 @@ impl Ord for OrdF64 {
 
 fn rank_cell(d: &Data, y: i32, x: i32, z: i32) -> Ranked {
     let mut v: Vec<(u32, f64, u32)> = Vec::new();
+    let mut counts = vec![0u32; d.n_col.max(1)];
     'opt: for (k, o) in d.opts.iter().enumerate() {
         let (oy, ox, oz) = (y - o.first.0, x - o.first.1, z - o.first.2);
         if oy < 0 || ox < 0 || oz < 0 || oy + o.h > d.h || ox + o.w > d.x || oz + o.d > d.z {
@@ -1786,7 +1794,10 @@ fn rank_cell(d: &Data, y: i32, x: i32, z: i32) -> Ranked {
             Some(net) => (net.opt_out[k] as u32, net.opt_lpart[k]),
             None => (0, o.logprior),
         };
-        let mut score = d.style * lp - d.w_cov * (wrong as f64 / NSAMP) - d.w_dir * d.dir_cost(k, oy, ox, oz);
+        // the colour it would get here is fixed by the target too: a part not made in the target's colour ranks lower
+        let colour = d.colour_for(o, oy, ox, oz, &mut counts);
+        let mut score = d.style * lp - d.w_cov * (wrong as f64 / NSAMP) - d.w_dir * d.dir_cost(k, oy, ox, oz)
+            - d.w_col * d.colour_cost(o, oy, ox, oz, colour);
         if d.w_surf != 0.0 {                            // what real sets build this kind of surface from
             let c = d.opt_pclass[k];
             score += d.style * (d.surf_lpref[d.surf_type(k, oy, ox, oz) * d.n_pclass + c] - d.surf_lmarg[c]);
@@ -2529,12 +2540,15 @@ fn motif(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
         let (_, ay, ax, az) = rows[rng.below(rows.len())];         // that part of the pattern goes at the cell
         let (oy, ox, oz) = (cy - ay, cx - ax, cz - az);
         let mut wrong = 0u32;
+        let mut col = 0f64;
         for &(k, dy, dx, dz) in rows {
             let o = &d.opts[k];
             let (y, x, z) = (oy + dy, ox + dx, oz + dz);
             if y < 0 || x < 0 || z < 0 || y + o.h > d.h || x + o.w > d.x || z + o.d > d.z {
                 continue 'draw;
             }
+            let colour = d.colour_for(o, y, x, z, &mut filler.colour_counts);
+            col += d.colour_cost(o, y, x, z, colour);
             for &(py, px, pz, bits, occ) in &o.cells {
                 let t = d.tbits[d.idx(y + py, x + px, z + pz)];
                 if occ >= 0.5 && t == 0 {
@@ -2543,7 +2557,7 @@ fn motif(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
                 wrong += (bits ^ t).count_ones();
             }
         }
-        let score = -(wrong as f64) / rows.len() as f64;
+        let score = -(d.w_cov * wrong as f64 / NSAMP + d.w_col * col);
         if best.map_or(true, |b| score > b.0) {
             best = Some((score, m, oy, ox, oz));
         }
