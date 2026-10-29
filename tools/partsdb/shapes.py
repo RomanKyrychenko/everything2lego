@@ -47,8 +47,9 @@ CATEGORIES = ("Bricks", "Plates", "Tiles", "Bricks Sloped", "Bricks Curved", "Br
               "Tiles Round and Curved", "Plates Round Curved and Dishes", "Bricks Wedged", "Plates Wedged",
               "Bricks Special", "Plates Special", "Tiles Special",
               "Hinges, Arms and Turntables", "Technic Bricks", "Technic Beams",
-              "Windows and Doors", "Panels", "Bars, Ladders and Fences", "Baseplates")
-MIN_SETS = 10                 # sets ever (older moulds the official models still use count too)
+              "Windows and Doors", "Panels", "Bars, Ladders and Fences", "Baseplates",
+              "Plants & Trees", "Containers", "Supports, Girders and Cranes", "Flags, Banners and Signs")
+MIN_SETS = 5                  # sets ever (older moulds the official models still use count too)
 TOL = 1.0                     # LDU a body may miss the grid by
 
 

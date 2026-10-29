@@ -40,7 +40,7 @@ from build import DB, NON_SYSTEM  # noqa: E402
 from features import token  # noqa: E402
 
 OUT = REPO / "src/everything2lego/data/vocabulary.json"
-MIN_SETS = 10              # sets ever, as shapes.py
+MIN_SETS = 5               # sets ever, as shapes.py
 MIN_COLOUR_SETS = 2
 MIN_KIND_SETS = 3
 
