@@ -206,6 +206,15 @@ pub struct Problem {
     pub motif_start: *const i32, // n_motif + 1
     pub motif_rows: *const i32,  // 4 per row
     pub motif_w: *const f64,     // n_motif
+    // part mix by surface type (surface_mix.py): energy += w_surf * sum over types of n_t * KL(build's class mix
+    // in type t || real sets'); a part's type is the commonest surface type among its cells; 0 = off
+    pub w_surf: f64,
+    pub n_stype: i32,
+    pub n_pclass: i32,
+    pub cell_type: *const i8,    // h*x*z
+    pub opt_pclass: *const i32,  // n_opt
+    pub surf_lpref: *const f64,  // n_stype * n_pclass: ln P(class | type), real sets
+    pub surf_lmarg: *const f64,  // n_pclass: ln P(class), real sets (the filler adds the lift of the type)
 }
 
 const INFO_LEN: usize = 20;
@@ -352,6 +361,12 @@ struct Data {
     opt_sideways: Vec<bool>,                              // n_opt (empty when off)
     w_big: f64,
     p_motif: f64,
+    w_surf: f64,
+    n_pclass: usize,
+    cell_type: Vec<i8>,
+    opt_pclass: Vec<usize>,
+    surf_lpref: Vec<f64>,
+    surf_lmarg: Vec<f64>,
     motif_start: Vec<usize>,
     motif_rows: Vec<(usize, i32, i32, i32)>,
     motif_cum: Vec<f64>, // cumulative weights, for drawing a pattern by how many sets use it
@@ -544,6 +559,12 @@ impl Data {
             opt_sideways: if p.opt_sideways.is_null() { Vec::new() } else { v(p.opt_sideways, n_opt).iter().map(|&b| b != 0).collect() },
             w_big: p.w_big,
             p_motif: 0.0,
+            w_surf: if p.cell_type.is_null() { 0.0 } else { p.w_surf },
+            n_pclass: p.n_pclass.max(0) as usize,
+            cell_type: if p.cell_type.is_null() { Vec::new() } else { v(p.cell_type, n) },
+            opt_pclass: if p.cell_type.is_null() { Vec::new() } else { v(p.opt_pclass, n_opt).iter().map(|&c| c as usize).collect() },
+            surf_lpref: if p.cell_type.is_null() { Vec::new() } else { v(p.surf_lpref, (p.n_stype * p.n_pclass) as usize) },
+            surf_lmarg: if p.cell_type.is_null() { Vec::new() } else { v(p.surf_lmarg, p.n_pclass as usize) },
             motif_start: Vec::new(),
             motif_rows: Vec::new(),
             motif_cum: Vec::new(),
@@ -668,6 +689,15 @@ impl Data {
 
     /// Change in wrong samples (/64) from filling these empty cells so.
     /// Surface direction cost of option k placed at (oy, ox, oz): its outward faces in surface cells, area * (1 - cos).
+    /// Surface type of option k at (oy, ox, oz): the commonest of 1..4 among its cells, else 0 (interior).
+    fn surf_type(&self, k: usize, oy: i32, ox: i32, oz: i32) -> usize {
+        let mut c = [0u32; 8];
+        for &(y, x, z, _, _) in &self.opts[k].cells {
+            c[self.cell_type[self.idx(oy + y, ox + x, oz + z)] as usize & 7] += 1;
+        }
+        (1..5).max_by_key(|&t| (c[t], std::cmp::Reverse(t))).filter(|&t| c[t] > 0).unwrap_or(0)
+    }
+
     fn dir_cost(&self, k: usize, oy: i32, ox: i32, oz: i32) -> f64 {
         if self.w_dir == 0.0 { return 0.0; }
         let mut s = 0f64;
@@ -1023,6 +1053,7 @@ struct State<'a> {
     fid: f64,
     bare: i64,
     size_n: Vec<f64>, // live parts per size class
+    surf_n: Vec<f64>, // live parts per (surface type, class)
     n_side: f64,      // live sideways parts
     n_brick: f64,     // live plain bricks
     n_stack: f64,     // brick-on-same-footprint-brick pairs
@@ -1078,6 +1109,7 @@ impl<'a> State<'a> {
             fid: d.fid0,
             bare: 0,
             size_n: vec![0.0; d.size_lpref.len()],
+            surf_n: vec![0.0; d.surf_lpref.len()],
             n_side: 0.0,
             n_brick: 0.0,
             n_stack: 0.0,
@@ -1496,6 +1528,7 @@ impl<'a> State<'a> {
         let d = self.d;
         self.content() + self.style_loss() + d.w_sup * self.n_unsup as f64 + d.w_side * self.bare as f64
             + d.w_size * self.size_kl()
+            + d.w_surf * self.surf_kl()
             + d.w_sideways * self.sideways_kl()
             + d.w_stack * self.stack_kl()
             + d.w_bare_top * self.n_bare_top
@@ -1534,6 +1567,17 @@ impl<'a> State<'a> {
     }
 
     /// n_parts * KL(size-class mix of the build || of real sets) = sum_c n_c ln(n_c / (n p_c))
+    /// sum over surface types of n_t * KL(class mix in t || real sets' in t)
+    fn surf_kl(&self) -> f64 {
+        let c = self.d.n_pclass;
+        if c == 0 { return 0.0; }
+        self.surf_n.chunks(c).zip(self.d.surf_lpref.chunks(c)).map(|(row, lp)| {
+            let n: f64 = row.iter().sum();
+            if n <= 0.0 { return 0.0; }
+            row.iter().zip(lp).filter(|(&k, _)| k > 0.0).map(|(&k, &l)| k * ((k / n).ln() - l)).sum::<f64>()
+        }).sum()
+    }
+
     fn size_kl(&self) -> f64 {
         let n: f64 = self.size_n.iter().sum();
         if n <= 0.0 { return 0.0; }
@@ -1576,6 +1620,7 @@ impl<'a> State<'a> {
         self.fid += d.fid_delta(o, it.y, it.x, it.z);
         self.dirp += d.dir_cost(it.opt, it.y, it.x, it.z);
         if d.w_size != 0.0 { self.size_n[d.opt_class[it.opt]] += 1.0; }
+        if d.w_surf != 0.0 { self.surf_n[d.surf_type(it.opt, it.y, it.x, it.z) * d.n_pclass + d.opt_pclass[it.opt]] += 1.0; }
         if d.w_sideways != 0.0 && d.opt_sideways[it.opt] { self.n_side += 1.0; }
         for &(y, x, z, bits, _) in &o.cells {
             let c = d.idx(it.y + y, it.x + x, it.z + z);
@@ -1662,6 +1707,7 @@ impl<'a> State<'a> {
         self.fid -= d.fid_delta(o, it.y, it.x, it.z);
         self.dirp -= d.dir_cost(it.opt, it.y, it.x, it.z);
         if d.w_size != 0.0 { self.size_n[d.opt_class[it.opt]] -= 1.0; }
+        if d.w_surf != 0.0 { self.surf_n[d.surf_type(it.opt, it.y, it.x, it.z) * d.n_pclass + d.opt_pclass[it.opt]] -= 1.0; }
         if d.w_sideways != 0.0 && d.opt_sideways[it.opt] { self.n_side -= 1.0; }
         self.col -= d.colour_cost(o, it.y, it.x, it.z, it.colour);
         self.items[i] = None;
@@ -1729,7 +1775,12 @@ fn rank_cell(d: &Data, y: i32, x: i32, z: i32) -> Ranked {
             Some(net) => (net.opt_out[k] as u32, net.opt_lpart[k]),
             None => (0, o.logprior),
         };
-        v.push((class, d.style * lp - d.w_cov * (wrong as f64 / NSAMP) - d.w_dir * d.dir_cost(k, oy, ox, oz), k as u32));
+        let mut score = d.style * lp - d.w_cov * (wrong as f64 / NSAMP) - d.w_dir * d.dir_cost(k, oy, ox, oz);
+        if d.w_surf != 0.0 {                            // what real sets build this kind of surface from
+            let c = d.opt_pclass[k];
+            score += d.style * (d.surf_lpref[d.surf_type(k, oy, ox, oz) * d.n_pclass + c] - d.surf_lmarg[c]);
+        }
+        v.push((class, score, k as u32));
     }
     v.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.partial_cmp(&a.1).unwrap()));
     let mut groups = Vec::new();
@@ -2612,7 +2663,7 @@ unsafe fn run(p: &Problem) -> i32 {
         let d = st.d;
         [d.w_cov * st.fid, d.w_sil * st.sil as f64 / (SUB * SUB) as f64, d.w_col * st.col, st.style_loss(),
          d.w_sup * st.n_unsup as f64 + d.w_side * st.bare as f64 + d.w_bare_top * st.n_bare_top,
-         d.w_size * st.size_kl() + d.w_sideways * st.sideways_kl() + d.w_stack * st.stack_kl()]
+         d.w_size * st.size_kl() + d.w_sideways * st.sideways_kl() + d.w_stack * st.stack_kl() + d.w_surf * st.surf_kl()]
     };
     let iters = p.iters.max(0);
     let (mut n_prop, mut n_acc) = ([0i64; MOVES.len()], [0i64; MOVES.len()]);

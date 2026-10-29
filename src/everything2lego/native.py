@@ -16,6 +16,7 @@ It is looked for at $E2L_NATIVE_LIB, then under native/sampler/target.
 from __future__ import annotations
 
 import ctypes as C
+import json
 import math
 import os
 import platform
@@ -105,6 +106,9 @@ class Problem(C.Structure):
         # building patterns (tools/learn/motifs.py): parts placed together, as real sets do; p_motif = share of moves
         ("p_motif", C.c_double), ("n_motif", C.c_int32), ("motif_start", _P(C.c_int32)),
         ("motif_rows", _P(C.c_int32)), ("motif_w", _P(C.c_double)),
+        # part mix by surface type (surface_mix.py)
+        ("w_surf", C.c_double), ("n_stype", C.c_int32), ("n_pclass", C.c_int32), ("cell_type", _P(C.c_int8)),
+        ("opt_pclass", _P(C.c_int32)), ("surf_lpref", _P(C.c_double)), ("surf_lmarg", _P(C.c_double)),
     ]
 
 
@@ -330,6 +334,18 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         ds, dr, tn = arr(ds, np.int32), arr(dr, np.float32), arr(tn, np.float32)
         size_fields.update(w_dir=weights.direction, dir_thr=getattr(weights, "dir_thr", 0.5), t_normal=_ptr(tn, C.c_float),
                            dir_start=_ptr(ds, C.c_int32), dir_rows=_ptr(dr, C.c_float))
+    if getattr(weights, "surface_mix", 0.0) > 0:                                 # part mix by surface type
+        from . import surface_mix as sm
+        from .surface_dir import target_normals
+        mix = sm.real_mix(kind)
+        if mix is not None:
+            ct = arr(sm.cell_types(target_normals(target.bits, target.want), target.want.shape).reshape(-1), np.int8)
+            oc = arr([sm.part_class(v.category) for v, _ in opts], np.int32)
+            raw = np.array(json.loads(sm.DATA.read_text())["counts"], float) + 1.0
+            lp = arr(np.log(mix).reshape(-1), np.float64); lm = arr(np.log(raw.sum(0) / raw.sum()), np.float64)
+            size_fields.update(w_surf=weights.surface_mix, n_stype=len(sm.TYPES), n_pclass=len(sm.CLASSES),
+                               cell_type=_ptr(ct, C.c_int8), opt_pclass=_ptr(oc, C.c_int32),
+                               surf_lpref=_ptr(lp, C.c_double), surf_lmarg=_ptr(lm, C.c_double))
     if getattr(weights, "motif", 0.0) > 0:                                       # building patterns of real sets
         from .motifs import tables as motif_tables
         ms, mr, mw = motif_tables(opts, kind)

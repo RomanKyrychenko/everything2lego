@@ -171,6 +171,7 @@ def main() -> None:
     ap.add_argument("--snot", action="store_true", help="small plates and tiles may also be placed on their side, held by side studs (snot_options; prior = real-set sideways share)")
     ap.add_argument("--sideways-weight", type=float, default=0.0, help="with --snot: weight of n_parts * KL(sideways share || --sideways-share)")
     ap.add_argument("--sideways-share", type=float, default=0.10, help="target share of sideways parts (real buildings ~0.15 not studs-up)")
+    ap.add_argument("--surface-mix", type=float, default=0.0, help="weight of the part mix by surface type (roof / top / wall / under; surface_mix.py) against real sets; 0 = off")
     ap.add_argument("--pattern-share", type=float, default=0.0, help="share of moves that place a building pattern mined from real sets (tools/learn/motifs.py); 0 = off")
     ap.add_argument("--prefer-big", type=str, default="0", help="the filler tries bigger parts first: + W * ln(footprint, studs^2) on each candidate -- longer / wider, not taller (the energy still decides); W0:W1 falls linearly from W0 to W1 over the run")
     ap.add_argument("--direction-weight", type=float, default=0.0, help="surface direction: energy per stud-top of outward face area * (1 - cos) vs the mesh's direction (slopes on slanted roofs, tiles on flat tops)")
@@ -245,7 +246,7 @@ def main() -> None:
     def _once(seed: int):
         _t = time.time()
         w = Weights.learned(target.kind) if a.learned_weights else Weights()
-        w.style = a.style; w.size = a.size_weight; w.sideways = a.sideways_weight; w.p_sideways = a.sideways_share; w.surface = a.surface_fit; w.big, w.big_end = (float(a.prefer_big.split(':')[0]), float(a.prefer_big.split(':')[1]) if ':' in a.prefer_big else -1.0); w.motif = a.pattern_share; w.stack = a.stack_weight; w.bare_top = a.bare_top_weight; w.direction = a.direction_weight
+        w.style = a.style; w.size = a.size_weight; w.sideways = a.sideways_weight; w.p_sideways = a.sideways_share; w.surface = a.surface_fit; w.big, w.big_end = (float(a.prefer_big.split(':')[0]), float(a.prefer_big.split(':')[1]) if ':' in a.prefer_big else -1.0); w.motif = a.pattern_share; w.surface_mix = a.surface_mix; w.stack = a.stack_weight; w.bare_top = a.bare_top_weight; w.direction = a.direction_weight
         if a.sup_weight > 0: w.sup = a.sup_weight
         _ps, _info = sample(target, models, iters=iters, seed=seed, weights=w,
                              tile_boost=a.tile_boost, snot_boost=a.snot_boost, opt_bias=opt_bias,

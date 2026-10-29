@@ -1,0 +1,1 @@
+{"source": "tools/learn/surface_mix.py", "kind": "building", "sets": 112, "types": ["interior", "roof", "top", "wall", "under"], "classes": ["slope", "tile", "plate", "brick", "round", "other"], "counts": [[105, 212, 613, 528, 65, 51], [3944, 3894, 7212, 4152, 416, 1169], [928, 5549, 2841, 777, 158, 346], [3801, 622, 8052, 14331, 1067, 2227], [1063, 865, 6479, 2053, 90, 393]]}
