@@ -2280,18 +2280,162 @@ fn snot_face(st: &mut State, rng: &mut Rng) -> Option<Undo> {
     Some(Undo::Retile { added, removed })
 }
 
-fn propose(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
+/// Options with the same box (h, w, d) as each option and fewer top studs: what re-top may turn it into.
+fn retop_groups(d: &Data) -> Vec<Vec<usize>> {
+    let mut by_box: std::collections::HashMap<(i32, i32, i32), Vec<usize>> = std::collections::HashMap::new();
+    for (k, o) in d.opts.iter().enumerate() {
+        if d.opt_sideways.get(k).copied().unwrap_or(false) { continue; }
+        by_box.entry((o.h, o.w, o.d)).or_default().push(k);
+    }
+    d.opts.iter().map(|o| by_box[&(o.h, o.w, o.d)].iter().copied().filter(|&k| d.opts[k].top.len() < o.top.len()).collect()).collect()
+}
+
+/// Whether option k's cells at (y, x, z) are all free (boxes of the same size can still differ in their cells).
+fn cells_free(st: &State, k: usize, y: i32, x: i32, z: i32) -> bool {
+    let d = st.d;
+    d.opts[k].cells.iter().all(|&(cy, cx, cz, _, _)| st.owner[d.idx(y + cy, x + cx, z + cz)] < 0)
+}
+
+/// Whether some top stud of item i has nothing on it.
+fn top_exposed(st: &State, i: usize) -> bool {
+    let d = st.d;
+    let a = st.item(i);
+    let o = &d.opts[a.opt];
+    o.top.iter().any(|&(dx, dz)| a.y + o.h >= d.h || st.owner[d.idx(a.y + o.h, a.x + dx, a.z + dz)] < 0)
+}
+
+/// Re-top: a part with a bare top stud becomes a part of the same box with fewer studs on top (plate -> tile,
+/// brick -> slope, ...): caps studs nothing will sit on.
+fn retop(st: &mut State, groups: &[Vec<usize>], rng: &mut Rng) -> Option<Undo> {
+    if st.live.is_empty() {
+        return None;
+    }
+    let d = st.d;
+    for _ in 0..8 {
+        let i = st.live[rng.below(st.live.len())];
+        let a = *st.item(i);
+        let g = &groups[a.opt];
+        if g.is_empty() || !top_exposed(st, i) {
+            continue;
+        }
+        let k = g[rng.below(g.len())];
+        let colour = d.snap[d.opts[k].part * d.n_col + a.colour as usize];
+        let ra = st.remove(i);
+        if !cells_free(st, k, a.y, a.x, a.z) {
+            st.add(ra);                                   // it would overlap a neighbour in a corner a left empty
+            return None;
+        }
+        let added = vec![st.add(Item { opt: k, colour, y: a.y, x: a.x, z: a.z })];
+        return Some(Undo::Retile { added, removed: vec![ra] });
+    }
+    None
+}
+
+/// Split: the reverse of merge -- a plain part cut in two along x or z (same kind, height, colour).
+fn split(st: &mut State, rng: &mut Rng) -> Option<Undo> {
+    if st.live.is_empty() {
+        return None;
+    }
+    let d = st.d;
+    let i = st.live[rng.below(st.live.len())];
+    let a = *st.item(i);
+    let o = &d.opts[a.opt];
+    if o.boxk < 0 || (o.w < 2 && o.d < 2) {
+        return None;
+    }
+    let along_x = if o.w < 2 { false } else if o.d < 2 { true } else { rng.f64() < 0.5 };
+    let n = if along_x { o.w } else { o.d };
+    let c = 1 + rng.below((n - 1) as usize) as i32;
+    let (b1, b2, o2) = if along_x {
+        ((o.boxk, o.h, c, o.d), (o.boxk, o.h, o.w - c, o.d), (c, 0))
+    } else {
+        ((o.boxk, o.h, o.w, c), (o.boxk, o.h, o.w, o.d - c), (0, c))
+    };
+    let (&k1, &k2) = (d.boxes.get(&b1)?, d.boxes.get(&b2)?);
+    for &k in &[k1, k2] {
+        if d.snap[d.opts[k].part * d.n_col + a.colour as usize] != a.colour {
+            return None;
+        }
+    }
+    let ra = st.remove(i);
+    if !cells_free(st, k1, a.y, a.x, a.z) || !cells_free(st, k2, a.y, a.x + o2.0, a.z + o2.1) {
+        st.add(ra);
+        return None;
+    }
+    let added = vec![st.add(Item { opt: k1, colour: a.colour, y: a.y, x: a.x, z: a.z }),
+                     st.add(Item { opt: k2, colour: a.colour, y: a.y, x: a.x + o2.0, z: a.z + o2.1 })];
+    Some(Undo::Retile { added, removed: vec![ra] })
+}
+
+/// Stack: a plain brick becomes three plates of its footprint, or three such plates stacked in one colour become
+/// the brick.
+fn stack(st: &mut State, rng: &mut Rng) -> Option<Undo> {
+    const BRICK: i32 = 0;
+    const PLATE: i32 = 1;
+    if st.live.is_empty() {
+        return None;
+    }
+    let d = st.d;
+    let i = st.live[rng.below(st.live.len())];
+    let a = *st.item(i);
+    let o = &d.opts[a.opt];
+    if o.boxk == BRICK && o.h == 3 {
+        let &kp = d.boxes.get(&(PLATE, 1, o.w, o.d))?;
+        if d.snap[d.opts[kp].part * d.n_col + a.colour as usize] != a.colour {
+            return None;
+        }
+        let ra = st.remove(i);
+        if !(0..3).all(|dy| cells_free(st, kp, a.y + dy, a.x, a.z)) {
+            st.add(ra);
+            return None;
+        }
+        let added = (0..3).map(|dy| st.add(Item { opt: kp, colour: a.colour, y: a.y + dy, x: a.x, z: a.z })).collect();
+        return Some(Undo::Retile { added, removed: vec![ra] });
+    }
+    if o.boxk == PLATE && o.h == 1 && a.y + 3 <= d.h {
+        let &kb = d.boxes.get(&(BRICK, 3, o.w, o.d))?;
+        if d.snap[d.opts[kb].part * d.n_col + a.colour as usize] != a.colour {
+            return None;
+        }
+        let mut idx = vec![i];
+        for dy in 1..3 {
+            let j = st.owner[d.idx(a.y + dy, a.x + o.first.1, a.z + o.first.2)];
+            if j < 0 { return None; }
+            let b = *st.item(j as usize);
+            if b.opt != a.opt || b.colour != a.colour || b.x != a.x || b.z != a.z || b.y != a.y + dy {
+                return None;
+            }
+            idx.push(j as usize);
+        }
+        let removed: Vec<Item> = idx.into_iter().map(|j| st.remove(j)).collect();
+        if !cells_free(st, kb, a.y, a.x, a.z) {
+            for r in removed { st.add(r); }
+            return None;
+        }
+        let added = vec![st.add(Item { opt: kb, colour: a.colour, y: a.y, x: a.x, z: a.z })];
+        return Some(Undo::Retile { added, removed });
+    }
+    None
+}
+
+const MOVES: [&str; 9] = ["sideways", "masonry", "hinge", "swap", "re-top", "split", "stack", "merge", "retile"];
+
+fn propose(st: &mut State, filler: &mut Filler, groups: &[Vec<usize>], rng: &mut Rng) -> Option<(usize, Undo)> {
     if !st.d.snot_by_opt.is_empty() && rng.f64() < 0.05 {        // only drawn when sideways building is on
         if let Some(u) = snot_face(st, rng) {
-            return Some(u);
+            return Some((0, u));
         }
     }
     let r = rng.f64();
-    if r < 0.02 { masonry_shift(st, rng) }
-    else if r < 0.05 { hinge_swap(st, rng) }
-    else if r < 0.12 { swap(st, rng) }
-    else if r < 0.57 { merge(st, rng) }
-    else { retile(st, filler, rng) }
+    let (m, u) = if r < 0.02 { (1, masonry_shift(st, rng)) }
+    else if r < 0.05 { (2, hinge_swap(st, rng)) }
+    else if r < 0.12 { (3, swap(st, rng)) }
+    else if r < 0.17 { (4, retop(st, groups, rng)) }
+    else if r < 0.21 { (5, split(st, rng)) }
+    else if r < 0.24 { (6, stack(st, rng)) }
+    else if r < 0.60 { (7, merge(st, rng)) }
+    else { (8, retile(st, filler, rng)) };
+    u.map(|u| (m, u))
 }
 
 // ---------------------------------------------------------------------------
@@ -2344,9 +2488,10 @@ unsafe fn run(p: &Problem) -> i32 {
     let mut e = st.energy();
     let mut history = vec![e];
     let mut deltas = Vec::new();
+    let groups = retop_groups(&d);
     for _ in 0..p.warmup {
         // measure the scale, change nothing
-        if let Some(u) = propose(&mut st, &mut filler, &mut rng) {
+        if let Some((_, u)) = propose(&mut st, &mut filler, &groups, &mut rng) {
             deltas.push((st.energy() - e).abs());
             undo(&mut st, u);
         }
@@ -2374,16 +2519,18 @@ unsafe fn run(p: &Problem) -> i32 {
          d.w_size * st.size_kl() + d.w_sideways * st.sideways_kl() + d.w_stack * st.stack_kl()]
     };
     let iters = p.iters.max(0);
+    let (mut n_prop, mut n_acc) = ([0i64; MOVES.len()], [0i64; MOVES.len()]);
     for it in 0..iters {
         let t = t_start * (t_final / t_start).powf(it as f64 / (iters - 1).max(1) as f64);
         if p.w_big_end >= 0.0 {
             filler.w_big = d.w_big + (p.w_big_end - d.w_big) * it as f64 / (iters - 1).max(1) as f64;
         }
         let before = if d.opt_watch.is_empty() { [0f64; 6] } else { terms(&st) };
-        let u = match propose(&mut st, &mut filler, &mut rng) {
+        let (m, u) = match propose(&mut st, &mut filler, &groups, &mut rng) {
             Some(u) => u,
             None => continue,
         };
+        n_prop[m] += 1;
         let watched = !d.opt_watch.is_empty() && match &u {
             Undo::Retile { added, .. } => added.iter().any(|&i| st.items[i].map_or(false, |it| d.opt_watch[it.opt])),
             _ => false,
@@ -2397,6 +2544,7 @@ unsafe fn run(p: &Problem) -> i32 {
         if e2 <= e || rng.f64() < (-(e2 - e) / t).exp() {
             e = e2;
             accepted += 1;
+            n_acc[m] += 1;
             if watched { w_acc += 1; }
         } else {
             undo(&mut st, u);
@@ -2405,6 +2553,9 @@ unsafe fn run(p: &Problem) -> i32 {
             history.push(e);
         }
     }
+    eprintln!("moves (proposed / accepted):{}", (0..MOVES.len()).filter(|&m| n_prop[m] > 0)
+        .map(|m| format!("  {} {} / {} ({:.1} %)", MOVES[m], n_prop[m], n_acc[m], 100.0 * n_acc[m] as f64 / n_prop[m] as f64))
+        .collect::<String>());
     if !d.opt_watch.is_empty() {
         let live_w = st.live.iter().filter(|&&i| d.opt_watch[st.item(i).opt]).count();
         eprintln!("watched options: proposed in {} moves, accepted {} ({:.1} %), mean energy change {:.2}; in the final build {}",
