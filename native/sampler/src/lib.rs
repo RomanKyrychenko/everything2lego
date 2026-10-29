@@ -1607,8 +1607,8 @@ impl<'a> State<'a> {
         i
     }
 
-    /// Top studs of item j with nothing above them and nothing ever to come: the cell above is empty and not
-    /// part of the target (or off the grid).
+    /// Top studs of item j with nothing above them and nothing bound to come: the cell above is empty and outside
+    /// the target, or less than half in it (the filler may leave such a cell empty), or off the grid.
     fn count_bare_top(&self, j: usize) -> f64 {
         let d = self.d;
         let it = self.item(j);
@@ -1619,7 +1619,7 @@ impl<'a> State<'a> {
             if y >= d.h { return true; }
             if !d.inside(y, x, z) { return true; }
             let c = d.idx(y, x, z);
-            self.owner[c] < 0 && !d.want[c]
+            self.owner[c] < 0 && (!d.want[c] || d.fill[c] < 0.5)   // a barely-wanted cell (a roof's slant) may stay empty
         }).count() as f64
     }
 

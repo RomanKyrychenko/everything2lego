@@ -337,8 +337,9 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
             ms, mr, mw = arr(ms, np.int32), arr(mr, np.int32), arr(mw, np.float64)
             size_fields.update(p_motif=weights.motif, n_motif=len(mw), motif_start=_ptr(ms, C.c_int32),
                                motif_rows=_ptr(mr, C.c_int32), motif_w=_ptr(mw, C.c_double))
-    if any(getattr(o, "stack", None) is not None for _, o in opts):              # report how slope courses fare (stderr)
-        ow = arr([o.stack is not None for _, o in opts], np.uint8)
+    watch = os.environ.get("E2L_WATCH")                                          # diagnostics: a part category to report on
+    if watch or any(getattr(o, "stack", None) is not None for _, o in opts):     # report how slope courses fare (stderr)
+        ow = arr([(v.category == watch) if watch else o.stack is not None for v, o in opts], np.uint8)
         size_fields.update(opt_watch=_ptr(ow, C.c_uint8))
     if getattr(weights, "stack", 0.0) > 0:                                       # lined-up joints: brick on same-footprint brick
         ob = arr([v.box == "brick" and o.snot is None for v, o in opts], np.uint8)
