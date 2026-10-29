@@ -215,6 +215,7 @@ pub struct Problem {
     pub opt_pclass: *const i32,  // n_opt
     pub surf_lpref: *const f64,  // n_stype * n_pclass: ln P(class | type), real sets
     pub surf_lmarg: *const f64,  // n_pclass: ln P(class), real sets (the filler adds the lift of the type)
+    pub motif_type: *const u8,   // n_motif: 0 anywhere, 1 on a roof (cell_type 1); null = all 0
 }
 
 const INFO_LEN: usize = 20;
@@ -370,6 +371,7 @@ struct Data {
     motif_start: Vec<usize>,
     motif_rows: Vec<(usize, i32, i32, i32)>,
     motif_cum: Vec<f64>, // cumulative weights, for drawing a pattern by how many sets use it
+    motif_by_type: [(Vec<usize>, Vec<f64>); 2], // per type (0 anywhere, 1 roof): patterns and cumulative weights
     w_stack: f64,
     p_stack: f64,
     opt_brick: Vec<bool>,
@@ -568,6 +570,7 @@ impl Data {
             motif_start: Vec::new(),
             motif_rows: Vec::new(),
             motif_cum: Vec::new(),
+            motif_by_type: [(Vec::new(), Vec::new()), (Vec::new(), Vec::new())],
             w_stack: if p.opt_brick.is_null() { 0.0 } else { p.w_stack },
             p_stack: p.p_stack.clamp(1e-4, 1.0 - 1e-4),
             opt_brick: if p.opt_brick.is_null() { Vec::new() } else { v(p.opt_brick, n_opt).iter().map(|&b| b != 0).collect() },
@@ -588,7 +591,15 @@ impl Data {
             let raw = v(p.motif_rows, d.motif_start[n_motif] * 4);
             d.motif_rows = raw.chunks(4).map(|r| (r[0] as usize, r[1], r[2], r[3])).collect();
             let mut acc = 0.0;
-            d.motif_cum = v(p.motif_w, n_motif).iter().map(|w| { acc += w; acc }).collect();
+            let w = v(p.motif_w, n_motif);
+            d.motif_cum = w.iter().map(|w| { acc += w; acc }).collect();
+            let ty = if p.motif_type.is_null() { vec![0u8; n_motif] } else { v(p.motif_type, n_motif) };
+            for t in 0..2 {
+                let mut acc = 0.0;
+                let ms: Vec<usize> = (0..n_motif).filter(|&m| ty[m] as usize == t).collect();
+                d.motif_by_type[t].1 = ms.iter().map(|&m| { acc += w[m]; acc }).collect();
+                d.motif_by_type[t].0 = ms;
+            }
             d.p_motif = p.p_motif;
         }
         if d.w_dir != 0.0 {
@@ -1571,7 +1582,7 @@ impl<'a> State<'a> {
     fn surf_kl(&self) -> f64 {
         let c = self.d.n_pclass;
         if c == 0 { return 0.0; }
-        self.surf_n.chunks(c).zip(self.d.surf_lpref.chunks(c)).map(|(row, lp)| {
+        self.surf_n.chunks(c).zip(self.d.surf_lpref.chunks(c)).skip(1).map(|(row, lp)| {   // type 0: not scored
             let n: f64 = row.iter().sum();
             if n <= 0.0 { return 0.0; }
             row.iter().zip(lp).filter(|(&k, _)| k > 0.0).map(|(&k, &l)| k * ((k / n).ln() - l)).sum::<f64>()
@@ -2503,11 +2514,17 @@ fn motif(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
     }
     let c = d.want_cells[rng.below(d.want_cells.len())] as i32;
     let (cy, cx, cz) = (c / (d.x * d.z), (c / d.z) % d.x, c % d.z);
-    let total = *d.motif_cum.last().unwrap();
+    // on the target's pitched roof, roof patterns (when there are any); elsewhere the rest
+    let on_roof = !d.cell_type.is_empty() && d.cell_type[c as usize] == 1 && !d.motif_by_type[1].0.is_empty();
+    let (ms, cum) = &d.motif_by_type[on_roof as usize];
+    if ms.is_empty() {
+        return None;
+    }
+    let total = *cum.last().unwrap();
     let mut best: Option<(f64, usize, i32, i32, i32)> = None;
     'draw: for _ in 0..16 {
         let r = rng.f64() * total;
-        let m = d.motif_cum.partition_point(|&w| w <= r).min(d.motif_cum.len() - 1);
+        let m = ms[cum.partition_point(|&w| w <= r).min(cum.len() - 1)];
         let rows = &d.motif_rows[d.motif_start[m]..d.motif_start[m + 1]];
         let (_, ay, ax, az) = rows[rng.below(rows.len())];         // that part of the pattern goes at the cell
         let (oy, ox, oz) = (cy - ay, cx - ax, cz - az);

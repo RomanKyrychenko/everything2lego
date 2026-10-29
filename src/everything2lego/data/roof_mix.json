@@ -1,0 +1,1 @@
+{"source": "tools/learn/roof_mix.py", "kind": "building", "sets": 80, "classes": ["slope", "tile", "plate", "brick", "round", "other"], "counts": [1339, 594, 984, 353, 21, 124]}

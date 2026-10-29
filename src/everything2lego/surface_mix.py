@@ -61,3 +61,51 @@ def real_mix(kind: str | None = "building") -> np.ndarray | None:
         return None
     c = np.array(d["counts"], float) + 1.0
     return c / c.sum(1, keepdims=True)
+
+
+def all_mix(kind: str | None = "building") -> np.ndarray:
+    """(len(CLASSES),) P(class) over all parts of real sets (+1 smoothing)."""
+    c = np.array(json.loads(DATA.read_text())["counts"], float).sum(0) + 1.0
+    return c / c.sum()
+
+
+def roof_mix(kind: str | None = "building") -> np.ndarray | None:
+    """(len(CLASSES),) P(class) on real sets' pitched roofs (tools/learn/roof_mix.py), or None when not mined."""
+    f = DATA.with_name("roof_mix.json")
+    if not f.exists():
+        return None
+    d = json.loads(f.read_text())
+    if kind is not None and d.get("kind") != kind:
+        return None
+    c = np.array(d["counts"], float) + 1.0
+    return c / c.sum()
+
+
+def pitched_columns(occ: np.ndarray, lo: float = 0.9, hi: float = 4.3, min_cols: int = 30) -> np.ndarray:
+    """(X, Z) bool: stud columns under a pitched roof -- the largest connected area where the top of the model rises
+    steadily, lo..hi plates per stud (20-60 deg), when it covers at least `min_cols` columns (else none)."""
+    from scipy.ndimage import label, median_filter
+    H = occ.shape[0]
+    filled = occ.any(0)
+    top = np.where(filled, H - 1 - np.argmax(occ[::-1], axis=0), -1).astype(float)
+    sm = median_filter(np.where(filled, top, np.nan_to_num(top)), size=3)
+    gy, gx = np.gradient(sm)
+    g = np.hypot(gy, gx)
+    near = median_filter(filled.astype(np.uint8), size=3).astype(bool)
+    jump = np.abs(top - sm) > 3                                      # a wall's edge, not a slope
+    pitched = filled & near & ~jump & (g >= lo) & (g <= hi)
+    lab, n = label(pitched)
+    if n == 0:
+        return np.zeros_like(filled)
+    sizes = np.bincount(lab.ravel())[1:]
+    keep = int(np.argmax(sizes)) + 1
+    return (lab == keep) if sizes.max() >= min_cols else np.zeros_like(filled)
+
+
+def roof_cells(occ: np.ndarray, depth: int = 4) -> np.ndarray:
+    """(H, X, Z) bool: the top `depth` plates of each pitched-roof column (pitched_columns)."""
+    cols = pitched_columns(occ)
+    H = occ.shape[0]
+    top = H - 1 - np.argmax(occ[::-1], axis=0)
+    y = np.arange(H)[:, None, None]
+    return cols[None] & (y <= top[None]) & (y > top[None] - depth)

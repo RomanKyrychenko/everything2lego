@@ -109,6 +109,7 @@ class Problem(C.Structure):
         # part mix by surface type (surface_mix.py)
         ("w_surf", C.c_double), ("n_stype", C.c_int32), ("n_pclass", C.c_int32), ("cell_type", _P(C.c_int8)),
         ("opt_pclass", _P(C.c_int32)), ("surf_lpref", _P(C.c_double)), ("surf_lmarg", _P(C.c_double)),
+        ("motif_type", _P(C.c_uint8)),                                  # pattern: 0 anywhere, 1 on a pitched roof
     ]
 
 
@@ -334,7 +335,18 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         ds, dr, tn = arr(ds, np.int32), arr(dr, np.float32), arr(tn, np.float32)
         size_fields.update(w_dir=weights.direction, dir_thr=getattr(weights, "dir_thr", 0.5), t_normal=_ptr(tn, C.c_float),
                            dir_start=_ptr(ds, C.c_int32), dir_rows=_ptr(dr, C.c_float))
-    if getattr(weights, "surface_mix", 0.0) > 0:                                 # part mix by surface type
+    if getattr(weights, "roof_mix", 0.0) > 0:                                    # part mix on the target's pitched roof
+        from . import surface_mix as sm
+        roof = sm.roof_mix(kind)
+        if roof is not None:
+            ct = arr(sm.roof_cells(target.want).reshape(-1).astype(np.int8), np.int8)
+            oc = arr([sm.part_class(v.category) for v, _ in opts], np.int32)
+            lm = np.log(sm.all_mix(kind))
+            lp = arr(np.stack([lm, np.log(roof)]).reshape(-1), np.float64)   # type 0 is not scored (lift 0)
+            size_fields.update(w_surf=weights.roof_mix, n_stype=2, n_pclass=len(sm.CLASSES),
+                               cell_type=_ptr(ct, C.c_int8), opt_pclass=_ptr(oc, C.c_int32),
+                               surf_lpref=_ptr(lp, C.c_double), surf_lmarg=_ptr(arr(lm, np.float64), C.c_double))
+    elif getattr(weights, "surface_mix", 0.0) > 0:                               # part mix by surface type
         from . import surface_mix as sm
         from .surface_dir import target_normals
         mix = sm.real_mix(kind)
@@ -348,11 +360,11 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
                                surf_lpref=_ptr(lp, C.c_double), surf_lmarg=_ptr(lm, C.c_double))
     if getattr(weights, "motif", 0.0) > 0:                                       # building patterns of real sets
         from .motifs import tables as motif_tables
-        ms, mr, mw = motif_tables(opts, kind)
+        ms, mr, mw, mt = motif_tables(opts, kind)
         if len(mw):
-            ms, mr, mw = arr(ms, np.int32), arr(mr, np.int32), arr(mw, np.float64)
+            ms, mr, mw, mt = arr(ms, np.int32), arr(mr, np.int32), arr(mw, np.float64), arr(mt, np.uint8)
             size_fields.update(p_motif=weights.motif, n_motif=len(mw), motif_start=_ptr(ms, C.c_int32),
-                               motif_rows=_ptr(mr, C.c_int32), motif_w=_ptr(mw, C.c_double))
+                               motif_rows=_ptr(mr, C.c_int32), motif_w=_ptr(mw, C.c_double), motif_type=_ptr(mt, C.c_uint8))
     watch = os.environ.get("E2L_WATCH")                                          # diagnostics: a part category to report on
     if watch or any(getattr(o, "stack", None) is not None for _, o in opts):     # report how slope courses fare (stderr)
         ow = arr([(v.category == watch) if watch else o.stack is not None for v, o in opts], np.uint8)
