@@ -1667,11 +1667,86 @@ impl<'a> State<'a> {
 // proposals
 // ---------------------------------------------------------------------------
 
+/// The placements whose first cell is one cell, ranked once for the run.  A candidate's score is
+/// style * (log P(class | context) + log P(option | class)) - w_cov * residual - w_dir * direction: only the class term
+/// depends on the state, so each cell keeps its fitting options grouped by class (one class without the network),
+/// each group sorted by the rest of the score; a query merges the groups and checks which spots are still free.
+struct Ranked {
+    entries: Box<[(f32, u32)]>,  // (fixed part of the score, option), by class, best first within a class
+    groups: Box<[(u32, u32)]>,   // (class, start in entries)
+}
+
+#[derive(PartialEq, PartialOrd)]
+struct OrdF64(f64); // scores are finite
+impl Eq for OrdF64 {}
+impl Ord for OrdF64 {
+    fn cmp(&self, o: &Self) -> std::cmp::Ordering { self.partial_cmp(o).unwrap() }
+}
+
+fn rank_cell(d: &Data, y: i32, x: i32, z: i32) -> Ranked {
+    let mut v: Vec<(u32, f64, u32)> = Vec::new();
+    'opt: for (k, o) in d.opts.iter().enumerate() {
+        let (oy, ox, oz) = (y - o.first.0, x - o.first.1, z - o.first.2);
+        if oy < 0 || ox < 0 || oz < 0 || oy + o.h > d.h || ox + o.w > d.x || oz + o.d > d.z {
+            continue;
+        }
+        let mut wrong = 0u32;
+        for &(cy, cx, cz, bits, occ) in &o.cells {
+            let t = d.tbits[d.idx(oy + cy, ox + cx, oz + cz)];
+            if occ >= 0.5 && t == 0 {
+                continue 'opt; // solid where the object is not
+            }
+            wrong += (bits ^ t).count_ones();
+        }
+        let (class, lp) = match &d.net {
+            Some(net) => (net.opt_out[k] as u32, net.opt_lpart[k]),
+            None => (0, o.logprior),
+        };
+        v.push((class, d.style * lp - d.w_cov * (wrong as f64 / NSAMP) - d.w_dir * d.dir_cost(k, oy, ox, oz), k as u32));
+    }
+    v.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.partial_cmp(&a.1).unwrap()));
+    let mut groups = Vec::new();
+    for (i, e) in v.iter().enumerate() {
+        if i == 0 || v[i - 1].0 != e.0 {
+            groups.push((e.0, i as u32));
+        }
+    }
+    Ranked { entries: v.iter().map(|e| (e.1 as f32, e.2)).collect(), groups: groups.into_boxed_slice() }
+}
+
 struct Filler {
     colour_counts: Vec<u32>,
+    ranked: Vec<Option<Ranked>>, // per cell, filled on all cores up front for the wanted cells, lazily elsewhere
 }
 
 impl Filler {
+    fn new(d: &Data) -> Filler {
+        let mut ranked: Vec<Option<Ranked>> = (0..(d.h * d.x * d.z) as usize).map(|_| None).collect();
+        {
+            let n = std::thread::available_parallelism().map_or(1, |n| n.get());
+            let cells = &d.want_cells;
+            let done: Vec<Vec<(usize, Ranked)>> = std::thread::scope(|s| {
+                let hs: Vec<_> = (0..n)
+                    .map(|t| {
+                        s.spawn(move || {
+                            cells.iter().skip(t).step_by(n) // interleaved: heavy and light layers spread evenly
+                                .map(|&c| {
+                                    let ci = c as i32;
+                                    (c, rank_cell(d, ci / (d.x * d.z), (ci / d.z) % d.x, ci % d.z))
+                                })
+                                .collect()
+                        })
+                    })
+                    .collect();
+                hs.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            for (c, r) in done.into_iter().flatten() {
+                ranked[c] = Some(r);
+            }
+        }
+        Filler { colour_counts: vec![0; d.n_col.max(1)], ranked }
+    }
+
     /// Whether a stud of a part already below would sit in one of its holes.
     fn held(st: &State, o: &Opt, oy: i32, ox: i32, oz: i32) -> bool {
         if oy == 0 {
@@ -1715,57 +1790,38 @@ impl Filler {
         s
     }
 
-    /// Candidates whose first cell can go at (y, x, z): (pre-score, option, origin, residual).
-    fn candidates(st: &State, y: i32, x: i32, z: i32, prior: Option<&[f64]>,
+    /// Candidates whose first cell can go at (y, x, z): (pre-score, option, origin, residual), the best top_k free
+    /// ones; `lpc` is the network's log P(class | context) at the cell.
+    fn candidates(&mut self, st: &State, y: i32, x: i32, z: i32, lpc: Option<&[f64]>,
                   out: &mut Vec<(f64, usize, i32, i32, i32, f64)>) {
-        out.clear();
         let d = st.d;
-        'opt: for (k, o) in d.opts.iter().enumerate() {
+        let r = self.ranked[d.idx(y, x, z)].get_or_insert_with(|| rank_cell(d, y, x, z));
+        let end = |g: usize| if g + 1 < r.groups.len() { r.groups[g + 1].1 as usize } else { r.entries.len() };
+        let lift = |g: usize| lpc.map_or(0.0, |lp| d.style * lp[r.groups[g].0 as usize]);
+        // max-heap over groups by their best remaining entry: (score, group, position)
+        let mut heap: std::collections::BinaryHeap<(OrdF64, usize, usize)> = (0..r.groups.len())
+            .map(|g| { let i = r.groups[g].1 as usize; (OrdF64(r.entries[i].0 as f64 + lift(g)), g, i) })
+            .collect();
+        out.clear();
+        while let Some((OrdF64(score), g, i)) = heap.pop() {
+            let k = r.entries[i].1 as usize;
+            let o = &d.opts[k];
             let (oy, ox, oz) = (y - o.first.0, x - o.first.1, z - o.first.2);
-            if oy < 0 || ox < 0 || oz < 0 || oy + o.h > d.h || ox + o.w > d.x || oz + o.d > d.z {
-                continue;
-            }
             let mut wrong = 0u32;
-            for &(cy, cx, cz, bits, occ) in &o.cells {
+            let free = o.cells.iter().all(|&(cy, cx, cz, bits, _)| {
                 let c = d.idx(oy + cy, ox + cx, oz + cz);
-                if st.owner[c] >= 0 {
-                    continue 'opt;
-                }
-                let t = d.tbits[c];
-                if occ >= 0.5 && t == 0 {
-                    continue 'opt; // solid where the object is not
-                }
-                wrong += (bits ^ t).count_ones();
-            }
-            let resid = wrong as f64 / NSAMP;
-            // style and content weighed as in the energy; the direction cost (>= 0) is added below, only where needed
-            let lp = prior.map_or(o.logprior, |p| p[k]);
-            out.push((d.style * lp - d.w_cov * resid, k, oy, ox, oz, resid));
-        }
-        let k = d.top_k;
-        if d.w_dir != 0.0 {
-            // the score without the direction cost bounds the full score from above: best bounds first, stop once
-            // no remaining bound can beat the k-th full score (same top k, far fewer dir_cost calls)
-            out.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
-            let mut kept: Vec<(f64, usize, i32, i32, i32, f64)> = Vec::with_capacity(k + 1);
-            let mut kth = f64::NEG_INFINITY;
-            for &(bound, kk, oy, ox, oz, resid) in out.iter() {
-                if kept.len() >= k && bound <= kth {
-                    break;
-                }
-                kept.push((bound - d.w_dir * d.dir_cost(kk, oy, ox, oz), kk, oy, ox, oz, resid));
-                if kept.len() > k {
-                    let i = (0..kept.len()).min_by(|&a, &b| kept[a].0.partial_cmp(&kept[b].0).unwrap()).unwrap();
-                    kept.swap_remove(i);
-                }
-                if kept.len() == k {
-                    kth = kept.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
+                wrong += (bits ^ d.tbits[c]).count_ones();
+                st.owner[c] < 0
+            });
+            if free {
+                out.push((score, k, oy, ox, oz, wrong as f64 / NSAMP));
+                if out.len() == d.top_k {
+                    return;
                 }
             }
-            *out = kept;
-        } else if out.len() > k {
-            out.select_nth_unstable_by(k - 1, |a, b| b.0.partial_cmp(&a.0).unwrap());
-            out.truncate(k);
+            if i + 1 < end(g) {
+                heap.push((OrdF64(r.entries[i + 1].0 as f64 + lift(g)), g, i + 1));
+            }
         }
     }
 
@@ -1781,11 +1837,8 @@ impl Filler {
                 continue;
             }
             // with the network: log P(part, yaw | the cell's context), once per cell
-            let prior: Option<Vec<f64>> = d.net.as_ref().map(|net| {
-                let lp = net.logprobs(&net_features(d, net, &st.kindgrid, y, x, z));
-                (0..d.opts.len()).map(|k| lp[net.opt_out[k] as usize] + net.opt_lpart[k]).collect()
-            });
-            Filler::candidates(st, y, x, z, prior.as_deref(), &mut cands);
+            let lpc: Option<Vec<f64>> = d.net.as_ref().map(|net| net.logprobs(&net_features(d, net, &st.kindgrid, y, x, z)));
+            self.candidates(st, y, x, z, lpc.as_deref(), &mut cands);
             if cands.is_empty() {
                 continue;
             }
@@ -1794,9 +1847,9 @@ impl Filler {
                 let o = &d.opts[k];
                 let colour = d.colour_for(o, oy, ox, oz, &mut self.colour_counts);
                 let stat = d.style
-                    * match &prior {
-                        Some(p) => p[k],
-                        None => Filler::stat_score(st, k, oy, ox, oz),
+                    * match (&lpc, &d.net) {
+                        (Some(lp), Some(net)) => lp[net.opt_out[k] as usize] + net.opt_lpart[k],
+                        _ => Filler::stat_score(st, k, oy, ox, oz),
                     }
                     + d.w_big * ((o.w * o.d) as f64).ln();                // footprint: longer / wider, not taller
                 let mut fit = -d.w_dir * d.dir_cost(k, oy, ox, oz) - d.w_cov * resid
@@ -2245,7 +2298,7 @@ unsafe fn run(p: &Problem) -> i32 {
     let d = Data::from(p);
     let mut st = State::new(&d);
     let mut rng = Rng::new(p.seed);
-    let mut filler = Filler { colour_counts: vec![0; d.n_col.max(1)] };
+    let mut filler = Filler::new(&d);
     // multi-scale warm-start: pre-populate state with coarse placements
     let n_init = p.n_init.max(0) as usize;
     if n_init > 0 {
