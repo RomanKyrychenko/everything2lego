@@ -196,6 +196,9 @@ pub struct Problem {
     pub t_normal: *const f32, // h*x*z*3: unit outward direction (y, x, z) per surface cell, zeros elsewhere
     pub dir_start: *const i32, // n_opt + 1
     pub dir_rows: *const f32,  // rows of 7: cy, cx, cz, g (y, x, z), |g|  (area in stud tops)
+    // bigger parts first, falling: w_big goes linearly from w_big to w_big_end over the run (big parts laid first,
+    // smaller ones let in later); < 0 = constant w_big
+    pub w_big_end: f64,
 }
 
 const INFO_LEN: usize = 20;
@@ -1716,6 +1719,7 @@ fn rank_cell(d: &Data, y: i32, x: i32, z: i32) -> Ranked {
 
 struct Filler {
     colour_counts: Vec<u32>,
+    w_big: f64,                  // the current bigger-first weight (falls over the run with w_big_end)
     ranked: Vec<Option<Ranked>>, // per cell, filled on all cores up front for the wanted cells, lazily elsewhere
 }
 
@@ -1744,7 +1748,7 @@ impl Filler {
                 ranked[c] = Some(r);
             }
         }
-        Filler { colour_counts: vec![0; d.n_col.max(1)], ranked }
+        Filler { colour_counts: vec![0; d.n_col.max(1)], w_big: d.w_big, ranked }
     }
 
     /// Whether a stud of a part already below would sit in one of its holes.
@@ -1851,7 +1855,7 @@ impl Filler {
                         (Some(lp), Some(net)) => lp[net.opt_out[k] as usize] + net.opt_lpart[k],
                         _ => Filler::stat_score(st, k, oy, ox, oz),
                     }
-                    + d.w_big * ((o.w * o.d) as f64).ln();                // footprint: longer / wider, not taller
+                    + self.w_big * ((o.w * o.d) as f64).ln();                // footprint: longer / wider, not taller
                 let mut fit = -d.w_dir * d.dir_cost(k, oy, ox, oz) - d.w_cov * resid
                     - d.w_sil * st.sil_delta(o, oy, ox, oz) as f64 / (SUB * SUB) as f64
                     - d.w_col * d.colour_cost(o, oy, ox, oz, colour);
@@ -2372,6 +2376,9 @@ unsafe fn run(p: &Problem) -> i32 {
     let iters = p.iters.max(0);
     for it in 0..iters {
         let t = t_start * (t_final / t_start).powf(it as f64 / (iters - 1).max(1) as f64);
+        if p.w_big_end >= 0.0 {
+            filler.w_big = d.w_big + (p.w_big_end - d.w_big) * it as f64 / (iters - 1).max(1) as f64;
+        }
         let before = if d.opt_watch.is_empty() { [0f64; 6] } else { terms(&st) };
         let u = match propose(&mut st, &mut filler, &mut rng) {
             Some(u) => u,
