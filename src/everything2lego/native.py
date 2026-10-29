@@ -102,6 +102,9 @@ class Problem(C.Structure):
         ("w_dir", C.c_double), ("dir_thr", C.c_double), ("t_normal", _P(C.c_float)),   # surface direction (surface_dir.py)
         ("dir_start", _P(C.c_int32)), ("dir_rows", _P(C.c_float)),
         ("w_big_end", C.c_double),                                      # filler: bigger-first weight at the end (< 0 = constant)
+        # building patterns (tools/learn/motifs.py): parts placed together, as real sets do; p_motif = share of moves
+        ("p_motif", C.c_double), ("n_motif", C.c_int32), ("motif_start", _P(C.c_int32)),
+        ("motif_rows", _P(C.c_int32)), ("motif_w", _P(C.c_double)),
     ]
 
 
@@ -327,6 +330,13 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         ds, dr, tn = arr(ds, np.int32), arr(dr, np.float32), arr(tn, np.float32)
         size_fields.update(w_dir=weights.direction, dir_thr=getattr(weights, "dir_thr", 0.5), t_normal=_ptr(tn, C.c_float),
                            dir_start=_ptr(ds, C.c_int32), dir_rows=_ptr(dr, C.c_float))
+    if getattr(weights, "motif", 0.0) > 0:                                       # building patterns of real sets
+        from .motifs import tables as motif_tables
+        ms, mr, mw = motif_tables(opts, kind)
+        if len(mw):
+            ms, mr, mw = arr(ms, np.int32), arr(mr, np.int32), arr(mw, np.float64)
+            size_fields.update(p_motif=weights.motif, n_motif=len(mw), motif_start=_ptr(ms, C.c_int32),
+                               motif_rows=_ptr(mr, C.c_int32), motif_w=_ptr(mw, C.c_double))
     if any(getattr(o, "stack", None) is not None for _, o in opts):              # report how slope courses fare (stderr)
         ow = arr([o.stack is not None for _, o in opts], np.uint8)
         size_fields.update(opt_watch=_ptr(ow, C.c_uint8))

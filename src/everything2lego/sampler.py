@@ -526,6 +526,7 @@ class Weights:
     surface: float = 0.0      # > 0: shape term weighted by distance to the target's surface (surface_fit.py, alpha); native only
     big: float = 0.0          # filler proposes bigger parts first: + big * ln(footprint, studs^2) on each candidate; native only
     big_end: float = -1.0     # big falls linearly to this over the run (big parts first, smaller later); < 0 = constant
+    motif: float = 0.0        # share of moves that place a building pattern of real sets (motifs.py); native only
     stack: float = 0.0        # n_bricks * KL(share of bricks right on a same-footprint brick || p_stack); native only
     p_stack: float = 0.093    # real buildings' median (build_stats.py stacked_bricks)
     bare_top: float = 0.0     # energy per top stud with nothing above and nothing to come (outside the target); native only

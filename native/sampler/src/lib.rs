@@ -199,6 +199,13 @@ pub struct Problem {
     // bigger parts first, falling: w_big goes linearly from w_big to w_big_end over the run (big parts laid first,
     // smaller ones let in later); < 0 = constant w_big
     pub w_big_end: f64,
+    // building patterns (tools/learn/motifs.py): groups of parts at fixed relative cells, placed in one move with a
+    // share p_motif of all moves; rows of 4 (option, dy, dx, dz), weight = sets that use the pattern; 0 = off
+    pub p_motif: f64,
+    pub n_motif: i32,
+    pub motif_start: *const i32, // n_motif + 1
+    pub motif_rows: *const i32,  // 4 per row
+    pub motif_w: *const f64,     // n_motif
 }
 
 const INFO_LEN: usize = 20;
@@ -344,6 +351,10 @@ struct Data {
     p_sideways: f64,
     opt_sideways: Vec<bool>,                              // n_opt (empty when off)
     w_big: f64,
+    p_motif: f64,
+    motif_start: Vec<usize>,
+    motif_rows: Vec<(usize, i32, i32, i32)>,
+    motif_cum: Vec<f64>, // cumulative weights, for drawing a pattern by how many sets use it
     w_stack: f64,
     p_stack: f64,
     opt_brick: Vec<bool>,
@@ -532,6 +543,10 @@ impl Data {
             p_sideways: p.p_sideways.clamp(1e-4, 1.0 - 1e-4),
             opt_sideways: if p.opt_sideways.is_null() { Vec::new() } else { v(p.opt_sideways, n_opt).iter().map(|&b| b != 0).collect() },
             w_big: p.w_big,
+            p_motif: 0.0,
+            motif_start: Vec::new(),
+            motif_rows: Vec::new(),
+            motif_cum: Vec::new(),
             w_stack: if p.opt_brick.is_null() { 0.0 } else { p.w_stack },
             p_stack: p.p_stack.clamp(1e-4, 1.0 - 1e-4),
             opt_brick: if p.opt_brick.is_null() { Vec::new() } else { v(p.opt_brick, n_opt).iter().map(|&b| b != 0).collect() },
@@ -546,6 +561,15 @@ impl Data {
             w_in: if p.w_out.is_null() || p.w_in.is_null() { Vec::new() } else { v(p.w_in, n * 64) },
             fid0: 0.0,
         };
+        let n_motif = p.n_motif.max(0) as usize;
+        if p.p_motif > 0.0 && n_motif > 0 && !p.motif_rows.is_null() {
+            d.motif_start = v(p.motif_start, n_motif + 1).iter().map(|&s| s as usize).collect();
+            let raw = v(p.motif_rows, d.motif_start[n_motif] * 4);
+            d.motif_rows = raw.chunks(4).map(|r| (r[0] as usize, r[1], r[2], r[3])).collect();
+            let mut acc = 0.0;
+            d.motif_cum = v(p.motif_w, n_motif).iter().map(|w| { acc += w; acc }).collect();
+            d.p_motif = p.p_motif;
+        }
         if d.w_dir != 0.0 {
             let m = *d.dir_start.last().unwrap();
             let raw = v(p.dir_rows, m * 7);
@@ -2418,13 +2442,85 @@ fn stack(st: &mut State, rng: &mut Rng) -> Option<Undo> {
     None
 }
 
-const MOVES: [&str; 9] = ["sideways", "masonry", "hinge", "swap", "re-top", "split", "stack", "merge", "retile"];
+/// Pattern: a group of parts real sets build together (tools/learn/motifs.py), placed at a random wanted cell --
+/// of a few drawn by how many sets use them, the one that fits the target there best -- with what stood in its way
+/// cleared and the cleared space refilled.
+fn motif(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
+    let d = st.d;
+    if d.motif_cum.is_empty() || d.want_cells.is_empty() {
+        return None;
+    }
+    let c = d.want_cells[rng.below(d.want_cells.len())] as i32;
+    let (cy, cx, cz) = (c / (d.x * d.z), (c / d.z) % d.x, c % d.z);
+    let total = *d.motif_cum.last().unwrap();
+    let mut best: Option<(f64, usize, i32, i32, i32)> = None;
+    'draw: for _ in 0..16 {
+        let r = rng.f64() * total;
+        let m = d.motif_cum.partition_point(|&w| w <= r).min(d.motif_cum.len() - 1);
+        let rows = &d.motif_rows[d.motif_start[m]..d.motif_start[m + 1]];
+        let (_, ay, ax, az) = rows[rng.below(rows.len())];         // that part of the pattern goes at the cell
+        let (oy, ox, oz) = (cy - ay, cx - ax, cz - az);
+        let mut wrong = 0u32;
+        for &(k, dy, dx, dz) in rows {
+            let o = &d.opts[k];
+            let (y, x, z) = (oy + dy, ox + dx, oz + dz);
+            if y < 0 || x < 0 || z < 0 || y + o.h > d.h || x + o.w > d.x || z + o.d > d.z {
+                continue 'draw;
+            }
+            for &(py, px, pz, bits, occ) in &o.cells {
+                let t = d.tbits[d.idx(y + py, x + px, z + pz)];
+                if occ >= 0.5 && t == 0 {
+                    continue 'draw;                                   // solid where the object is not
+                }
+                wrong += (bits ^ t).count_ones();
+            }
+        }
+        let score = -(wrong as f64) / rows.len() as f64;
+        if best.map_or(true, |b| score > b.0) {
+            best = Some((score, m, oy, ox, oz));
+        }
+    }
+    let (_, m, oy, ox, oz) = best?;
+    let rows = d.motif_rows[d.motif_start[m]..d.motif_start[m + 1]].to_vec();
+    let mut owners: Vec<usize> = Vec::new();
+    for &(k, dy, dx, dz) in &rows {
+        for &(py, px, pz, _, _) in &d.opts[k].cells {
+            let j = st.owner[d.idx(oy + dy + py, ox + dx + px, oz + dz + pz)];
+            if j >= 0 && !owners.contains(&(j as usize)) {
+                owners.push(j as usize);
+            }
+        }
+    }
+    let mut freed: Vec<(i32, i32, i32)> = Vec::new();
+    let mut removed = Vec::new();
+    for j in owners {
+        let it = *st.item(j);
+        for &(py, px, pz, _, _) in &d.opts[it.opt].cells {
+            freed.push((it.y + py, it.x + px, it.z + pz));
+        }
+        removed.push(st.remove(j));
+    }
+    let mut added = Vec::new();
+    for &(k, dy, dx, dz) in &rows {
+        let o = &d.opts[k];
+        let colour = d.colour_for(o, oy + dy, ox + dx, oz + dz, &mut filler.colour_counts);
+        added.push(st.add(Item { opt: k, colour, y: oy + dy, x: ox + dx, z: oz + dz }));
+    }
+    freed.retain(|&(y, x, z)| st.owner[d.idx(y, x, z)] < 0 && d.want[d.idx(y, x, z)]);
+    added.extend(filler.fill(st, rng, freed));
+    Some(Undo::Retile { added, removed })
+}
+
+const MOVES: [&str; 10] = ["sideways", "masonry", "hinge", "swap", "re-top", "split", "stack", "merge", "retile", "pattern"];
 
 fn propose(st: &mut State, filler: &mut Filler, groups: &[Vec<usize>], rng: &mut Rng) -> Option<(usize, Undo)> {
     if !st.d.snot_by_opt.is_empty() && rng.f64() < 0.05 {        // only drawn when sideways building is on
         if let Some(u) = snot_face(st, rng) {
             return Some((0, u));
         }
+    }
+    if st.d.p_motif > 0.0 && rng.f64() < st.d.p_motif {
+        return motif(st, filler, rng).map(|u| (9, u));
     }
     let r = rng.f64();
     let (m, u) = if r < 0.02 { (1, masonry_shift(st, rng)) }
