@@ -1738,12 +1738,32 @@ impl Filler {
                 wrong += (bits ^ t).count_ones();
             }
             let resid = wrong as f64 / NSAMP;
-            // style and content weighed as in the energy
+            // style and content weighed as in the energy; the direction cost (>= 0) is added below, only where needed
             let lp = prior.map_or(o.logprior, |p| p[k]);
-            out.push((d.style * lp - d.w_cov * resid - d.w_dir * d.dir_cost(k, oy, ox, oz), k, oy, ox, oz, resid));
+            out.push((d.style * lp - d.w_cov * resid, k, oy, ox, oz, resid));
         }
         let k = d.top_k;
-        if out.len() > k {
+        if d.w_dir != 0.0 {
+            // the score without the direction cost bounds the full score from above: best bounds first, stop once
+            // no remaining bound can beat the k-th full score (same top k, far fewer dir_cost calls)
+            out.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+            let mut kept: Vec<(f64, usize, i32, i32, i32, f64)> = Vec::with_capacity(k + 1);
+            let mut kth = f64::NEG_INFINITY;
+            for &(bound, kk, oy, ox, oz, resid) in out.iter() {
+                if kept.len() >= k && bound <= kth {
+                    break;
+                }
+                kept.push((bound - d.w_dir * d.dir_cost(kk, oy, ox, oz), kk, oy, ox, oz, resid));
+                if kept.len() > k {
+                    let i = (0..kept.len()).min_by(|&a, &b| kept[a].0.partial_cmp(&kept[b].0).unwrap()).unwrap();
+                    kept.swap_remove(i);
+                }
+                if kept.len() == k {
+                    kth = kept.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
+                }
+            }
+            *out = kept;
+        } else if out.len() > k {
             out.select_nth_unstable_by(k - 1, |a, b| b.0.partial_cmp(&a.0).unwrap());
             out.truncate(k);
         }

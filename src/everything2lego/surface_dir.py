@@ -57,14 +57,16 @@ def option_faces(o, sigma: float = 1.0) -> np.ndarray:
     cell = np.clip((idx - 2) // SUB, 0, np.array(o.size) - 1)
     vec = G[tuple(idx.T)]
     b = np.argmax(vec @ DIRS.T, axis=1)
-    occupied = {tuple(c) for c in o.cells.tolist()}
-    acc: dict = {}
-    for c, bb, v in zip(map(tuple, cell.tolist()), b, vec):
-        if c not in occupied:
-            continue                                      # a face over an empty corner of the box: no cell of the part there
-        a = acc.setdefault((c, int(bb)), np.zeros(3)); a += v
-    rows = [(*c, *(v / STUD_TOP), np.linalg.norm(v) / STUD_TOP) for (c, _), v in acc.items() if np.linalg.norm(v) > 1e-6]
-    return np.array(rows, np.float32).reshape(-1, 7)
+    lin = (cell[:, 0] * W + cell[:, 1]) * D + cell[:, 2]
+    occupied = np.zeros(h * W * D, bool); occupied[(o.cells[:, 0] * W + o.cells[:, 1]) * D + o.cells[:, 2]] = True
+    keep = occupied[lin]                                  # a face over an empty corner of the box: no cell of the part there
+    key = lin[keep] * len(DIRS) + b[keep]
+    u, first, inv = np.unique(key, return_index=True, return_inverse=True)
+    acc = np.zeros((len(u), 3)); np.add.at(acc, inv, vec[keep])
+    order = np.argsort(first); u, acc = u[order], acc[order]      # rows in first-seen order
+    n = np.linalg.norm(acc, axis=1); u, acc, n = u[n > 1e-6], acc[n > 1e-6], n[n > 1e-6]
+    c = u // len(DIRS)
+    return np.column_stack([c // (W * D), c // D % W, c % D, acc / STUD_TOP, n / STUD_TOP]).astype(np.float32).reshape(-1, 7)
 
 
 def tables(opts) -> tuple[np.ndarray, np.ndarray]:
