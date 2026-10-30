@@ -1713,8 +1713,9 @@ impl<'a> State<'a> {
             if !d.inside(y, x, z) { return true; }
             let c = d.idx(y, x, z);
             // a barely-wanted cell (a roof's slant) may stay empty; a wanted one that shows and stayed empty is a hole in
-            // the surface, and the stud under it shows (a hole inside the model hides its studs)
-            self.owner[c] < 0 && (!d.want[c] || d.fill[c] < 0.5 || d.visible[c])
+            // the surface, and the stud under it shows (a hole inside the model hides its studs). fill, not want, says
+            // "outside the model": a layer stage cuts want, and a stud under the next layer's cells is not bare
+            self.owner[c] < 0 && (d.fill[c] < 0.5 || (d.want[c] && d.visible[c]))
         }).count() as f64
     }
 
@@ -2161,7 +2162,7 @@ impl Filler {
             fit -= d.w_bare_top * o.top.iter().filter(|&&(dx, dz)| {
                 y >= d.h || !d.inside(y, ox + dx, oz + dz) || {
                     let c = d.idx(y, ox + dx, oz + dz);
-                    st.owner[c] < 0 && (!d.want[c] || d.fill[c] < 0.5)
+                    st.owner[c] < 0 && d.fill[c] < 0.5
                 }
             }).count() as f64;
         }

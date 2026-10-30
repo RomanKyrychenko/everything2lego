@@ -201,6 +201,7 @@ def main() -> None:
     ap.add_argument("--resolve-share", type=float, default=0.0, help="share of moves that clear a window and cover it by the best of a bounded exact search (a slope run where the surface slants); taken from retile's share")
     ap.add_argument("--orient-share", type=float, default=0.0, help="share of moves that turn a part into the best-scoring option of its box (another turn or part); taken from retile's share")
     ap.add_argument("--layers", type=int, default=0, help="build bottom-up first: the lowest 1/N of the model's height, optimised with 1/N of --iters, then the next 1/N on top of it, and so on (20 = 5%% steps), before the whole is optimised together; exposed studs count only then; 0 = off")
+    ap.add_argument("--layer-bare", type=float, default=0.0, help="with --layers: exposed-stud weight during the layer stages, as a share of --bare-top-weight (a layer's top, which the next layer covers, never counts)")
     ap.add_argument("--whole-share", type=float, default=0.5, help="with --layers: steps for optimising the whole after the layers, as a share of --iters (the layers take --iters between them)")
     ap.add_argument("--pattern-share", type=float, default=0.0, help="share of moves that place a building pattern mined from real sets (tools/learn/motifs.py); 0 = off")
     ap.add_argument("--prefer-big", type=str, default="0", help="the filler tries bigger parts first: + W * ln(footprint, studs^2) on each candidate -- longer / wider, not taller (the energy still decides); W0:W1 falls linearly from W0 to W1 over the run")
@@ -287,7 +288,7 @@ def main() -> None:
             ys = np.nonzero(target.want.any((1, 2)))[0]
             lo, hi = int(ys.min()), int(ys.max()) + 1
             per = iters // a.layers                      # a layer of 1/N of the height gets 1/N of the steps
-            wl = copy.copy(w); wl.bare_top = 0.0
+            wl = copy.copy(w); wl.bare_top = w.bare_top * a.layer_bare
             for k in range(1, a.layers + 1):
                 tk = copy.copy(target)
                 tk.want = target.want & (np.arange(target.want.shape[0])[:, None, None] < lo + -(-(hi - lo) * k // a.layers))
