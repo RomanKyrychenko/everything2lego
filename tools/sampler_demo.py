@@ -289,6 +289,7 @@ def main() -> None:
             # whole (only which cells are built is cut), so the cut is no surface and needs no direction; its studs
             # are covered by the next stage, so exposed studs are not counted until the whole is optimised
             import copy
+            from everything2lego.region_rebuild import _cells
             ys = np.nonzero(target.want.any((1, 2)))[0]
             lo, hi = int(ys.min()), int(ys.max()) + 1
             per = iters // a.layers                      # a layer of 1/N of the height gets 1/N of the steps
@@ -296,10 +297,13 @@ def main() -> None:
             for k in range(1, a.layers + 1):
                 tk = copy.copy(target)
                 tk.want = target.want & (np.arange(target.want.shape[0])[:, None, None] < lo + -(-(hi - lo) * k // a.layers))
+                if init:                                 # a part reaching past the cut starts the next stage over
+                    init = [p for p in init if tk.want[tuple(_cells(p).T)].all()]
                 init, li = sample(tk, models, iters=per, seed=seed + 1000 * k, weights=wl, tile_boost=a.tile_boost,
                                   snot_boost=a.snot_boost, opt_bias=opt_bias, init_placements=init, engine=a.engine,
                                   snot=a.snot, n_special=a.n_special, courses=a.slope_courses, colour_share=a.target_colours)
                 print(f"layer {k}/{a.layers}: {int(tk.want.sum())} cells, {li['parts']} parts, energy {li['energy']:.0f}", flush=True)
+            init = [p for p in init if target.want[tuple(_cells(p).T)].all()]
             left = int(iters * a.whole_share)
         _ps, _info = sample(target, models, iters=left, seed=seed, weights=w,
                              tile_boost=a.tile_boost, snot_boost=a.snot_boost, opt_bias=opt_bias,
