@@ -2385,9 +2385,9 @@ fn resolve(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<(usize,
             v.push((stat + fit + if held { 0.0 } else { d.w_sup }, r.opt, r.y, r.x, r.z, r.colour, cs, held, below, tops, bots, ups));
         }
         let i = d.idx(y, x, z);
-        // an empty cell costs what the energy charges for it: its shape (a hole that shows also bares the stud under
-        // it, which the energy adds when it decides)
-        empty.push(if d.fill[i] < 0.5 { -d.w_cov * d.fill[i] } else { -d.w_cov * d.tbits[i].count_ones() as f64 / NSAMP });
+        // as the filler: a barely-wanted cell may stay empty; one nothing fits stays empty at a high price (the energy
+        // charges a hole only its shape, too little: left to it, the search trades parts for holes)
+        empty.push(if d.fill[i] < 0.5 { -d.w_cov * d.fill[i] } else { -d.w_cov * d.tbits[i].count_ones() as f64 / NSAMP - 1e3 });
         opts.push(v);
     }
     struct Search<'a> {
