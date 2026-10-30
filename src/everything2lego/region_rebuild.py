@@ -82,19 +82,21 @@ def rebuild(target, models, placements, box, sample, iters: int, seed: int = 0, 
     return sample(replace(target, lock=lock), models, iters=iters, seed=seed, init_placements=placements, **kw)
 
 
-def rebuild_worst(target, models, placements, err_cell, sample, k: int = 8, iters: int = 200_000,
+def rebuild_worst(target, models, placements, err_cell, sample, k: int = 8, per_cell: int = 250,
                   seed: int = 0, **kw):
-    """Rebuild the k worst regions in turn, each kept when the whole build's energy falls; (placements, report)."""
+    """Rebuild the k worst regions in turn, each kept when the whole build's energy falls; (placements, report).
+    A region gets per_cell steps per wanted cell in it (at least 50 000): a big one needs more to move as a whole."""
     ev = evaluate(target, models, placements, sample, **kw)
     e0 = ev["energy"]
     print(f"regions: build energy {e0:.0f}, shape {ev['fidelity']:.0f}, unsupported {ev['unsupported']}, "
           f"{len(placements)} parts", flush=True)
     report = []
     for r, box in enumerate(find_regions(err_cell, target.want, k=k)):
+        iters = max(50_000, per_cell * int(target.want[box].sum()))
         cand, ev = rebuild(target, models, placements, box, sample, iters, seed=seed + 7919 * (r + 1), **kw)
         kept = ev["energy"] < e0
         report.append({"box": [[s.start, s.stop] for s in box], "before": e0, "after": ev["energy"], "kept": kept})
-        print(f"region {r + 1}: cells {[(s.start, s.stop) for s in box]}  energy {e0:.0f} -> {ev['energy']:.0f} "
+        print(f"region {r + 1}: cells {[(s.start, s.stop) for s in box]}, {iters} steps  energy {e0:.0f} -> {ev['energy']:.0f} "
               f"(shape {ev['fidelity']:.0f}, unsupported {ev['unsupported']}, {len(cand)} parts)  "
               f"{'kept' if kept else 'dropped'}", flush=True)
         if kept:

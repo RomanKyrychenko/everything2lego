@@ -203,7 +203,8 @@ def main() -> None:
     ap.add_argument("--layers", type=int, default=0, help="build bottom-up first: the lowest 1/N of the model's height, optimised with 1/N of --iters, then the next 1/N on top of it, and so on (20 = 5%% steps), before the whole is optimised together; exposed studs count only then; 0 = off")
     ap.add_argument("--layer-bare", type=float, default=0.0, help="with --layers: exposed-stud weight during the layer stages, as a share of --bare-top-weight (a layer's top, which the next layer covers, never counts)")
     ap.add_argument("--rebuild-regions", type=int, default=0, help="after the build, rebuild its N worst regions (error map) on their own, the build around each locked, each kept when the whole energy falls; 0 = off")
-    ap.add_argument("--region-iters", type=int, default=200000, help="with --rebuild-regions: steps per region")
+    ap.add_argument("--region-steps", type=int, default=250, help="with --rebuild-regions: steps per wanted cell of a region (at least 50 000)")
+    ap.add_argument("--region-weights", default="", help='with --rebuild-regions: the regions are rebuilt and judged with these Weights fields multiplied, e.g. "direction=2,bare_top=2" (the whole build outside is locked, so this changes what counts only there); the reported energy stays the plain one')
     ap.add_argument("--region-snot", action="store_true", help="with --rebuild-regions: the regions may also use sideways parts (snot_options)")
     ap.add_argument("--whole-share", type=float, default=0.5, help="with --layers: steps for optimising the whole after the layers, as a share of --iters (the layers take --iters between them)")
     ap.add_argument("--pattern-share", type=float, default=0.0, help="share of moves that place a building pattern mined from real sets (tools/learn/motifs.py); 0 = off")
@@ -308,8 +309,13 @@ def main() -> None:
             from everything2lego.region_rebuild import rebuild_worst, evaluate
             kw = dict(weights=w, tile_boost=a.tile_boost, snot_boost=a.snot_boost, engine=a.engine, snot=a.snot or a.region_snot,
                       n_special=a.n_special, courses=a.slope_courses, colour_share=a.target_colours)
+            import copy
+            wr = copy.copy(w)
+            for f in filter(None, a.region_weights.split(",")):
+                name, m = f.split("=")
+                setattr(wr, name, getattr(wr, name) * float(m))
             _ps, rep = rebuild_worst(target, models, list(_ps), _info["_err_cell"], sample, k=a.rebuild_regions,
-                                     iters=a.region_iters, seed=seed, **kw)
+                                     per_cell=a.region_steps, seed=seed, **{**kw, "weights": wr})
             _info.update({k: v for k, v in evaluate(target, models, _ps, sample, **kw).items()
                           if k in ("energy", "unsupported", "bare_side_connectors", "fidelity", "_err_cell")})
             _info.pop("_part_error", None)                 # the evaluation lists the parts in its own order
