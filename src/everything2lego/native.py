@@ -31,7 +31,7 @@ import numpy as np
 
 ABI = 18
 INFO_LEN = 20
-ERR_LAYERS = ("shape", "colour", "support", "direction", "neighbours")   # lib.rs N_ERR
+ERR_LAYERS = ("shape", "colour", "support", "direction", "statistics")   # lib.rs N_ERR
 PATHS4_BUCKETS = 8
 
 _P = C.POINTER

@@ -12,6 +12,8 @@ The cost depends only on the part and its place, so the engine keeps it like the
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 
 from .sampler import SUB, unpack
@@ -69,11 +71,39 @@ def option_faces(o, sigma: float = 1.0) -> np.ndarray:
     return np.column_stack([c // (W * D), c // D % W, c % D, acc / STUD_TOP, n / STUD_TOP]).astype(np.float32).reshape(-1, 7)
 
 
+_FACES: dict | None = None
+CACHE = Path.home() / ".cache" / "everything2lego" / "option_faces.pkl"
+
+
+def _faces_cached(opts) -> list[np.ndarray]:
+    """option_faces per option, kept by the option's geometry (box, cells, bits) in memory and in CACHE: it depends on
+    nothing else, and computing it is most of a sampler run's setup."""
+    import hashlib
+    import pickle
+    global _FACES
+    if _FACES is None:
+        try:
+            _FACES = pickle.loads(CACHE.read_bytes())
+        except (OSError, pickle.UnpicklingError, EOFError):
+            _FACES = {}
+    out, new = [], False
+    for _, o in opts:
+        k = hashlib.sha1(np.asarray(o.size, np.int64).tobytes() + np.ascontiguousarray(o.cells, np.int64).tobytes()
+                         + np.ascontiguousarray(o.bits, np.uint64).tobytes()).hexdigest()
+        if k not in _FACES:
+            _FACES[k] = option_faces(o); new = True
+        out.append(_FACES[k])
+    if new:
+        CACHE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = CACHE.with_suffix(".tmp"); tmp.write_bytes(pickle.dumps(_FACES)); tmp.replace(CACHE)   # parallel runs: whole files only
+    return out
+
+
 def tables(opts) -> tuple[np.ndarray, np.ndarray]:
     """For every option (sampler order): start offsets (n_opt + 1,) int32 and the stacked face rows (m, 7) float32."""
     rows, start = [], [0]
-    for _, o in opts:
-        r = option_faces(o); rows.append(r); start.append(start[-1] + len(r))
+    for r in _faces_cached(opts):
+        rows.append(r); start.append(start[-1] + len(r))
     return np.array(start, np.int32), (np.concatenate(rows) if rows else np.zeros((0, 7))).astype(np.float32)
 
 

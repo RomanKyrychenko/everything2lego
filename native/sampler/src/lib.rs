@@ -228,7 +228,7 @@ pub struct Problem {
 }
 
 /// Error map layers: shape, colour, support (unsupported, bare side connectors, exposed studs), surface direction,
-/// neighbours less typical than the build's average pair.
+/// statistics (each part's share of the global terms by the chain rule, State::stat_blame).
 const N_ERR: usize = 5;
 
 const INFO_LEN: usize = 20;
@@ -1777,9 +1777,50 @@ impl<'a> State<'a> {
         it
     }
 
+    /// Item i's share of the global statistics terms, by the chain rule: sum over the counts it adds of
+    /// dE/dcount.  For a KL of the build's mix q to the real sets' p over n counts, dKL/dc_k = (ln(q_k/p_k) - KL)/n:
+    /// a part is blamed for what the build has too much of, credited for what it lacks.  Terms: neighbour pairs
+    /// (KL and the local score; each pair shared by its two parts), the part mix by surface type, the size mix and the
+    /// lined-up joints.  Left out: two-step paths (shortcut: paths through i reach far, add when they matter) and the
+    /// part / pair counts (the same for every part).
+    fn stat_blame(&self, i: usize) -> f64 {
+        let d = self.d;
+        let it = self.item(i);
+        let o = &d.opts[it.opt];
+        let mut b = 0f64;
+        let n = self.kl1.n;
+        if n > 0.0 {
+            let (kl, mean) = (self.kl1.value(), self.loc / n);
+            let a = d.style * d.n_ref / n;
+            for &(j, dir) in &self.adj[i] {
+                let tj = self.opt(j).token;
+                for k in [d.key(o.token, tj, dir), d.key(tj, o.token, flip(dir))] {
+                    let c = self.kl1.counts[k].max(1e-9);
+                    b += 0.5 * a * (d.w_glob * ((c / n).ln() - d.logp[k] - kl) + d.w_loc * (d.nll[k] - mean));
+                }
+            }
+        }
+        if d.w_surf != 0.0 {
+            let t = d.surf_type(it.opt, it.y, it.x, it.z);
+            if t > 0 {
+                let row = &self.surf_n[t * d.n_pclass..(t + 1) * d.n_pclass];
+                let c = d.opt_pclass[it.opt];
+                b += d.w_surf * ((row[c] / row.iter().sum::<f64>()).ln() - d.surf_lpref[t * d.n_pclass + c]);
+            }
+        }
+        if d.w_size != 0.0 {
+            let c = d.opt_class[it.opt];
+            b += d.w_size * ((self.size_n[c] / self.size_n.iter().sum::<f64>()).ln() - d.size_lpref[c]);
+        }
+        if d.w_stack != 0.0 && d.opt_brick[it.opt] && self.n_brick > 0.0 {
+            let (q, p) = ((self.n_stack / self.n_brick).clamp(1e-9, 1.0 - 1e-9), d.p_stack);
+            b += d.w_stack * 0.5 * self.stacked(i, &self.adj[i]) * ((q / (1.0 - q)).ln() - (p / (1.0 - p)).ln());
+        }
+        b
+    }
+
     /// Local error per cell, N_ERR layers (see N_ERR), and per live item (its cells' sum), in energy units: a
-    /// part's colour, support and direction costs are spread over its cells; a pair's share of the local statistics
-    /// term counts above the build's mean pair (so typical neighbours add nothing).  The global KL terms have no place.
+    /// part's colour, support, direction and statistics (stat_blame, blame only) costs are spread over its cells.
     fn error_map(&self) -> (Vec<f64>, Vec<f64>) {
         let d = self.d;
         let n = d.tbits.len();
@@ -1790,9 +1831,6 @@ impl<'a> State<'a> {
                 cell[c * N_ERR] = d.w_cov * miss(wrong);
             }
         }
-        let pairs = self.kl1.n.max(1.0);
-        let per_pair = d.style * d.n_ref * d.w_loc / pairs;            // one key's share of the loc term
-        let mean_nll = self.loc / pairs;
         let mut item = vec![0f64; self.items.len() * N_ERR];
         for &i in &self.live {
             let it = self.item(i);
@@ -1802,10 +1840,7 @@ impl<'a> State<'a> {
             e[2] = d.w_sup * self.unsup[i] as u8 as f64 + d.w_side * d.bare_sides(o, it.y, it.x, it.z) as f64
                 + d.w_bare_top * self.bare_top[i];
             e[3] = d.w_dir * d.dir_cost(it.opt, it.y, it.x, it.z);
-            for &(j, dir) in &self.adj[i] {
-                let k = d.key(o.token, self.opt(j).token, dir);
-                e[4] += 0.5 * per_pair * (d.nll[k] - mean_nll).max(0.0);
-            }
+            e[4] = self.stat_blame(i).max(0.0);
             let m = o.cells.len() as f64;
             for &(y, x, z, _, _) in &o.cells {
                 let c = d.idx(it.y + y, it.x + x, it.z + z);
@@ -3251,6 +3286,22 @@ unsafe fn run(p: &Problem) -> i32 {
         *p.out_z.add(k) = it.z;
     }
     *p.out_n = n as i32;
+    if std::env::var("E2L_CHECK_BLAME").is_ok() {
+        // diagnostics: each part's chain-rule share of the statistics against the exact change on removing it
+        let stats = |st: &State| st.style_loss() + d.w_surf * st.surf_kl() + d.w_size * st.size_kl() + d.w_stack * st.stack_kl();
+        let ids: Vec<usize> = st.live.iter().copied().step_by((st.live.len() / 40).max(1)).take(40).collect();
+        let (mut sx, mut sy, mut sxy, mut sxx, mut syy, mut m) = (0f64, 0f64, 0f64, 0f64, 0f64, 0f64);
+        for i in ids {
+            let pred = st.stat_blame(i);
+            let e0 = stats(&st);
+            let it = st.remove(i);
+            let exact = e0 - stats(&st);
+            st.add(it);
+            sx += pred; sy += exact; sxy += pred * exact; sxx += pred * pred; syy += exact * exact; m += 1.0;
+        }
+        let r = (m * sxy - sx * sy) / ((m * sxx - sx * sx).sqrt() * (m * syy - sy * sy).sqrt());
+        eprintln!("chain-rule blame vs exact removal over {} parts: correlation {:.3}, mean {:.1} vs {:.1}", m, r, sx / m, sy / m);
+    }
     {
         // how much of the shape + direction error is above what no part can remove (Filler::floor)
         let (cell, _) = st.error_map();

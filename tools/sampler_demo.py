@@ -200,6 +200,8 @@ def main() -> None:
     ap.add_argument("--guide", type=float, default=0.0, help="share of moves that pick their place in proportion to the local error (shape, colour, support / exposed studs, direction, atypical neighbours); 0 = uniform. The final error map is written either way (error.npz, render_error.png)")
     ap.add_argument("--resolve-share", type=float, default=0.0, help="share of moves that clear a window and cover it by the best of a bounded exact search (a slope run where the surface slants); taken from retile's share")
     ap.add_argument("--orient-share", type=float, default=0.0, help="share of moves that turn a part into the best-scoring option of its box (another turn or part); taken from retile's share")
+    ap.add_argument("--layers", type=int, default=0, help="build bottom-up first: the lowest 1/N of the model's height, optimised with 1/N of --iters, then the next 1/N on top of it, and so on (20 = 5%% steps), before the whole is optimised together; exposed studs count only then; 0 = off")
+    ap.add_argument("--whole-share", type=float, default=0.5, help="with --layers: steps for optimising the whole after the layers, as a share of --iters (the layers take --iters between them)")
     ap.add_argument("--pattern-share", type=float, default=0.0, help="share of moves that place a building pattern mined from real sets (tools/learn/motifs.py); 0 = off")
     ap.add_argument("--prefer-big", type=str, default="0", help="the filler tries bigger parts first: + W * ln(footprint, studs^2) on each candidate -- longer / wider, not taller (the energy still decides); W0:W1 falls linearly from W0 to W1 over the run")
     ap.add_argument("--direction-weight", type=float, default=0.0, help="surface direction: energy per stud-top of outward face area * (1 - cos) vs the mesh's direction (slopes on slanted roofs, tiles on flat tops)")
@@ -276,9 +278,27 @@ def main() -> None:
         w = Weights.learned(target.kind) if a.learned_weights else Weights()
         w.style = a.style; w.size = a.size_weight; w.sideways = a.sideways_weight; w.p_sideways = a.sideways_share; w.surface = a.surface_fit; w.big, w.big_end = (float(a.prefer_big.split(':')[0]), float(a.prefer_big.split(':')[1]) if ':' in a.prefer_big else -1.0); w.motif = a.pattern_share; w.surface_mix = a.surface_mix; w.roof_mix = a.roof_mix; w.guide = a.guide; w.resolve = a.resolve_share; w.orient = a.orient_share; w.flat_mix = a.flat_mix; w.stack = a.stack_weight; w.bare_top = a.bare_top_weight; w.direction = a.direction_weight
         if a.sup_weight > 0: w.sup = a.sup_weight
-        _ps, _info = sample(target, models, iters=iters, seed=seed, weights=w,
+        init, left = init_placements, iters
+        if a.layers > 1:
+            # bottom-up: each stage builds the target up to its cut, from the stages below; the mesh's shape stays
+            # whole (only which cells are built is cut), so the cut is no surface and needs no direction; its studs
+            # are covered by the next stage, so exposed studs are not counted until the whole is optimised
+            import copy
+            ys = np.nonzero(target.want.any((1, 2)))[0]
+            lo, hi = int(ys.min()), int(ys.max()) + 1
+            per = iters // a.layers                      # a layer of 1/N of the height gets 1/N of the steps
+            wl = copy.copy(w); wl.bare_top = 0.0
+            for k in range(1, a.layers + 1):
+                tk = copy.copy(target)
+                tk.want = target.want & (np.arange(target.want.shape[0])[:, None, None] < lo + -(-(hi - lo) * k // a.layers))
+                init, li = sample(tk, models, iters=per, seed=seed + 1000 * k, weights=wl, tile_boost=a.tile_boost,
+                                  snot_boost=a.snot_boost, opt_bias=opt_bias, init_placements=init, engine=a.engine,
+                                  snot=a.snot, n_special=a.n_special, courses=a.slope_courses, colour_share=a.target_colours)
+                print(f"layer {k}/{a.layers}: {int(tk.want.sum())} cells, {li['parts']} parts, energy {li['energy']:.0f}", flush=True)
+            left = int(iters * a.whole_share)
+        _ps, _info = sample(target, models, iters=left, seed=seed, weights=w,
                              tile_boost=a.tile_boost, snot_boost=a.snot_boost, opt_bias=opt_bias,
-                             init_placements=init_placements, engine=a.engine, snot=a.snot, n_special=a.n_special, courses=a.slope_courses,
+                             init_placements=init, engine=a.engine, snot=a.snot, n_special=a.n_special, courses=a.slope_courses,
                              colour_share=a.target_colours)
         _info["iters"] = iters
         _info["seconds"] = round(time.time() - _t, 1)
