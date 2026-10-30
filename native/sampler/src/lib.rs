@@ -2005,7 +2005,8 @@ impl Filler {
         }
     }
 
-    /// Whether a stud of a part already below would sit in one of its holes.
+    /// Whether a stud of a part already below would sit in one of its holes, or one of its studs in a hole of a part
+    /// already above (it hangs), or a side connector holds it -- as State::supported.
     fn held(st: &State, o: &Opt, oy: i32, ox: i32, oz: i32) -> bool {
         if oy == 0 {
             return true;
@@ -2018,6 +2019,17 @@ impl Filler {
                 let bo = &d.opts[b.opt];
                 if b.y + bo.h == oy && bo.has_top(ox + dx - b.x, oz + dz - b.z) {
                     return true;
+                }
+            }
+        }
+        if oy + o.h < d.h {
+            for &(dx, dz) in &o.top {
+                let j = st.owner[d.idx(oy + o.h, ox + dx, oz + dz)];
+                if j >= 0 {
+                    let b = st.item(j as usize);
+                    if b.y == oy + o.h && d.opts[b.opt].has_bottom(ox + dx - b.x, oz + dz - b.z) {
+                        return true;
+                    }
                 }
             }
         }
@@ -2050,7 +2062,7 @@ impl Filler {
 
     /// Candidates whose first cell can go at (y, x, z): (pre-score, option, origin, residual), the best top_k free
     /// ones; `lpc` is the network's log P(class | context) at the cell.
-    fn candidates(&mut self, st: &State, y: i32, x: i32, z: i32, lpc: Option<&[f64]>,
+    fn candidates(&mut self, st: &State, y: i32, x: i32, z: i32, lpc: Option<&[f64]>, n: usize,
                   out: &mut Vec<(f64, usize, i32, i32, i32, f64)>) {
         let d = st.d;
         let r = self.ranked[d.idx(y, x, z)].get_or_insert_with(|| rank_cell(d, y, x, z));
@@ -2073,7 +2085,7 @@ impl Filler {
             });
             if free {
                 out.push((score, k, oy, ox, oz, wrong as f64 / NSAMP));
-                if out.len() == d.top_k {
+                if out.len() == n {
                     return;
                 }
             }
@@ -2127,7 +2139,7 @@ impl Filler {
             }
             // with the network: log P(part, yaw | the cell's context), once per cell
             let lpc: Option<Vec<f64>> = d.net.as_ref().map(|net| net.logprobs(&net_features(d, net, &st.kindgrid, y, x, z)));
-            self.candidates(st, y, x, z, lpc.as_deref(), &mut cands);
+            self.candidates(st, y, x, z, lpc.as_deref(), d.top_k, &mut cands);
             if cands.is_empty() {
                 continue;
             }
@@ -2266,10 +2278,10 @@ fn clear_window(st: &mut State, (y0, y1): (i32, i32), (x0, x1): (i32, i32), (z0,
 /// filler's candidates -- each cell in turn, lowest first, takes a candidate starting there or stays empty -- scored
 /// by the filler's local score; the energy then decides as for any move.  Where the target's surface slants (a roof,
 /// the wheel) the window is a slope run: three plates tall, longer along the way the surface falls, so a stair of
-/// plates can become a row of slopes.
-fn resolve(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
-    const TOP: usize = 6;          // candidates kept per cell, best first
-    const BUDGET: usize = 3000;    // search nodes per move
+/// plates can become a row of slopes -- or an edge run: two plates tall, long along the edge (an eave's row of
+/// slopes).  Where it curves or runs diagonal on a wall (the wheel), a curve fit: many more candidates per cell
+/// (round and curved parts that only pay off together) and a bigger search.
+fn resolve(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<(usize, Undo)> {
     let d = st.d;
     if d.want_cells.is_empty() {
         return None;
@@ -2277,11 +2289,23 @@ fn resolve(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
     let c = st.pick_cell(rng);
     let (cy, cx, cz) = (c / (d.x * d.z), (c / d.z) % d.x, c % d.z);
     let (mut hy, mut hx, mut hz) = (1 + rng.below(2) as i32, 1 + rng.below(2) as i32, 1 + rng.below(2) as i32);
+    // (move, candidates asked per cell, kept per cell, search nodes)
+    let (mut m, mut ask, mut top, mut budget) = (10usize, d.top_k, 6usize, 3000usize);
     if !d.t_normal.is_empty() {
         let n = &d.t_normal[3 * c as usize..3 * c as usize + 3];
+        let along_x = n[1].abs() > n[2].abs();             // the surface falls / faces along x
         if n[0] > 0.2 && n[0] < 0.95 {
-            hy = 3;
-            if n[1].abs() > n[2].abs() { hx = 3 } else { hz = 3 }
+            if rng.f64() < 0.5 {                            // slope run: down the fall
+                hy = 3;
+                if along_x { hx = 3 } else { hz = 3 }
+            } else {                                        // edge run: along the edge
+                m = 12;
+                hy = 2;
+                if along_x { hx = 1; hz = 4 } else { hz = 1; hx = 4 }
+            }
+        } else if n[0].abs() <= 0.2 && n[1].abs().min(n[2].abs()) > 0.25 {
+            (m, ask, top, budget) = (13, 32, 12, 6000);    // curve fit
+            (hy, hx, hz) = (2, 2, 2);
         }
     }
     let (y0, y1) = ((cy - hy + 1).max(0), (cy + hy).min(d.h));
@@ -2292,23 +2316,53 @@ fn resolve(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
     cells.dedup();
     // per cell: its best candidates (score, option, place, colour, cells) and the score of leaving it empty
     let mut cands = Vec::new();
-    // (score without the support penalty, option, place, colour, cells, held by parts outside the window, cells below)
-    type Cand = (f64, usize, i32, i32, i32, i32, Vec<usize>, bool, Vec<usize>);
+    // parts beside the window (resting on it, or hanging from it) that nothing outside it holds now: each needs a new
+    // part's stud under one of its holes, or a new part's hole over one of its studs (those cells), or the cover pays
+    // for it unsupported
+    let freed: std::collections::HashSet<usize> = cells.iter().map(|&(y, x, z)| d.idx(y, x, z)).collect();
+    let mut near = std::collections::HashSet::new();
+    for &(y, x, z) in &cells {
+        for yy in [y - 1, y + 1] {
+            if yy >= 0 && yy < d.h {
+                let j = st.owner[d.idx(yy, x, z)];
+                if j >= 0 {
+                    near.insert(j as usize);
+                }
+            }
+        }
+    }
+    let needs: Vec<(Vec<usize>, Vec<usize>)> = near.into_iter().filter_map(|j| {
+        if st.supported(j) {
+            return None;
+        }
+        let a = st.item(j);
+        let o = &d.opts[a.opt];
+        let under: Vec<usize> = if a.y == 0 { Vec::new() } else {
+            o.bottom.iter().map(|&(dx, dz)| d.idx(a.y - 1, a.x + dx, a.z + dz)).filter(|c| freed.contains(c)).collect() };
+        let over: Vec<usize> = if a.y + o.h >= d.h { Vec::new() } else {
+            o.top.iter().map(|&(dx, dz)| d.idx(a.y + o.h, a.x + dx, a.z + dz)).filter(|c| freed.contains(c)).collect() };
+        if under.is_empty() && over.is_empty() { None } else { Some((under, over)) }
+    }).collect();
+    // (score without the support penalty, option, place, colour, cells, held by parts outside the window, cells below,
+    // cells of its top studs, cells of its bottom holes)
+    type Cand = (f64, usize, i32, i32, i32, i32, Vec<usize>, bool, Vec<usize>, Vec<usize>, Vec<usize>);
     let mut opts: Vec<Vec<Cand>> = Vec::with_capacity(cells.len());
     let mut empty = Vec::with_capacity(cells.len());
     for &(y, x, z) in &cells {
         let lpc: Option<Vec<f64>> = d.net.as_ref().map(|net| net.logprobs(&net_features(d, net, &st.kindgrid, y, x, z)));
-        filler.candidates(st, y, x, z, lpc.as_deref(), &mut cands);
+        filler.candidates(st, y, x, z, lpc.as_deref(), ask, &mut cands);
         let mut v: Vec<_> = cands.iter().map(|&(_, k, oy, ox, oz, resid)| {
             let (stat, fit, colour) = filler.score(st, lpc.as_deref(), k, oy, ox, oz, resid);
             let o = &d.opts[k];
             let held = Filler::held(st, o, oy, ox, oz);
             let cs = o.cells.iter().map(|&(a, b, e, _, _)| d.idx(oy + a, ox + b, oz + e)).collect();
             let below = if oy == 0 { Vec::new() } else { o.bottom.iter().map(|&(a, b)| d.idx(oy - 1, ox + a, oz + b)).collect() };
-            (stat + fit + if held { 0.0 } else { d.w_sup }, k, oy, ox, oz, colour, cs, held, below)
+            let tops = o.top.iter().map(|&(a, b)| d.idx(oy + o.h - 1, ox + a, oz + b)).collect();
+            let bots = o.bottom.iter().map(|&(a, b)| d.idx(oy, ox + a, oz + b)).collect();
+            (stat + fit + if held { 0.0 } else { d.w_sup }, k, oy, ox, oz, colour, cs, held, below, tops, bots)
         }).collect();
         v.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
-        v.truncate(TOP);
+        v.truncate(top);
         let i = d.idx(y, x, z);
         // as the filler: a barely-wanted cell may stay empty; one nothing fits stays empty at a high price
         empty.push(if d.fill[i] < 0.5 { -d.w_cov * d.fill[i] } else { -d.w_cov * d.tbits[i].count_ones() as f64 / NSAMP - 1e3 });
@@ -2319,14 +2373,18 @@ fn resolve(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
         opts: &'a [Vec<Cand>],
         empty: &'a [f64],
         w_sup: f64,
+        needs: &'a [(Vec<usize>, Vec<usize>)],
+        studs: std::collections::HashSet<usize>,
+        holes: std::collections::HashSet<usize>,
         taken: std::collections::HashSet<usize>,
         cur: Vec<(usize, usize)>,
         best: (f64, Vec<(usize, usize)>),
         nodes: usize,
+        budget: usize,
     }
     impl Search<'_> {
         fn go(&mut self, mut p: usize, score: f64) {
-            if self.nodes >= BUDGET {
+            if self.nodes >= self.budget {
                 return;
             }
             self.nodes += 1;
@@ -2334,6 +2392,9 @@ fn resolve(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
                 p += 1;
             }
             if p == self.cells.len() {
+                let unheld = self.needs.iter().filter(|(u, o)| !u.iter().any(|c| self.studs.contains(c))
+                    && !o.iter().any(|c| self.holes.contains(c))).count();
+                let score = score - self.w_sup * unheld as f64;
                 if score > self.best.0 {
                     self.best = (score, self.cur.clone());
                 }
@@ -2344,15 +2405,18 @@ fn resolve(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
                 if o.6.iter().any(|c| self.taken.contains(c)) {
                     continue;
                 }
-                // the window's lower parts are chosen first (cells go lowest first): one under a hole holds it
-                // (shortcut: any part chosen below counts, even one without a top stud there; the energy decides)
-                let held = o.7 || o.8.iter().any(|c| self.taken.contains(c));
+                // the window's lower parts are chosen first (cells go lowest first): a stud of one under a hole holds it
+                let held = o.7 || o.8.iter().any(|c| self.studs.contains(c));
                 let gain = o.0 - if held { 0.0 } else { self.w_sup };
                 for &c in &o.6 { self.taken.insert(c); }
+                for &c in &o.9 { self.studs.insert(c); }
+                for &c in &o.10 { self.holes.insert(c); }
                 self.cur.push((p, j));
                 self.go(p + 1, score + gain);
                 self.cur.pop();
                 for c in &o.6 { self.taken.remove(c); }
+                for c in &o.9 { self.studs.remove(c); }
+                for c in &o.10 { self.holes.remove(c); }
             }
             self.taken.insert(self.cells[p]);
             self.go(p + 1, score + self.empty[p]);
@@ -2364,10 +2428,14 @@ fn resolve(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
         opts: &opts,
         empty: &empty,
         w_sup: d.w_sup,
+        needs: &needs,
+        studs: std::collections::HashSet::new(),
+        holes: std::collections::HashSet::new(),
         taken: std::collections::HashSet::new(),
         cur: Vec::new(),
         best: (f64::NEG_INFINITY, Vec::new()),
         nodes: 0,
+        budget,
     };
     s.go(0, 0.0);
     let best = std::mem::take(&mut s.best.1);
@@ -2375,7 +2443,7 @@ fn resolve(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
         let (_, k, oy, ox, oz, colour, ..) = opts[p][j];
         st.add(Item { opt: k, colour, y: oy, x: ox, z: oz })
     }).collect();
-    Some(Undo::Retile { added, removed })
+    Some((m, Undo::Retile { added, removed }))
 }
 
 /// Orient: a part becomes the best-scoring option of its box (another turn, or another part of that size -- a slope
@@ -2941,7 +3009,7 @@ fn motif(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
     Some(Undo::Retile { added, removed })
 }
 
-const MOVES: [&str; 12] = ["sideways", "masonry", "hinge", "swap", "re-top", "split", "stack", "merge", "retile", "pattern", "re-solve", "orient"];
+const MOVES: [&str; 14] = ["sideways", "masonry", "hinge", "swap", "re-top", "split", "stack", "merge", "retile", "pattern", "re-solve", "orient", "edge run", "curve fit"];
 
 fn propose(st: &mut State, filler: &mut Filler, groups: &[Vec<usize>], boxes: &[Vec<usize>], rng: &mut Rng) -> Option<(usize, Undo)> {
     if !st.d.snot_by_opt.is_empty() && rng.f64() < 0.05 {        // only drawn when sideways building is on
@@ -2960,7 +3028,7 @@ fn propose(st: &mut State, filler: &mut Filler, groups: &[Vec<usize>], boxes: &[
     else if r < 0.21 { (5, split(st, rng)) }
     else if r < 0.24 { (6, stack(st, rng)) }
     else if r < 0.60 { (7, merge(st, rng)) }
-    else if r < 0.60 + st.d.p_resolve { (10, resolve(st, filler, rng)) }
+    else if r < 0.60 + st.d.p_resolve { return resolve(st, filler, rng) }
     else if r < 0.60 + st.d.p_resolve + st.d.p_orient { (11, orient(st, filler, boxes, rng)) }
     else { (8, retile(st, filler, rng)) };
     u.map(|u| (m, u))
@@ -3040,15 +3108,16 @@ unsafe fn run(p: &Problem) -> i32 {
     let (t_start, t_final) = (scale * p.t_start_share, scale * p.t_final_share);
     let mut accepted = 0i64;
     let (mut w_prop, mut w_acc, mut w_de) = (0i64, 0i64, 0f64);
-    let mut w_terms = [0f64; 6];                       // shape, outline, colour, statistics, support+studs, size+joints
-    let terms = |st: &State| -> [f64; 6] {
+    let mut w_terms = [0f64; 8];  // shape, outline, colour, statistics, unsupported, bare side connectors, exposed studs, size+joints
+    let terms = |st: &State| -> [f64; 8] {
         let d = st.d;
         [d.w_cov * st.fid, d.w_sil * st.sil as f64 / (SUB * SUB) as f64, d.w_col * st.col, st.style_loss(),
-         d.w_sup * st.n_unsup as f64 + d.w_side * st.bare as f64 + d.w_bare_top * st.n_bare_top,
+         d.w_sup * st.n_unsup as f64, d.w_side * st.bare as f64, d.w_bare_top * st.n_bare_top,
          d.w_size * st.size_kl() + d.w_sideways * st.sideways_kl() + d.w_stack * st.stack_kl() + d.w_surf * st.surf_kl()]
     };
     let iters = p.iters.max(0);
     let (mut n_prop, mut n_acc) = ([0i64; MOVES.len()], [0i64; MOVES.len()]);
+    let watch_move = std::env::var("E2L_WATCH_MOVE").ok().and_then(|n| MOVES.iter().position(|&m| m == n));
     for it in 0..iters {
         let t = t_start * (t_final / t_start).powf(it as f64 / (iters - 1).max(1) as f64);
         if p.w_big_end >= 0.0 {
@@ -3057,21 +3126,23 @@ unsafe fn run(p: &Problem) -> i32 {
         if d.p_guide > 0.0 && p.guide_every > 0 && it % p.guide_every as i64 == 0 {
             st.refresh_guide(&filler.floor);
         }
-        let before = if d.opt_watch.is_empty() { [0f64; 6] } else { terms(&st) };
+        let before = if d.opt_watch.is_empty() { [0f64; 8] } else { terms(&st) };
         let (m, u) = match propose(&mut st, &mut filler, &groups, &boxes, &mut rng) {
             Some(u) => u,
             None => continue,
         };
         n_prop[m] += 1;
-        let watched = !d.opt_watch.is_empty() && match &u {
-            Undo::Retile { added, .. } => added.iter().any(|&i| st.items[i].map_or(false, |it| d.opt_watch[it.opt])),
+        // diagnostics: E2L_WATCH_MOVE=<move name> watches that move, else moves adding a watched option
+        let watched = !d.opt_watch.is_empty() && match (&watch_move, &u) {
+            (Some(w), _) => *w == m,
+            (None, Undo::Retile { added, .. }) => added.iter().any(|&i| st.items[i].map_or(false, |it| d.opt_watch[it.opt])),
             _ => false,
         };
         let e2 = st.energy();
         if watched {
             w_prop += 1; w_de += e2 - e;
             let after = terms(&st);
-            for k in 0..6 { w_terms[k] += after[k] - before[k]; }
+            for k in 0..8 { w_terms[k] += after[k] - before[k]; }
         }
         if e2 <= e || rng.f64() < (-(e2 - e) / t).exp() {
             e = e2;
@@ -3093,8 +3164,8 @@ unsafe fn run(p: &Problem) -> i32 {
         eprintln!("watched options: proposed in {} moves, accepted {} ({:.1} %), mean energy change {:.2}; in the final build {}",
                   w_prop, w_acc, 100.0 * w_acc as f64 / w_prop.max(1) as f64, w_de / w_prop.max(1) as f64, live_w);
         let m = w_prop.max(1) as f64;
-        eprintln!("  mean change per term: shape {:.1}  outline {:.1}  colour {:.1}  statistics {:.1}  support+studs {:.1}  size+joints {:.1}",
-                  w_terms[0] / m, w_terms[1] / m, w_terms[2] / m, w_terms[3] / m, w_terms[4] / m, w_terms[5] / m);
+        eprintln!("  mean change per term: shape {:.1}  outline {:.1}  colour {:.1}  statistics {:.1}  unsupported {:.1}  bare side connectors {:.1}  exposed studs {:.1}  size+joints {:.1}",
+                  w_terms[0] / m, w_terms[1] / m, w_terms[2] / m, w_terms[3] / m, w_terms[4] / m, w_terms[5] / m, w_terms[6] / m, w_terms[7] / m);
     }
     // outputs
     let n = st.live.len().min(p.out_cap as usize);
