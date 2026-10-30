@@ -583,7 +583,7 @@ class State:
         self.col = 0.0
         self.unsup: set[int] = set()
         self.bare = 0                                        # side connectors facing out
-        self.fid = float(target.fill.sum())                  # wrong samples / 64, everything empty
+        self.fid = float((target.fill ** 2).sum())          # per cell (wrong samples / 64)^2, everything empty
         self.n_ref = stats.density * float(target.fill.sum())  # pairs a real set this size has
         self.p_ref = stats.part_density * float(target.fill.sum())  # and parts
         self.lab = _palette_lab()
@@ -819,9 +819,10 @@ class State:
         return float((np.linalg.norm(tl[ok] - self.lab[colour], axis=1) * o[vis][ok]).sum())
 
     def fid_delta(self, ys, xs, zs, bits) -> float:
-        """Change in wrong samples (per cell, /64) from filling these empty cells so."""
+        """Change in shape error from filling these empty cells so: per cell (wrong samples / 64)^2, so a hole costs
+        far more than a near miss (lib.rs miss)."""
         t = self.t.bits[ys, xs, zs]
-        return float((popcount(bits ^ t) - popcount(t)).sum()) / SUB ** 3
+        return float(((popcount(bits ^ t) / SUB ** 3) ** 2 - (popcount(t) / SUB ** 3) ** 2).sum())
 
     def bare_sides(self, o: Orient, oy: int, ox: int, oz: int) -> int:
         """Its side studs and holes facing a cell outside the object."""
@@ -1089,7 +1090,7 @@ class Filler:
         free, tb, (y0, x0, z0) = self._window(y, x, z)
         T = tb[self.idx]
         ok = free[self.idx].all(axis=1) & ~(self.solid & (T == 0)).any(axis=1)
-        resid = popcount(self.bits ^ T).sum(axis=1) / SUB ** 3
+        resid = ((popcount(self.bits ^ T) / SUB ** 3) ** 2).sum(axis=1)
         # the detailed score (neighbours, colour, support) only for the
         # likeliest few by prior and fit
         # style and content weighed as in the energy, so a typical part that

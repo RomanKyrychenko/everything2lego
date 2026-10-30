@@ -234,6 +234,13 @@ const N_ERR: usize = 5;
 const INFO_LEN: usize = 20;
 const PATHS4_BUCKETS: usize = 8;
 const NSAMP: f64 = 64.0;
+
+/// A cell's shape error from its wrong sub-samples (of 64): squared share, so a cell left empty (all wrong) costs
+/// 1 while one a slope or plate misses by an eighth costs 1/64 -- holes count far above near misses.
+fn miss(wrong: u32) -> f64 {
+    let e = wrong as f64 / NSAMP;
+    e * e
+}
 const SUB: i32 = 4;
 
 // ---------------------------------------------------------------------------
@@ -631,7 +638,7 @@ impl Data {
             let raw = v(p.dir_rows, m * 7);
             d.dir_rows = (0..m).map(|r| [raw[7 * r], raw[7 * r + 1], raw[7 * r + 2], raw[7 * r + 3], raw[7 * r + 4], raw[7 * r + 5], raw[7 * r + 6]]).collect();
         }
-        d.fid0 = if d.w_in.is_empty() { d.fill.iter().sum() }
+        d.fid0 = if d.w_in.is_empty() { d.tbits.iter().map(|t| miss(t.count_ones())).sum() }
                  else { (0..n).map(|c| (0..64).filter(|&b| d.tbits[c] >> b & 1 == 1).map(|b| d.w_in[c * 64 + b] as f64).sum::<f64>()).sum::<f64>() / NSAMP };
         let n_snot = p.n_snot_rows.max(0) as usize;
         if n_snot > 0 && !p.snot_rows.is_null() {
@@ -763,12 +770,12 @@ impl Data {
             }
             return s / NSAMP;
         }
-        let mut s = 0i64;
+        let mut s = 0f64;
         for &(y, x, z, bits, _) in &o.cells {
             let t = self.tbits[self.idx(oy + y, ox + x, oz + z)];
-            s += (bits ^ t).count_ones() as i64 - t.count_ones() as i64;
+            s += miss((bits ^ t).count_ones()) - miss(t.count_ones());
         }
-        s as f64 / NSAMP
+        s
     }
 
     /// The cells a side connector faces: just outside its face, one or (on
@@ -1780,7 +1787,7 @@ impl<'a> State<'a> {
         for c in 0..n {
             let wrong = (self.cur[c] ^ d.tbits[c]).count_ones();
             if wrong > 0 {
-                cell[c * N_ERR] = d.w_cov * wrong as f64 / NSAMP;
+                cell[c * N_ERR] = d.w_cov * miss(wrong);
             }
         }
         let pairs = self.kl1.n.max(1.0);
@@ -1899,13 +1906,13 @@ fn rank_cell(d: &Data, y: i32, x: i32, z: i32) -> Ranked {
         if oy < 0 || ox < 0 || oz < 0 || oy + o.h > d.h || ox + o.w > d.x || oz + o.d > d.z {
             continue;
         }
-        let mut wrong = 0u32;
+        let mut wrong = 0f64;
         for &(cy, cx, cz, bits, occ) in &o.cells {
             let t = d.tbits[d.idx(oy + cy, ox + cx, oz + cz)];
             if occ >= 0.5 && t == 0 {
                 continue 'opt; // solid where the object is not
             }
-            wrong += (bits ^ t).count_ones();
+            wrong += miss((bits ^ t).count_ones());
         }
         let (class, lp) = match &d.net {
             Some(net) => (net.opt_out[k] as u32, net.opt_lpart[k]),
@@ -1913,7 +1920,7 @@ fn rank_cell(d: &Data, y: i32, x: i32, z: i32) -> Ranked {
         };
         // the colour it would get here is fixed by the target too: a part not made in the target's colour ranks lower
         let colour = d.colour_for(o, oy, ox, oz, &mut counts);
-        let mut score = d.style * lp - d.w_cov * (wrong as f64 / NSAMP) - d.w_dir * d.dir_cost(k, oy, ox, oz)
+        let mut score = d.style * lp - d.w_cov * wrong - d.w_dir * d.dir_cost(k, oy, ox, oz)
             - d.w_col * d.colour_cost(o, oy, ox, oz, colour);
         if d.w_surf != 0.0 {                            // what real sets build this kind of surface from
             let c = d.opt_pclass[k];
@@ -1947,7 +1954,7 @@ fn floor_at(d: &Data, y: i32, x: i32, z: i32, out: &mut Vec<(usize, f64)>) {
         let dir = d.w_dir * d.dir_cost(k, oy, ox, oz) / o.cells.len() as f64;
         for &(cy, cx, cz, bits, _) in &o.cells {
             let c = d.idx(oy + cy, ox + cx, oz + cz);
-            out.push((c, d.w_cov * (bits ^ d.tbits[c]).count_ones() as f64 / NSAMP + dir));
+            out.push((c, d.w_cov * miss((bits ^ d.tbits[c]).count_ones()) + dir));
         }
     }
 }
@@ -1991,7 +1998,7 @@ impl Filler {
             });
             let mut floor: Vec<f64> = (0..d.tbits.len()).map(|c| {
                 // a cell may stay empty when it is outside the target, or less than half in it
-                if !d.want[c] { 0.0 } else if d.fill[c] < 0.5 { d.w_cov * d.tbits[c].count_ones() as f64 / NSAMP } else { f64::INFINITY }
+                if !d.want[c] { 0.0 } else if d.fill[c] < 0.5 { d.w_cov * miss(d.tbits[c].count_ones()) } else { f64::INFINITY }
             }).collect();
             for (rs, f) in done {
                 for (c, r) in rs {
@@ -2077,14 +2084,14 @@ impl Filler {
             let k = r.entries[i].1 as usize;
             let o = &d.opts[k];
             let (oy, ox, oz) = (y - o.first.0, x - o.first.1, z - o.first.2);
-            let mut wrong = 0u32;
+            let mut wrong = 0f64;
             let free = o.cells.iter().all(|&(cy, cx, cz, bits, _)| {
                 let c = d.idx(oy + cy, ox + cx, oz + cz);
-                wrong += (bits ^ d.tbits[c]).count_ones();
+                wrong += miss((bits ^ d.tbits[c]).count_ones());
                 st.owner[c] < 0
             });
             if free {
-                out.push((score, k, oy, ox, oz, wrong as f64 / NSAMP));
+                out.push((score, k, oy, ox, oz, wrong));
                 if out.len() == n {
                     return;
                 }
@@ -2153,7 +2160,7 @@ impl Filler {
             let f = d.fill[d.idx(y, x, z)];
             let skip = f < 0.5; // a barely-wanted cell may stay empty
             if skip {
-                scores.push(best_stat - d.w_cov * f);
+                scores.push(best_stat - d.w_cov * f * f);       // its shape error left empty (miss)
             }
             let m = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
             let ws: Vec<f64> = scores.iter().map(|s| (s - m).exp()).collect();
@@ -2374,8 +2381,8 @@ fn resolve(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<(usize,
                 continue;
             }
             let o = &d.opts[r.opt];
-            let wrong: u32 = o.cells.iter().map(|&(a, b, e, bits, _)| (bits ^ d.tbits[d.idx(r.y + a, r.x + b, r.z + e)]).count_ones()).sum();
-            let (stat, fit, _) = filler.score(st, lpc.as_deref(), r.opt, r.y, r.x, r.z, wrong as f64 / NSAMP);
+            let wrong: f64 = o.cells.iter().map(|&(a, b, e, bits, _)| miss((bits ^ d.tbits[d.idx(r.y + a, r.x + b, r.z + e)]).count_ones())).sum();
+            let (stat, fit, _) = filler.score(st, lpc.as_deref(), r.opt, r.y, r.x, r.z, wrong);
             let held = Filler::held(st, o, r.y, r.x, r.z);
             let cs = o.cells.iter().map(|&(a, b, e, _, _)| d.idx(r.y + a, r.x + b, r.z + e)).collect();
             let below = if r.y == 0 { Vec::new() } else { o.bottom.iter().map(|&(a, b)| d.idx(r.y - 1, r.x + a, r.z + b)).collect() };
@@ -2387,7 +2394,7 @@ fn resolve(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<(usize,
         let i = d.idx(y, x, z);
         // as the filler: a barely-wanted cell may stay empty; one nothing fits stays empty at a high price (the energy
         // charges a hole only its shape, too little: left to it, the search trades parts for holes)
-        empty.push(if d.fill[i] < 0.5 { -d.w_cov * d.fill[i] } else { -d.w_cov * d.tbits[i].count_ones() as f64 / NSAMP - 1e3 });
+        empty.push(if d.fill[i] < 0.5 { -d.w_cov * miss(d.tbits[i].count_ones()) } else { -d.w_cov * miss(d.tbits[i].count_ones()) - 1e3 });
         opts.push(v);
     }
     struct Search<'a> {
@@ -2535,8 +2542,8 @@ fn orient(st: &mut State, filler: &mut Filler, boxes: &[Vec<usize>], rng: &mut R
         if o.cells.iter().any(|&(cy, cx, cz, _, occ)| occ >= 0.5 && d.tbits[d.idx(a.y + cy, a.x + cx, a.z + cz)] == 0) {
             continue;                                            // solid where the object is not
         }
-        let wrong: u32 = o.cells.iter().map(|&(cy, cx, cz, bits, _)| (bits ^ d.tbits[d.idx(a.y + cy, a.x + cx, a.z + cz)]).count_ones()).sum();
-        let (stat, fit, colour) = filler.score(st, lpc.as_deref(), k, a.y, a.x, a.z, wrong as f64 / NSAMP);
+        let wrong: f64 = o.cells.iter().map(|&(cy, cx, cz, bits, _)| miss((bits ^ d.tbits[d.idx(a.y + cy, a.x + cx, a.z + cz)]).count_ones())).sum();
+        let (stat, fit, colour) = filler.score(st, lpc.as_deref(), k, a.y, a.x, a.z, wrong);
         if best.map_or(true, |b| stat + fit > b.0) {
             best = Some((stat + fit, k, colour));
         }
@@ -3021,7 +3028,7 @@ fn motif(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
         let rows = &d.motif_rows[d.motif_start[m]..d.motif_start[m + 1]];
         let (_, ay, ax, az) = rows[rng.below(rows.len())];         // that part of the pattern goes at the cell
         let (oy, ox, oz) = (cy - ay, cx - ax, cz - az);
-        let mut wrong = 0u32;
+        let mut wrong = 0f64;
         let mut col = 0f64;
         for &(k, dy, dx, dz) in rows {
             let o = &d.opts[k];
@@ -3036,10 +3043,10 @@ fn motif(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
                 if occ >= 0.5 && t == 0 {
                     continue 'draw;                                   // solid where the object is not
                 }
-                wrong += (bits ^ t).count_ones();
+                wrong += miss((bits ^ t).count_ones());
             }
         }
-        let score = -(d.w_cov * wrong as f64 / NSAMP + d.w_col * col);
+        let score = -(d.w_cov * wrong + d.w_col * col);
         if best.map_or(true, |b| score > b.0) {
             best = Some((score, m, oy, ox, oz));
         }
