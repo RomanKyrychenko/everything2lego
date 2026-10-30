@@ -29,7 +29,7 @@ from typing import Optional
 
 import numpy as np
 
-ABI = 17
+ABI = 18
 INFO_LEN = 20
 ERR_LAYERS = ("shape", "colour", "support", "direction", "neighbours")   # lib.rs N_ERR
 PATHS4_BUCKETS = 8
@@ -113,6 +113,7 @@ class Problem(C.Structure):
         ("motif_type", _P(C.c_uint8)),                                  # pattern: 0 anywhere, 1 on a pitched roof
         # error-guided moves, and the final error map (ERR_LAYERS per cell / per part)
         ("p_guide", C.c_double), ("guide_every", C.c_int32), ("err_cell", _P(C.c_double)), ("err_item", _P(C.c_double)),
+        ("p_resolve", C.c_double), ("p_orient", C.c_double),                # re-solve / orient move shares (from retile's)
     ]
 
 
@@ -426,7 +427,8 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
     err_item = np.zeros(cap * len(ERR_LAYERS))
     keep += list(out.values()) + [out_n, info, hist, hist_n, err_cell, err_item]
     size_fields.update(p_guide=getattr(weights, "guide", 0.0), guide_every=max(1000, iters // 400),
-                       err_cell=_ptr(err_cell, C.c_double), err_item=_ptr(err_item, C.c_double))
+                       err_cell=_ptr(err_cell, C.c_double), err_item=_ptr(err_item, C.c_double),
+                       p_resolve=getattr(weights, "resolve", 0.0), p_orient=getattr(weights, "orient", 0.0))
     p = Problem(
         h=H, x=X, z=Z,
         tbits=_ptr(arr(target.bits, np.uint64), C.c_uint64),

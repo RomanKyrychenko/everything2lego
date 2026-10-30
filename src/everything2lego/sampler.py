@@ -542,6 +542,8 @@ class Weights:
     big: float = 0.0          # filler proposes bigger parts first: + big * ln(footprint, studs^2) on each candidate; native only
     big_end: float = -1.0     # big falls linearly to this over the run (big parts first, smaller later); < 0 = constant
     roof_mix: float = 0.0     # part mix on the target's pitched roof vs real pitched roofs (surface_mix.roof_mix)
+    resolve: float = 0.0      # share of moves that re-solve a window by bounded exact search (native only)
+    orient: float = 0.0       # share of moves that turn a part into its box's best option (native only)
     guide: float = 0.0        # share of moves that pick their place by the local error map (native only)
     flat_mix: bool = False    # with roof_mix: the other tops too, vs real sets' flat tops (surface_mix.flat_mix)
     surface_mix: float = 0.0  # part mix by surface type: + w * sum_t n_t * KL(mix in t || real sets'); native only

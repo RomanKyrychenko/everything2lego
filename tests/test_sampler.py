@@ -165,12 +165,12 @@ def test_region_kind_overrides_object_kind():
 
 
 @pytest.mark.skipif(not native.available(), reason="native sampler not built")
-def test_error_guided_walk_keeps_its_energy_and_maps_its_error():
+def test_error_guided_walk_with_resolve_keeps_its_energy_and_maps_its_error():
     """With error-guided moves the energy kept move by move is still the recomputed one, and the error map has one
     row per placement and every cell's shape error where the build differs from the target."""
     want = np.zeros((6, 8, 6), dtype=bool); want[:4, 1:7, 1:5] = True; want[4:, 2:5, 2:4] = True
     target = sampler.Target(want, np.full(want.shape, 4), want.copy())
-    w = sampler.Weights(); w.guide = 0.7
+    w = sampler.Weights(); w.guide = 0.7; w.resolve = 0.2; w.orient = 0.1
     ps, info = sampler.sample(target, _models(), iters=3000, seed=1, k_models=1, warmup=50, n_special=60,
                               engine="native", weights=w)
     assert info["energy"] == pytest.approx(info["energy_recomputed"], rel=1e-6)
