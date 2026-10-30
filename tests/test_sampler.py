@@ -178,3 +178,22 @@ def test_error_guided_walk_with_resolve_keeps_its_energy_and_maps_its_error():
     cell = info["_err_cell"]
     assert cell.shape == want.shape + (len(native.ERR_LAYERS),) and (cell >= 0).all()
     assert (cell[..., 0] > 0).sum() > 0 or info["fidelity"] == 0
+
+
+@pytest.mark.skipif(not native.available(), reason="native sampler not built")
+def test_locked_parts_stay_and_a_region_rebuilt_splices_back():
+    """Parts on locked cells come out as they went in; a region rebuilt inside a fixed build leaves the parts
+    outside it alone and overlaps none of them, and the whole-build energy of the result is measured as it stands."""
+    from everything2lego import region_rebuild as rr
+    want = np.zeros((6, 8, 6), dtype=bool); want[:4, 1:7, 1:5] = True; want[4:, 2:5, 2:4] = True
+    target = sampler.Target(want, np.full(want.shape, 4), want.copy())
+    kw = dict(k_models=1, n_special=60, engine="native")
+    ps, info = sampler.sample(target, _models(), iters=2000, seed=1, warmup=50, **kw)
+    key = lambda p: (p.part.ldraw, p.rotation_deg, p.y_plate, p.x_stud, p.z_stud)
+    ev = rr.evaluate(target, _models(), ps, sampler.sample, **kw)
+    assert ev["energy"] == pytest.approx(ev["energy_recomputed"], rel=1e-6)
+    box = (slice(0, 4), slice(1, 4), slice(1, 5))
+    out, ri = rr.rebuild(target, _models(), ps, box, sampler.sample, iters=2000, **kw)
+    assert ri["energy"] == pytest.approx(ri["energy_recomputed"], rel=1e-6)
+    assert {key(p) for p in ps if not rr._inside(p, box)} <= {key(p) for p in out}
+    assert all(rr._inside(p, box) for p in out if key(p) not in {key(q) for q in ps})

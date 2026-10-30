@@ -29,7 +29,7 @@ from typing import Optional
 
 import numpy as np
 
-ABI = 18
+ABI = 19
 INFO_LEN = 20
 ERR_LAYERS = ("shape", "colour", "support", "direction", "statistics")   # lib.rs N_ERR
 PATHS4_BUCKETS = 8
@@ -114,6 +114,7 @@ class Problem(C.Structure):
         # error-guided moves, and the final error map (ERR_LAYERS per cell / per part)
         ("p_guide", C.c_double), ("guide_every", C.c_int32), ("err_cell", _P(C.c_double)), ("err_item", _P(C.c_double)),
         ("p_resolve", C.c_double), ("p_orient", C.c_double),                # re-solve / orient move shares (from retile's)
+        ("lock", _P(C.c_uint8)),                                        # cells whose parts stay as they are (null: none)
     ]
 
 
@@ -572,6 +573,8 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
             p.n_init = 0
     else:
         p.n_init = 0
+    if getattr(target, "lock", None) is not None:
+        p.lock = _ptr(arr(target.lock, np.uint8), C.c_uint8)
     rc = lib.e2l_sample(C.byref(p))
     if rc == 1:
         raise RuntimeError("native sampler panicked")

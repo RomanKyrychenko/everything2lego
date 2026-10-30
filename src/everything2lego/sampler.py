@@ -349,6 +349,7 @@ class Target:
     kind: Optional[str] = None        # building, road_vehicle, creature, ... (vocabulary.json kinds)
     region_kind: Optional[np.ndarray] = None   # (H, X, Z) str, per-cell kind; overrides `kind` where set
     region_label: Optional[np.ndarray] = None  # (H, X, Z) int, per-cell architectural label (classify_regions.LABEL); used by masonry_shift and future pattern moves
+    lock: Optional[np.ndarray] = None  # (H, X, Z) bool: cells whose parts no move may change; native only (region_rebuild)
 
     def __post_init__(self):
         if self.bits is None:

@@ -225,6 +225,7 @@ pub struct Problem {
     pub err_item: *mut f64,
     pub p_resolve: f64, // shares of the re-solve and orient moves (taken from retile's)
     pub p_orient: f64,
+    pub lock: *const u8, // H*X*Z: cells whose parts no move may change (a region rebuilt inside a fixed build); null = none
 }
 
 /// Error map layers: shape, colour, support (unsupported, bare side connectors, exposed studs), surface direction,
@@ -386,6 +387,7 @@ struct Data {
     p_guide: f64,
     p_resolve: f64,
     p_orient: f64,
+    lock: Vec<bool>,                                      // H*X*Z (empty when none)
     w_surf: f64,
     n_pclass: usize,
     cell_type: Vec<i8>,
@@ -424,7 +426,9 @@ impl Data {
         let tbits = v(p.tbits, n);
         let fill = tbits.iter().map(|b| b.count_ones() as f64 / NSAMP).collect();
         let want: Vec<bool> = v(p.want, n).iter().map(|&b| b != 0).collect();
-        let want_cells = (0..n).filter(|&i| want[i]).collect();
+        // with a lock, the cells moves work at are the free ones (a region rebuilt inside the whole build)
+        let lock_cells: Vec<u8> = if p.lock.is_null() { Vec::new() } else { v(p.lock, n) };
+        let want_cells = (0..n).filter(|&i| want[i] && lock_cells.get(i).map_or(true, |&l| l == 0)).collect();
         let n_opt = p.n_opt as usize;
         let size = v(p.opt_size, n_opt * 3);
         let first = v(p.opt_first, n_opt * 3);
@@ -592,6 +596,7 @@ impl Data {
             p_guide: p.p_guide,
             p_resolve: p.p_resolve,
             p_orient: p.p_orient,
+            lock: if p.lock.is_null() { Vec::new() } else { v(p.lock, n).iter().map(|&b| b != 0).collect() },
             w_surf: if p.cell_type.is_null() { 0.0 } else { p.w_surf },
             n_pclass: p.n_pclass.max(0) as usize,
             cell_type: if p.cell_type.is_null() { Vec::new() } else { v(p.cell_type, n) },
@@ -1104,6 +1109,7 @@ struct State<'a> {
     bare_top: Vec<f64>, // per item: its exposed top studs (w_bare_top)
     dirp: f64,          // surface direction cost of all live parts
     n_bare_top: f64,
+    lock_hits: u64,      // adds and removes that touched a locked cell (a move doing so is undone)
     mark: Vec<u32>,
     gen: u32,
     guide_cells: Vec<u32>, // cells with local error, and their cumulative error (error-guided moves)
@@ -1162,6 +1168,7 @@ impl<'a> State<'a> {
             bare_top: Vec::new(),
             dirp: 0.0,
             n_bare_top: 0.0,
+            lock_hits: 0,
             mark: Vec::new(),
             gen: 0,
             guide_cells: Vec::new(),
@@ -1661,6 +1668,7 @@ impl<'a> State<'a> {
             }
         };
         self.items[i] = Some(it);
+        self.touch_lock(&it);
         self.live_pos[i] = self.live.len();
         self.live.push(i);
         let d = self.d;
@@ -1730,8 +1738,16 @@ impl<'a> State<'a> {
         }
     }
 
+    fn touch_lock(&mut self, it: &Item) {
+        let d = self.d;
+        if !d.lock.is_empty() && d.opts[it.opt].cells.iter().any(|&(y, x, z, _, _)| d.lock[d.idx(it.y + y, it.x + x, it.z + z)]) {
+            self.lock_hits += 1;
+        }
+    }
+
     fn remove(&mut self, i: usize) -> Item {
         let it = *self.item(i);
+        self.touch_lock(&it);
         // Snapshot adj containing i for paths4 reverse-counting (closed walks).
         let nb_live: Vec<(usize, u8)> = self.adj[i].clone();
         if self.d.w_stack != 0.0 && self.d.opt_brick[it.opt] {
@@ -1866,7 +1882,7 @@ impl<'a> State<'a> {
         self.guide_cum.clear();
         let mut acc = 0f64;
         for c in 0..d.tbits.len() {
-            if !d.want[c] && self.owner[c] < 0 {
+            if (!d.want[c] && self.owner[c] < 0) || (!d.lock.is_empty() && d.lock[c]) {
                 continue;
             }
             let r = &cell[c * N_ERR..(c + 1) * N_ERR];
@@ -1900,6 +1916,12 @@ impl<'a> State<'a> {
             let j = self.owner[c as usize];
             if j >= 0 {
                 return j as usize;
+            }
+        }
+        if !self.d.lock.is_empty() && !self.d.want_cells.is_empty() {   // the owner of a free cell, so moves stay in the region
+            for _ in 0..8 {
+                let j = self.owner[self.d.want_cells[rng.below(self.d.want_cells.len().max(1))]];
+                if j >= 0 { return j as usize; }
             }
         }
         self.live[rng.below(self.live.len())]
@@ -3171,8 +3193,8 @@ unsafe fn run(p: &Problem) -> i32 {
                 let yy = y + cy;
                 let xx = x + cx;
                 let zz = z + cz;
+                // not only wanted cells: the walk itself may place a part partly outside the target (an overhang)
                 yy >= 0 && yy < d.h && xx >= 0 && xx < d.x && zz >= 0 && zz < d.z
-                    && d.want[d.idx(yy, xx, zz)]
                     && st.owner[d.idx(yy, xx, zz)] < 0
             });
             if ok {
@@ -3187,7 +3209,7 @@ unsafe fn run(p: &Problem) -> i32 {
             let c = c as i32;
             (c / (d.x * d.z), (c / d.z) % d.x, c % d.z)
         })
-        .filter(|&(y, x, z)| st.owner[d.idx(y, x, z)] < 0)
+        .filter(|&(y, x, z)| st.owner[d.idx(y, x, z)] < 0 && (d.lock.is_empty() || !d.lock[d.idx(y, x, z)]))
         .collect();
     filler.fill(&mut st, &mut rng, cells);
     let mut e = st.energy();
@@ -3197,7 +3219,9 @@ unsafe fn run(p: &Problem) -> i32 {
     let boxes = box_groups(&d);
     for _ in 0..p.warmup {
         // measure the scale, change nothing
+        let hits = st.lock_hits;
         if let Some((_, u)) = propose(&mut st, &mut filler, &groups, &boxes, &mut rng) {
+            if st.lock_hits != hits { undo(&mut st, u); continue; }
             deltas.push((st.energy() - e).abs());
             undo(&mut st, u);
         }
@@ -3236,10 +3260,12 @@ unsafe fn run(p: &Problem) -> i32 {
             st.refresh_guide(&filler.floor);
         }
         let before = if d.opt_watch.is_empty() { [0f64; 8] } else { terms(&st) };
+        let hits = st.lock_hits;
         let (m, u) = match propose(&mut st, &mut filler, &groups, &boxes, &mut rng) {
             Some(u) => u,
             None => continue,
         };
+        if st.lock_hits != hits { undo(&mut st, u); continue; }
         n_prop[m] += 1;
         // diagnostics: E2L_WATCH_MOVE=<move name> watches that move, else moves adding a watched option
         let watched = !d.opt_watch.is_empty() && match (&watch_move, &u) {
@@ -3391,5 +3417,5 @@ pub unsafe extern "C" fn e2l_sample(p: *const Problem) -> i32 {
 /// The layout version: Python checks it before calling.
 #[no_mangle]
 pub extern "C" fn e2l_abi() -> i32 {
-    18
+    19
 }
