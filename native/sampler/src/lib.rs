@@ -2291,10 +2291,13 @@ fn resolve(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<(usize,
     let (mut hy, mut hx, mut hz) = (1 + rng.below(2) as i32, 1 + rng.below(2) as i32, 1 + rng.below(2) as i32);
     // (move, candidates asked per cell, kept per cell, search nodes)
     let (mut m, mut ask, mut top, mut budget) = (10usize, d.top_k, 6usize, 3000usize);
+    let mut deep = 0;                                       // plates cleared below the window too: its support
     if !d.t_normal.is_empty() {
         let n = &d.t_normal[3 * c as usize..3 * c as usize + 3];
         let along_x = n[1].abs() > n[2].abs();             // the surface falls / faces along x
         if n[0] > 0.2 && n[0] < 0.95 {
+            deep = 3;
+            budget = 6000;
             if rng.f64() < 0.5 {                            // slope run: down the fall
                 hy = 3;
                 if along_x { hx = 3 } else { hz = 3 }
@@ -2306,9 +2309,10 @@ fn resolve(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<(usize,
         } else if n[0].abs() <= 0.2 && n[1].abs().min(n[2].abs()) > 0.25 {
             (m, ask, top, budget) = (13, 32, 12, 6000);    // curve fit
             (hy, hx, hz) = (2, 2, 2);
+            deep = 3;
         }
     }
-    let (y0, y1) = ((cy - hy + 1).max(0), (cy + hy).min(d.h));
+    let (y0, y1) = ((cy - hy + 1 - deep).max(0), (cy + hy).min(d.h));
     let (x0, x1) = ((cx - hx + 1).max(0), (cx + hx).min(d.x));
     let (z0, z1) = ((cz - hz + 1).max(0), (cz + hz).min(d.z));
     let (removed, mut cells) = clear_window(st, (y0, y1), (x0, x1), (z0, z1));
@@ -2344,8 +2348,8 @@ fn resolve(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<(usize,
         if under.is_empty() && over.is_empty() { None } else { Some((under, over)) }
     }).collect();
     // (score without the support penalty, option, place, colour, cells, held by parts outside the window, cells below,
-    // cells of its top studs, cells of its bottom holes)
-    type Cand = (f64, usize, i32, i32, i32, i32, Vec<usize>, bool, Vec<usize>, Vec<usize>, Vec<usize>);
+    // cells of its top studs, cells of its bottom holes, cells just above its top studs)
+    type Cand = (f64, usize, i32, i32, i32, i32, Vec<usize>, bool, Vec<usize>, Vec<usize>, Vec<usize>, Vec<usize>);
     let mut opts: Vec<Vec<Cand>> = Vec::with_capacity(cells.len());
     let mut empty = Vec::with_capacity(cells.len());
     for &(y, x, z) in &cells {
@@ -2359,13 +2363,31 @@ fn resolve(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<(usize,
             let below = if oy == 0 { Vec::new() } else { o.bottom.iter().map(|&(a, b)| d.idx(oy - 1, ox + a, oz + b)).collect() };
             let tops = o.top.iter().map(|&(a, b)| d.idx(oy + o.h - 1, ox + a, oz + b)).collect();
             let bots = o.bottom.iter().map(|&(a, b)| d.idx(oy, ox + a, oz + b)).collect();
-            (stat + fit + if held { 0.0 } else { d.w_sup }, k, oy, ox, oz, colour, cs, held, below, tops, bots)
+            let ups = if oy + o.h >= d.h { Vec::new() } else { o.top.iter().map(|&(a, b)| d.idx(oy + o.h, ox + a, oz + b)).collect() };
+            (stat + fit + if held { 0.0 } else { d.w_sup }, k, oy, ox, oz, colour, cs, held, below, tops, bots, ups)
         }).collect();
         v.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
         v.truncate(top);
+        // the parts removed here are candidates too: the cover can always be put back as it was (held)
+        for r in removed.iter().filter(|r| { let f = d.opts[r.opt].first; (r.y + f.0, r.x + f.1, r.z + f.2) == (y, x, z) }) {
+            if v.iter().any(|c| (c.1, c.2, c.3, c.4) == (r.opt, r.y, r.x, r.z)) {
+                continue;
+            }
+            let o = &d.opts[r.opt];
+            let wrong: u32 = o.cells.iter().map(|&(a, b, e, bits, _)| (bits ^ d.tbits[d.idx(r.y + a, r.x + b, r.z + e)]).count_ones()).sum();
+            let (stat, fit, _) = filler.score(st, lpc.as_deref(), r.opt, r.y, r.x, r.z, wrong as f64 / NSAMP);
+            let held = Filler::held(st, o, r.y, r.x, r.z);
+            let cs = o.cells.iter().map(|&(a, b, e, _, _)| d.idx(r.y + a, r.x + b, r.z + e)).collect();
+            let below = if r.y == 0 { Vec::new() } else { o.bottom.iter().map(|&(a, b)| d.idx(r.y - 1, r.x + a, r.z + b)).collect() };
+            let tops = o.top.iter().map(|&(a, b)| d.idx(r.y + o.h - 1, r.x + a, r.z + b)).collect();
+            let bots = o.bottom.iter().map(|&(a, b)| d.idx(r.y, r.x + a, r.z + b)).collect();
+            let ups = if r.y + o.h >= d.h { Vec::new() } else { o.top.iter().map(|&(a, b)| d.idx(r.y + o.h, r.x + a, r.z + b)).collect() };
+            v.push((stat + fit + if held { 0.0 } else { d.w_sup }, r.opt, r.y, r.x, r.z, r.colour, cs, held, below, tops, bots, ups));
+        }
         let i = d.idx(y, x, z);
-        // as the filler: a barely-wanted cell may stay empty; one nothing fits stays empty at a high price
-        empty.push(if d.fill[i] < 0.5 { -d.w_cov * d.fill[i] } else { -d.w_cov * d.tbits[i].count_ones() as f64 / NSAMP - 1e3 });
+        // an empty cell costs what the energy charges for it: its shape (a hole that shows also bares the stud under
+        // it, which the energy adds when it decides)
+        empty.push(if d.fill[i] < 0.5 { -d.w_cov * d.fill[i] } else { -d.w_cov * d.tbits[i].count_ones() as f64 / NSAMP });
         opts.push(v);
     }
     struct Search<'a> {
@@ -2383,7 +2405,10 @@ fn resolve(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<(usize,
         budget: usize,
     }
     impl Search<'_> {
-        fn go(&mut self, mut p: usize, score: f64) {
+        /// Limited discrepancy: `disc` choices on this path may leave the best feasible candidate (or the empty cell
+        /// where a candidate fits); passes with 0, 1, 2, ... share the budget, so a lower layer is reconsidered as
+        /// readily as the top one.
+        fn go(&mut self, mut p: usize, score: f64, disc: usize) {
             if self.nodes >= self.budget {
                 return;
             }
@@ -2392,35 +2417,50 @@ fn resolve(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<(usize,
                 p += 1;
             }
             if p == self.cells.len() {
-                let unheld = self.needs.iter().filter(|(u, o)| !u.iter().any(|c| self.studs.contains(c))
+                // support of the finished cover, as State::supported: a stud below, or hanging from a hole above
+                // (outside parts: o.7; side connectors to the new parts are not counted)
+                let mut unheld = self.needs.iter().filter(|(u, o)| !u.iter().any(|c| self.studs.contains(c))
                     && !o.iter().any(|c| self.holes.contains(c))).count();
+                for &(q, j) in &self.cur {
+                    let o = &self.opts[q][j];
+                    if !(o.7 || o.8.iter().any(|c| self.studs.contains(c)) || o.11.iter().any(|c| self.holes.contains(c))) {
+                        unheld += 1;
+                    }
+                }
                 let score = score - self.w_sup * unheld as f64;
                 if score > self.best.0 {
                     self.best = (score, self.cur.clone());
                 }
                 return;
             }
+            let mut rank = 0;
             for j in 0..self.opts[p].len() {
                 let o = &self.opts[p][j];
                 if o.6.iter().any(|c| self.taken.contains(c)) {
                     continue;
                 }
-                // the window's lower parts are chosen first (cells go lowest first): a stud of one under a hole holds it
-                let held = o.7 || o.8.iter().any(|c| self.studs.contains(c));
-                let gain = o.0 - if held { 0.0 } else { self.w_sup };
+                let cost = (rank > 0) as usize;
+                rank += 1;
+                if cost > disc {
+                    break;
+                }
+                let gain = o.0;                             // support is counted on the finished cover
                 for &c in &o.6 { self.taken.insert(c); }
                 for &c in &o.9 { self.studs.insert(c); }
                 for &c in &o.10 { self.holes.insert(c); }
                 self.cur.push((p, j));
-                self.go(p + 1, score + gain);
+                self.go(p + 1, score + gain, disc - cost);
                 self.cur.pop();
                 for c in &o.6 { self.taken.remove(c); }
                 for c in &o.9 { self.studs.remove(c); }
                 for c in &o.10 { self.holes.remove(c); }
             }
-            self.taken.insert(self.cells[p]);
-            self.go(p + 1, score + self.empty[p]);
-            self.taken.remove(&self.cells[p]);
+            let cost = (rank > 0) as usize;
+            if cost <= disc {
+                self.taken.insert(self.cells[p]);
+                self.go(p + 1, score + self.empty[p], disc - cost);
+                self.taken.remove(&self.cells[p]);
+            }
         }
     }
     let mut s = Search {
@@ -2437,7 +2477,33 @@ fn resolve(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<(usize,
         nodes: 0,
         budget,
     };
-    s.go(0, 0.0);
+    // the cover as it was (the window's empty cells then filled best-first) is the one to beat
+    let mut sc = 0.0;
+    for r in &removed {
+        let f = d.opts[r.opt].first;
+        let c = d.idx(r.y + f.0, r.x + f.1, r.z + f.2);
+        if let Some(p) = s.cells.iter().position(|&x| x == c) {
+            if let Some(j) = opts[p].iter().position(|o| (o.1, o.2, o.3, o.4) == (r.opt, r.y, r.x, r.z)) {
+                let o = &opts[p][j];
+                for &c in &o.6 { s.taken.insert(c); }
+                for &c in &o.9 { s.studs.insert(c); }
+                for &c in &o.10 { s.holes.insert(c); }
+                s.cur.push((p, j));
+                sc += o.0;
+            }
+        }
+    }
+    s.go(0, sc, 0);
+    s.taken.clear();
+    s.studs.clear();
+    s.holes.clear();
+    s.cur.clear();
+    for disc in 0..=3 {
+        if s.nodes >= budget {
+            break;
+        }
+        s.go(0, 0.0, disc);
+    }
     let best = std::mem::take(&mut s.best.1);
     let added = best.into_iter().map(|(p, j)| {
         let (_, k, oy, ox, oz, colour, ..) = opts[p][j];
