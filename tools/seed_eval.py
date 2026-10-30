@@ -108,7 +108,7 @@ def summary(rows: dict) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("name", nargs="?"); ap.add_argument("--seeds", type=int, default=4)
-    ap.add_argument("--jobs", type=int, default=4); ap.add_argument("--report", action="store_true")
+    ap.add_argument("--jobs", type=int, default=2, help="parallel runs; a 32-stud run peaks at ~5 GB"); ap.add_argument("--report", action="store_true")
     ap.add_argument("--compare", nargs="+")
     a, rest = ap.parse_known_args()
     rest = [r for r in rest if r != "--"]

@@ -29,8 +29,9 @@ from typing import Optional
 
 import numpy as np
 
-ABI = 16
+ABI = 17
 INFO_LEN = 20
+ERR_LAYERS = ("shape", "colour", "support", "direction", "neighbours")   # lib.rs N_ERR
 PATHS4_BUCKETS = 8
 
 _P = C.POINTER
@@ -110,6 +111,8 @@ class Problem(C.Structure):
         ("w_surf", C.c_double), ("n_stype", C.c_int32), ("n_pclass", C.c_int32), ("cell_type", _P(C.c_int8)),
         ("opt_pclass", _P(C.c_int32)), ("surf_lpref", _P(C.c_double)), ("surf_lmarg", _P(C.c_double)),
         ("motif_type", _P(C.c_uint8)),                                  # pattern: 0 anywhere, 1 on a pitched roof
+        # error-guided moves, and the final error map (ERR_LAYERS per cell / per part)
+        ("p_guide", C.c_double), ("guide_every", C.c_int32), ("err_cell", _P(C.c_double)), ("err_item", _P(C.c_double)),
     ]
 
 
@@ -419,7 +422,11 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
     hist_cap = max(2, iters // max(1, log_every) + 2)
     hist = np.zeros(hist_cap)
     hist_n = np.zeros(1, np.int32)
-    keep += list(out.values()) + [out_n, info, hist, hist_n]
+    err_cell = np.zeros(H * X * Z * len(ERR_LAYERS))
+    err_item = np.zeros(cap * len(ERR_LAYERS))
+    keep += list(out.values()) + [out_n, info, hist, hist_n, err_cell, err_item]
+    size_fields.update(p_guide=getattr(weights, "guide", 0.0), guide_every=max(1000, iters // 400),
+                       err_cell=_ptr(err_cell, C.c_double), err_item=_ptr(err_item, C.c_double))
     p = Problem(
         h=H, x=X, z=Z,
         tbits=_ptr(arr(target.bits, np.uint64), C.c_uint64),
@@ -578,6 +585,8 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
     inf = {k: float(v) for k, v in zip(keys, info)}
     for k in ("bad_cells", "unsupported", "bare_side_connectors", "parts"):
         inf[k] = int(inf[k])
+    inf["_err_cell"] = err_cell.reshape(H, X, Z, len(ERR_LAYERS))               # "_": kept out of info.json
+    inf["_err_item"] = err_item[:n * len(ERR_LAYERS)].reshape(n, len(ERR_LAYERS))
     return items, inf, hist[:int(hist_n[0])].tolist()
 
 

@@ -542,6 +542,7 @@ class Weights:
     big: float = 0.0          # filler proposes bigger parts first: + big * ln(footprint, studs^2) on each candidate; native only
     big_end: float = -1.0     # big falls linearly to this over the run (big parts first, smaller later); < 0 = constant
     roof_mix: float = 0.0     # part mix on the target's pitched roof vs real pitched roofs (surface_mix.roof_mix)
+    guide: float = 0.0        # share of moves that pick their place by the local error map (native only)
     flat_mix: bool = False    # with roof_mix: the other tops too, vs real sets' flat tops (surface_mix.flat_mix)
     surface_mix: float = 0.0  # part mix by surface type: + w * sum_t n_t * KL(mix in t || real sets'); native only
     motif: float = 0.0        # share of moves that place a building pattern of real sets (motifs.py); native only
@@ -1646,7 +1647,11 @@ def sample(target: Target, models: list[dict] | None = None, *, iters: int = 200
             net=net, tile_boost=tile_boost, snot_boost=snot_boost,
             init_placements=init_placements)
         from .slope_courses import expand
-        placements = [p for v, o, c, y, x, z in got for p in expand(v.part, c, x, z, y, o)]
+        placements, part_err = [], []
+        for (v, o, c, y, x, z), e in zip(got, info.pop("_err_item")):
+            ps_ = expand(v.part, c, x, z, y, o)
+            placements += ps_; part_err += [e] * len(ps_)
+        info["_part_error"] = np.array(part_err).reshape(-1, info["_err_cell"].shape[-1])   # per placement, per layer
         used = Counter(v.category for v, *_ in got)
         shapes = Counter(v.part.shape for v, *_ in got)
         n_ref = stats.density * float(target.fill.sum())

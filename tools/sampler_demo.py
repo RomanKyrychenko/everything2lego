@@ -157,6 +157,28 @@ def load_models() -> list[dict]:
     return [r for r in rows if not r["held_out"]]
 
 
+def write_error_map(out: Path, ps, err_cell: np.ndarray, part_err) -> None:
+    """error.npz (per cell and per part, by layer), and model_error.ldr / render_error.png: each part coloured by its
+    local error per cell (white low -> yellow -> orange -> red -> dark red, quantiles of the build's parts)."""
+    from everything2lego.colors import palette
+    from everything2lego.native import ERR_LAYERS
+    from dataclasses import replace
+    np.savez_compressed(out / "error.npz", cell=err_cell.astype(np.float32), layers=np.array(ERR_LAYERS),
+                        part=np.zeros((0, len(ERR_LAYERS))) if part_err is None else part_err.astype(np.float32))
+    tot = err_cell.reshape(-1, len(ERR_LAYERS)).sum(0)
+    print("local error by layer: " + "  ".join(f"{k} {v:.0f}" for k, v in zip(ERR_LAYERS, tot)), flush=True)
+    if part_err is None or len(part_err) != len(ps):
+        return                                                     # parts changed after sampling: no part colours
+    idx = {c.code: i for i, c in enumerate(palette())}
+    heat = [idx[c] for c in (15, 14, 25, 4, 320)]
+    per_cell = part_err.sum(1) / np.array([max(1, p.w_world * p.d_world * p.part.height_units) for p in ps])
+    edges = np.quantile(per_cell, [0.5, 0.75, 0.9, 0.97])
+    hot = [replace(p, color_idx=heat[int(np.searchsorted(edges, e))]) for p, e in zip(ps, per_cell)]
+    write_ldr(hot, out / "model_error.ldr")
+    subprocess.run([sys.executable, str(ROOT / "tools/render_build.py"), str(out / "model_error.ldr"),
+                    str(out / "render_error.png"), "--views", "30,120,210", "--size", "500"], check=False)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("mesh"); ap.add_argument("out")
@@ -175,6 +197,7 @@ def main() -> None:
     ap.add_argument("--surface-mix", type=float, default=0.0, help="weight of the part mix by surface type (roof / top / wall / under; surface_mix.py) against real sets; 0 = off")
     ap.add_argument("--target-colours", type=float, default=0.0, help="parts only in the colours covering at least this share of the target's visible cells (e.g. 0.005); a part made in none of them is left out; 0 = off")
     ap.add_argument("--flat-mix", action=argparse.BooleanOptionalAction, default=False, help="with --roof-mix: the other tops (flat roofs, ledges, the ground) get real sets' part mix and patterns there too. Off: real sets leave more studs bare there (35 %% tiles) than our builds already do (60 %%), so it adds exposed studs")
+    ap.add_argument("--guide", type=float, default=0.0, help="share of moves that pick their place in proportion to the local error (shape, colour, support / exposed studs, direction, atypical neighbours); 0 = uniform. The final error map is written either way (error.npz, render_error.png)")
     ap.add_argument("--pattern-share", type=float, default=0.0, help="share of moves that place a building pattern mined from real sets (tools/learn/motifs.py); 0 = off")
     ap.add_argument("--prefer-big", type=str, default="0", help="the filler tries bigger parts first: + W * ln(footprint, studs^2) on each candidate -- longer / wider, not taller (the energy still decides); W0:W1 falls linearly from W0 to W1 over the run")
     ap.add_argument("--direction-weight", type=float, default=0.0, help="surface direction: energy per stud-top of outward face area * (1 - cos) vs the mesh's direction (slopes on slanted roofs, tiles on flat tops)")
@@ -249,7 +272,7 @@ def main() -> None:
     def _once(seed: int):
         _t = time.time()
         w = Weights.learned(target.kind) if a.learned_weights else Weights()
-        w.style = a.style; w.size = a.size_weight; w.sideways = a.sideways_weight; w.p_sideways = a.sideways_share; w.surface = a.surface_fit; w.big, w.big_end = (float(a.prefer_big.split(':')[0]), float(a.prefer_big.split(':')[1]) if ':' in a.prefer_big else -1.0); w.motif = a.pattern_share; w.surface_mix = a.surface_mix; w.roof_mix = a.roof_mix; w.flat_mix = a.flat_mix; w.stack = a.stack_weight; w.bare_top = a.bare_top_weight; w.direction = a.direction_weight
+        w.style = a.style; w.size = a.size_weight; w.sideways = a.sideways_weight; w.p_sideways = a.sideways_share; w.surface = a.surface_fit; w.big, w.big_end = (float(a.prefer_big.split(':')[0]), float(a.prefer_big.split(':')[1]) if ':' in a.prefer_big else -1.0); w.motif = a.pattern_share; w.surface_mix = a.surface_mix; w.roof_mix = a.roof_mix; w.guide = a.guide; w.flat_mix = a.flat_mix; w.stack = a.stack_weight; w.bare_top = a.bare_top_weight; w.direction = a.direction_weight
         if a.sup_weight > 0: w.sup = a.sup_weight
         _ps, _info = sample(target, models, iters=iters, seed=seed, weights=w,
                              tile_boost=a.tile_boost, snot_boost=a.snot_boost, opt_bias=opt_bias,
@@ -325,6 +348,9 @@ def main() -> None:
         subs = split_by_y_bands(list(ps), target_size=a.subassemblies)
         info["subassemblies"] = [len(g) for g in subs]
     write_ldr(ps, out / "model.ldr", subassemblies=subs, decorations=deco or None)
+    err_cell, part_err = info.pop("_err_cell", None), info.pop("_part_error", None)
+    if err_cell is not None:
+        write_error_map(out, ps, err_cell, part_err)
     (out / "info.json").write_text(json.dumps({k: v for k, v in info.items()}, indent=1, default=float))
     print(json.dumps({k: v for k, v in info.items() if k != "history"}, default=float))
     subprocess.run([sys.executable, str(ROOT / "tools/render_build.py"), str(out / "model.ldr"),

@@ -216,7 +216,18 @@ pub struct Problem {
     pub surf_lpref: *const f64,  // n_stype * n_pclass: ln P(class | type), real sets
     pub surf_lmarg: *const f64,  // n_pclass: ln P(class), real sets (the filler adds the lift of the type)
     pub motif_type: *const u8,   // n_motif: 0 anywhere, 1 on a roof (cell_type 1); null = all 0
+    // error-guided moves: with probability p_guide a move picks its place in proportion to the local error
+    // (State::error_map, refreshed every guide_every steps); err_cell / err_item (n_cell / out_cap * N_ERR) get the
+    // final map when not null
+    pub p_guide: f64,
+    pub guide_every: i32,
+    pub err_cell: *mut f64,
+    pub err_item: *mut f64,
 }
+
+/// Error map layers: shape, colour, support (unsupported, bare side connectors, exposed studs), surface direction,
+/// neighbours less typical than the build's average pair.
+const N_ERR: usize = 5;
 
 const INFO_LEN: usize = 20;
 const PATHS4_BUCKETS: usize = 8;
@@ -363,6 +374,7 @@ struct Data {
     opt_sideways: Vec<bool>,                              // n_opt (empty when off)
     w_big: f64,
     p_motif: f64,
+    p_guide: f64,
     w_surf: f64,
     n_pclass: usize,
     cell_type: Vec<i8>,
@@ -566,6 +578,7 @@ impl Data {
             opt_sideways: if p.opt_sideways.is_null() { Vec::new() } else { v(p.opt_sideways, n_opt).iter().map(|&b| b != 0).collect() },
             w_big: p.w_big,
             p_motif: 0.0,
+            p_guide: p.p_guide,
             w_surf: if p.cell_type.is_null() { 0.0 } else { p.w_surf },
             n_pclass: p.n_pclass.max(0) as usize,
             cell_type: if p.cell_type.is_null() { Vec::new() } else { v(p.cell_type, n) },
@@ -1080,6 +1093,8 @@ struct State<'a> {
     n_bare_top: f64,
     mark: Vec<u32>,
     gen: u32,
+    guide_cells: Vec<u32>, // cells with local error, and their cumulative error (error-guided moves)
+    guide_cum: Vec<f64>,
 }
 
 const UP: u8 = 0;
@@ -1136,6 +1151,8 @@ impl<'a> State<'a> {
             n_bare_top: 0.0,
             mark: Vec::new(),
             gen: 0,
+            guide_cells: Vec::new(),
+            guide_cum: Vec::new(),
         }
     }
 
@@ -1745,6 +1762,95 @@ impl<'a> State<'a> {
         it
     }
 
+    /// Local error per cell, N_ERR layers (see N_ERR), and per live item (its cells' sum), in energy units: a
+    /// part's colour, support and direction costs are spread over its cells; a pair's share of the local statistics
+    /// term counts above the build's mean pair (so typical neighbours add nothing).  The global KL terms have no place.
+    fn error_map(&self) -> (Vec<f64>, Vec<f64>) {
+        let d = self.d;
+        let n = d.tbits.len();
+        let mut cell = vec![0f64; n * N_ERR];
+        for c in 0..n {
+            let wrong = (self.cur[c] ^ d.tbits[c]).count_ones();
+            if wrong > 0 {
+                cell[c * N_ERR] = d.w_cov * wrong as f64 / NSAMP;
+            }
+        }
+        let pairs = self.kl1.n.max(1.0);
+        let per_pair = d.style * d.n_ref * d.w_loc / pairs;            // one key's share of the loc term
+        let mean_nll = self.loc / pairs;
+        let mut item = vec![0f64; self.items.len() * N_ERR];
+        for &i in &self.live {
+            let it = self.item(i);
+            let o = &d.opts[it.opt];
+            let mut e = [0f64; N_ERR];
+            e[1] = d.w_col * d.colour_cost(o, it.y, it.x, it.z, it.colour);
+            e[2] = d.w_sup * self.unsup[i] as u8 as f64 + d.w_side * d.bare_sides(o, it.y, it.x, it.z) as f64
+                + d.w_bare_top * self.bare_top[i];
+            e[3] = d.w_dir * d.dir_cost(it.opt, it.y, it.x, it.z);
+            for &(j, dir) in &self.adj[i] {
+                let k = d.key(o.token, self.opt(j).token, dir);
+                e[4] += 0.5 * per_pair * (d.nll[k] - mean_nll).max(0.0);
+            }
+            let m = o.cells.len() as f64;
+            for &(y, x, z, _, _) in &o.cells {
+                let c = d.idx(it.y + y, it.x + x, it.z + z);
+                for l in 1..N_ERR {
+                    cell[c * N_ERR + l] += e[l] / m;
+                }
+                item[i * N_ERR] += cell[c * N_ERR];
+            }
+            for l in 1..N_ERR {
+                item[i * N_ERR + l] = e[l];
+            }
+        }
+        (cell, item)
+    }
+
+    /// Re-weigh the error-guided picks by the current error map (wanted or occupied cells with any error).
+    fn refresh_guide(&mut self) {
+        let (cell, _) = self.error_map();
+        let d = self.d;
+        self.guide_cells.clear();
+        self.guide_cum.clear();
+        let mut acc = 0f64;
+        for c in 0..d.tbits.len() {
+            if !d.want[c] && self.owner[c] < 0 {
+                continue;
+            }
+            let e: f64 = cell[c * N_ERR..(c + 1) * N_ERR].iter().sum();
+            if e > 0.0 {
+                acc += e;
+                self.guide_cells.push(c as u32);
+                self.guide_cum.push(acc);
+            }
+        }
+    }
+
+    /// A cell for a move to work at: with probability p_guide drawn in proportion to the local error, else a
+    /// uniform wanted cell.  (No Hastings correction: the guide is a fixed-for-a-while proposal bias in an annealed
+    /// search, like retile's own; the energy still decides every move.)
+    fn pick_cell(&self, rng: &mut Rng) -> i32 {
+        let d = self.d;
+        if !self.guide_cum.is_empty() && rng.f64() < d.p_guide {
+            let r = rng.f64() * self.guide_cum.last().unwrap();
+            return self.guide_cells[self.guide_cum.partition_point(|&w| w <= r).min(self.guide_cum.len() - 1)] as i32;
+        }
+        d.want_cells[rng.below(d.want_cells.len())] as i32
+    }
+
+    /// A live part for a move: the owner of an error-guided cell (p_guide), else uniform.
+    fn pick_item(&self, rng: &mut Rng) -> usize {
+        if !self.guide_cum.is_empty() && rng.f64() < self.d.p_guide {
+            let r = rng.f64() * self.guide_cum.last().unwrap();
+            let c = self.guide_cells[self.guide_cum.partition_point(|&w| w <= r).min(self.guide_cum.len() - 1)];
+            let j = self.owner[c as usize];
+            if j >= 0 {
+                return j as usize;
+            }
+        }
+        self.live[rng.below(self.live.len())]
+    }
+
     fn bad_cells(&self) -> i64 {
         self.cur
             .iter()
@@ -2037,7 +2143,7 @@ fn retile(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
     if d.want_cells.is_empty() {
         return None;
     }
-    let c = d.want_cells[rng.below(d.want_cells.len())] as i32;
+    let c = st.pick_cell(rng);
     let (cy, cx, cz) = (c / (d.x * d.z), (c / d.z) % d.x, c % d.z);
     let hy = if rng.f64() < 0.5 { 1 } else { 3 };
     let hx = 1 + rng.below(3) as i32;
@@ -2087,7 +2193,7 @@ fn merge(st: &mut State, rng: &mut Rng) -> Option<Undo> {
     if st.live.is_empty() {
         return None;
     }
-    let i = st.live[rng.below(st.live.len())];
+    let i = st.pick_item(rng);
     let a = *st.item(i);
     let d = st.d;
     let ao = &d.opts[a.opt];
@@ -2136,7 +2242,7 @@ fn swap(st: &mut State, rng: &mut Rng) -> Option<Undo> {
     if st.live.is_empty() {
         return None;
     }
-    let i = st.live[rng.below(st.live.len())];
+    let i = st.pick_item(rng);
     let a = *st.item(i);
     let d = st.d;
     let g = d.opt_variants[a.opt];
@@ -2175,7 +2281,7 @@ fn hinge_swap(st: &mut State, rng: &mut Rng) -> Option<Undo> {
     // sample a few live items and pick one whose opt has a hinge pair
     let mut i = usize::MAX;
     for _ in 0..8 {
-        let cand = st.live[rng.below(st.live.len())];
+        let cand = st.pick_item(rng);
         let a = st.item(cand);
         if d.hinge_by_a.contains_key(&a.opt) {
             i = cand;
@@ -2244,7 +2350,7 @@ fn masonry_shift(st: &mut State, rng: &mut Rng) -> Option<Undo> {
     if d.region_label.is_empty() || st.live.is_empty() {
         return None;
     }
-    let i = st.live[rng.below(st.live.len())];
+    let i = st.pick_item(rng);
     let a = *st.item(i);
     let o = &d.opts[a.opt];
     // long rectangular box
@@ -2319,7 +2425,7 @@ fn snot_face(st: &mut State, rng: &mut Rng) -> Option<Undo> {
         return None;
     }
     let d = st.d;
-    let i = st.live[rng.below(st.live.len())];
+    let i = st.pick_item(rng);
     let a = *st.item(i);
     let rows = &d.snot_by_opt[a.opt];
     if rows.is_empty() {
@@ -2409,7 +2515,7 @@ fn retop(st: &mut State, groups: &[Vec<usize>], rng: &mut Rng) -> Option<Undo> {
     }
     let d = st.d;
     for _ in 0..8 {
-        let i = st.live[rng.below(st.live.len())];
+        let i = st.pick_item(rng);
         let a = *st.item(i);
         let g = &groups[a.opt];
         if g.is_empty() || !top_exposed(st, i) {
@@ -2434,7 +2540,7 @@ fn split(st: &mut State, rng: &mut Rng) -> Option<Undo> {
         return None;
     }
     let d = st.d;
-    let i = st.live[rng.below(st.live.len())];
+    let i = st.pick_item(rng);
     let a = *st.item(i);
     let o = &d.opts[a.opt];
     if o.boxk < 0 || (o.w < 2 && o.d < 2) {
@@ -2473,7 +2579,7 @@ fn stack(st: &mut State, rng: &mut Rng) -> Option<Undo> {
         return None;
     }
     let d = st.d;
-    let i = st.live[rng.below(st.live.len())];
+    let i = st.pick_item(rng);
     let a = *st.item(i);
     let o = &d.opts[a.opt];
     if o.boxk == BRICK && o.h == 3 {
@@ -2523,7 +2629,7 @@ fn motif(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
     if d.motif_cum.is_empty() || d.want_cells.is_empty() {
         return None;
     }
-    let c = d.want_cells[rng.below(d.want_cells.len())] as i32;
+    let c = st.pick_cell(rng);
     let (cy, cx, cz) = (c / (d.x * d.z), (c / d.z) % d.x, c % d.z);
     // on the target's pitched roof or flat tops, that surface's patterns (when there are any); elsewhere the rest
     let t = if d.cell_type.is_empty() { 0 } else { d.cell_type[c as usize].clamp(0, 2) as usize };
@@ -2704,6 +2810,9 @@ unsafe fn run(p: &Problem) -> i32 {
         if p.w_big_end >= 0.0 {
             filler.w_big = d.w_big + (p.w_big_end - d.w_big) * it as f64 / (iters - 1).max(1) as f64;
         }
+        if d.p_guide > 0.0 && p.guide_every > 0 && it % p.guide_every as i64 == 0 {
+            st.refresh_guide();
+        }
         let before = if d.opt_watch.is_empty() { [0f64; 6] } else { terms(&st) };
         let (m, u) = match propose(&mut st, &mut filler, &groups, &mut rng) {
             Some(u) => u,
@@ -2754,6 +2863,19 @@ unsafe fn run(p: &Problem) -> i32 {
         *p.out_z.add(k) = it.z;
     }
     *p.out_n = n as i32;
+    if !p.err_cell.is_null() {
+        let (cell, item) = st.error_map();
+        for (k, v) in cell.iter().enumerate() {
+            *p.err_cell.add(k) = *v;
+        }
+        if !p.err_item.is_null() {
+            for (k, &i) in st.live.iter().take(n).enumerate() {
+                for l in 0..N_ERR {
+                    *p.err_item.add(k * N_ERR + l) = item[i * N_ERR + l];
+                }
+            }
+        }
+    }
     let kl = st.kl();
     let info = [
         e,
@@ -2814,5 +2936,5 @@ pub unsafe extern "C" fn e2l_sample(p: *const Problem) -> i32 {
 /// The layout version: Python checks it before calling.
 #[no_mangle]
 pub extern "C" fn e2l_abi() -> i32 {
-    16
+    17
 }
