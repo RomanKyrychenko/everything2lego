@@ -17,9 +17,10 @@ FIXABLE = (0, 2, 3)          # native.ERR_LAYERS: shape, support, direction
 
 
 def find_regions(err_cell: np.ndarray, want: np.ndarray, k: int = 8, q: float = 0.9,
-                 max_side: int = 12) -> list[tuple[slice, slice, slice]]:
+                 max_side: tuple = (36, 16, 16)) -> list[tuple[slice, slice, slice]]:
     """The k worst patches, worst first: cells above the q-quantile of fixable error, joined across a cell, each
-    boxed (at most max_side cells a side, around its worst cell)."""
+    boxed (at most max_side cells along y, x, z -- plates, studs, studs: 36 plates is 12 bricks -- around its worst
+    cell)."""
     e = np.where(want, err_cell[..., list(FIXABLE)].sum(-1), 0.0)
     if not (e > 0).any():
         return []
@@ -33,10 +34,10 @@ def find_regions(err_cell: np.ndarray, want: np.ndarray, k: int = 8, q: float = 
     for i in np.argsort(-total)[:k]:
         sl = ndimage.find_objects(lab == i + 1)[0]
         box = []
-        for s, c, size in zip(sl, worst[i], want.shape):
+        for s, c, size, m in zip(sl, worst[i], want.shape, max_side):
             a, b = max(0, s.start - 1), min(size, s.stop + 1)
-            if b - a > max_side:
-                a = max(0, min(c - max_side // 2, size - max_side)); b = a + max_side
+            if b - a > m:
+                a = max(0, min(c - m // 2, size - m)); b = a + m
             box.append(slice(a, b))
         out.append(tuple(box))
     return out
