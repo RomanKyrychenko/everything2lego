@@ -1694,7 +1694,7 @@ impl<'a> State<'a> {
     }
 
     /// Top studs of item j with nothing above them and nothing bound to come: the cell above is empty and outside
-    /// the target, or less than half in it (the filler may leave such a cell empty), or off the grid.
+    /// the target, or less than half in it (the filler may leave such a cell empty), or shows, or off the grid.
     fn count_bare_top(&self, j: usize) -> f64 {
         let d = self.d;
         let it = self.item(j);
@@ -1705,7 +1705,9 @@ impl<'a> State<'a> {
             if y >= d.h { return true; }
             if !d.inside(y, x, z) { return true; }
             let c = d.idx(y, x, z);
-            self.owner[c] < 0 && (!d.want[c] || d.fill[c] < 0.5)   // a barely-wanted cell (a roof's slant) may stay empty
+            // a barely-wanted cell (a roof's slant) may stay empty; a wanted one that shows and stayed empty is a hole in
+            // the surface, and the stud under it shows (a hole inside the model hides its studs)
+            self.owner[c] < 0 && (!d.want[c] || d.fill[c] < 0.5 || d.visible[c])
         }).count() as f64
     }
 
@@ -3105,6 +3107,21 @@ unsafe fn run(p: &Problem) -> i32 {
         *p.out_z.add(k) = it.z;
     }
     *p.out_n = n as i32;
+    {
+        // how much of the shape + direction error is above what no part can remove (Filler::floor)
+        let (cell, _) = st.error_map();
+        let (mut sd, mut fl, mut head) = (0f64, 0f64, 0f64);
+        for c in 0..d.tbits.len() {
+            let e = cell[c * N_ERR] + cell[c * N_ERR + 3];
+            sd += e;
+            if filler.floor[c].is_finite() {
+                fl += filler.floor[c].min(e);
+                head += (e - filler.floor[c]).max(0.0);
+            }
+        }
+        eprintln!("shape + direction error {:.0}: floor (no part does better) {:.0}, headroom {:.0} ({:.0} %), no part fits {:.0}",
+                  sd, fl, head, 100.0 * head / sd.max(1e-9), sd - fl - head);
+    }
     if !p.err_cell.is_null() {
         let (cell, item) = st.error_map();
         for (k, v) in cell.iter().enumerate() {
