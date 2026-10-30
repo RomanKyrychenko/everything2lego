@@ -49,7 +49,8 @@ def _cells(p) -> np.ndarray:
     """(n, 3) y, x, z cells a placement occupies (its yaw's cells, as the native walk maps it)."""
     if not _CELLS:
         from .sampler import vocabulary
-        for v in vocabulary():
+        from .snot_options import with_sideways
+        for v in with_sideways(vocabulary()):     # sideways yaws are codes of their own (1001...), never a yaw
             for o in v.orients:
                 _CELLS.setdefault((v.part.ldraw, o.rot), o.cells)
     c = _CELLS.get((p.part.ldraw, p.rotation_deg))

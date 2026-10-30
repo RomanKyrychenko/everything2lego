@@ -204,6 +204,7 @@ def main() -> None:
     ap.add_argument("--layer-bare", type=float, default=0.0, help="with --layers: exposed-stud weight during the layer stages, as a share of --bare-top-weight (a layer's top, which the next layer covers, never counts)")
     ap.add_argument("--rebuild-regions", type=int, default=0, help="after the build, rebuild its N worst regions (error map) on their own, the build around each locked, each kept when the whole energy falls; 0 = off")
     ap.add_argument("--region-iters", type=int, default=200000, help="with --rebuild-regions: steps per region")
+    ap.add_argument("--region-snot", action="store_true", help="with --rebuild-regions: the regions may also use sideways parts (snot_options)")
     ap.add_argument("--whole-share", type=float, default=0.5, help="with --layers: steps for optimising the whole after the layers, as a share of --iters (the layers take --iters between them)")
     ap.add_argument("--pattern-share", type=float, default=0.0, help="share of moves that place a building pattern mined from real sets (tools/learn/motifs.py); 0 = off")
     ap.add_argument("--prefer-big", type=str, default="0", help="the filler tries bigger parts first: + W * ln(footprint, studs^2) on each candidate -- longer / wider, not taller (the energy still decides); W0:W1 falls linearly from W0 to W1 over the run")
@@ -305,7 +306,7 @@ def main() -> None:
                              colour_share=a.target_colours)
         if a.rebuild_regions > 0:
             from everything2lego.region_rebuild import rebuild_worst, evaluate
-            kw = dict(weights=w, tile_boost=a.tile_boost, snot_boost=a.snot_boost, engine=a.engine, snot=a.snot,
+            kw = dict(weights=w, tile_boost=a.tile_boost, snot_boost=a.snot_boost, engine=a.engine, snot=a.snot or a.region_snot,
                       n_special=a.n_special, courses=a.slope_courses, colour_share=a.target_colours)
             _ps, rep = rebuild_worst(target, models, list(_ps), _info["_err_cell"], sample, k=a.rebuild_regions,
                                      iters=a.region_iters, seed=seed, **kw)
