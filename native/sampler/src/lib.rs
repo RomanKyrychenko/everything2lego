@@ -864,26 +864,30 @@ impl Data {
 
     /// The target's commonest colour over its cells, as the part is made in it.
     /// The colour the part is made in that is nearest the target over its cells (Lab distance summed): a 2x4 slope
-    /// over dark orange and reddish brown cells is reddish brown, not the red nearest dark orange alone.
+    /// over dark orange and reddish brown cells is reddish brown, not the red nearest dark orange alone.  Judged
+    /// first by the cells that show, as colour_cost charges them (a roof part over dark hidden cells was chosen
+    /// black and showed black); all its cells only break ties, so a hidden part still takes its surroundings' colour.
     fn colour_for(&self, o: &Opt, oy: i32, ox: i32, oz: i32, _counts: &mut Vec<u32>) -> i32 {
         let cols = &self.part_colours[o.part];
-        let mut best = (f64::INFINITY, -1i32);
+        let mut best = (f64::INFINITY, f64::INFINITY, -1i32);
         for &k in cols {
             let lab = &self.pal_lab[3 * k..3 * k + 3];
-            let mut s = 0f64;
-            for &(y, x, z, _, _) in &o.cells {
+            let (mut shown, mut all) = (0f64, 0f64);
+            for &(y, x, z, _, occ) in &o.cells {
                 let i = self.idx(oy + y, ox + x, oz + z);
                 if self.tcolour[i] >= 0 {
                     let t = &self.tlab[3 * i..3 * i + 3];
                     let (a, b, c) = ((t[0] - lab[0]) as f64, (t[1] - lab[1]) as f64, (t[2] - lab[2]) as f64);
-                    s += (a * a + b * b + c * c).sqrt();
+                    let e = (a * a + b * b + c * c).sqrt();
+                    all += e;
+                    if self.visible[i] { shown += e * occ; }
                 }
             }
-            if s < best.0 {
-                best = (s, k as i32);
+            if (shown, all) < (best.0, best.1) {
+                best = (shown, all, k as i32);
             }
         }
-        if best.1 >= 0 { best.1 } else { self.snap[o.part * self.n_col] }
+        if best.2 >= 0 { best.2 } else { self.snap[o.part * self.n_col] }
     }
 }
 
