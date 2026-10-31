@@ -115,6 +115,7 @@ class Problem(C.Structure):
         ("p_guide", C.c_double), ("guide_every", C.c_int32), ("err_cell", _P(C.c_double)), ("err_item", _P(C.c_double)),
         ("p_resolve", C.c_double), ("p_orient", C.c_double),                # re-solve / orient move shares (from retile's)
         ("lock", _P(C.c_uint8)),                                        # cells whose parts stay as they are (null: none)
+        ("col_max", C.c_double),                                        # colour error cap (0 = off)
     ]
 
 
@@ -460,7 +461,7 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         n_conn=len(CONNECTORS), fits=_ptr(arr(FITS, np.uint8), C.c_uint8),
         halo_start=_ptr(arr(hs, np.int32), C.c_int32),
         halo_yxz=_ptr(arr(np.concatenate(halo), np.int32), C.c_int32),
-        w_cov=weights.cov, w_col=weights.col, w_loc=weights.loc, w_glob=weights.glob,
+        w_cov=weights.cov, w_col=weights.col, col_max=weights.col_max, w_loc=weights.loc, w_glob=weights.glob,
         w_sup=weights.sup, w_side=weights.side,
         n_ref=stats.density * float(target.fill.sum()), w_dens=weights.dens, dens_sd=stats.density_sd,
         p_ref=stats.part_density * float(target.fill.sum()), w_cnt=weights.cnt, cnt_sd=stats.part_density_sd,

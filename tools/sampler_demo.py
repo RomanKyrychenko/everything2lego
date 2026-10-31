@@ -218,6 +218,7 @@ def main() -> None:
     ap.add_argument("--bare-top-weight", type=float, default=0.0, help="energy per top stud left exposed where nothing will sit (cell above outside the target): tiles / slopes instead of studded parts there")
     ap.add_argument("--stack-weight", type=float, default=0.0, help="weight of n_bricks * KL(lined-up joints share || real 0.093): bricks overlap like real brickwork")
     ap.add_argument("--n-special", type=int, default=160, help="special (non plain-box) parts the build may use: the N most widely used by sets of its kind (vocabulary.json has ~1100)")
+    ap.add_argument("--colour-max", type=float, default=0.0, help="Lab distance past which a part's colour error on a showing cell costs 10x more: a part not made near the area's colour is all but kept out (0 = off)")
     ap.add_argument("--shape-weight", type=float, default=16.0, help="energy per cell wholly wrong in shape (Weights.cov is 4: the shape term is then ~3 %% of the energy and statistics outweigh any sub-cell fit; 16 fits closer and still looks clean, 32+ adds busy detail)")
     ap.add_argument("--surface-fit", type=float, default=0.0, help="weight the shape term by distance to the mesh's surface (surface_fit.py; value = alpha, cost per stud of overhang; 0 = plain sample count)")
     ap.add_argument("--whole-cells", action="store_true", help="match the mesh at whole-cell detail (every target cell a full cube) instead of 4x4x4 sub-cells: round 1x1 plates no longer win by tracing tiny curves")
@@ -291,6 +292,7 @@ def main() -> None:
         w.style = a.style; w.size = a.size_weight; w.sideways = a.sideways_weight; w.p_sideways = a.sideways_share; w.surface = a.surface_fit; w.big, w.big_end = (float(a.prefer_big.split(':')[0]), float(a.prefer_big.split(':')[1]) if ':' in a.prefer_big else -1.0); w.motif = a.pattern_share; w.surface_mix = a.surface_mix; w.roof_mix = a.roof_mix; w.guide = a.guide; w.resolve = a.resolve_share; w.orient = a.orient_share; w.flat_mix = a.flat_mix; w.stack = a.stack_weight; w.bare_top = a.bare_top_weight; w.direction = a.direction_weight
         if a.sup_weight > 0: w.sup = a.sup_weight
         if a.shape_weight is not None: w.cov = a.shape_weight
+        w.col_max = a.colour_max
         init, left = init_placements, iters
         if a.layers > 1:
             # bottom-up: each stage builds the target up to its cut, from the stages below; the mesh's shape stays

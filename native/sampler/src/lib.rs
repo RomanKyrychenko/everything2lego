@@ -226,6 +226,7 @@ pub struct Problem {
     pub p_resolve: f64, // shares of the re-solve and orient moves (taken from retile's)
     pub p_orient: f64,
     pub lock: *const u8, // H*X*Z: cells whose parts no move may change (a region rebuilt inside a fixed build); null = none
+    pub col_max: f64, // Lab distance past which a showing cell's colour error costs COL_FAR times more (0 = off)
 }
 
 /// Error map layers: shape, colour, support (unsupported, bare side connectors, exposed studs), surface direction,
@@ -340,6 +341,7 @@ struct Data {
     opt_variants: Vec<i32>,
     w_cov: f64,
     w_col: f64,
+    col_max: f64,
     w_loc: f64,
     w_glob: f64,
     w_sup: f64,
@@ -540,6 +542,7 @@ impl Data {
             opt_variants,
             w_cov: p.w_cov,
             w_col: p.w_col,
+            col_max: p.col_max,
             w_loc: p.w_loc,
             w_glob: p.w_glob,
             w_sup: p.w_sup,
@@ -719,6 +722,12 @@ impl Data {
         (r * self.scols[a] + c) as usize
     }
 
+    /// One showing cell's colour error: its Lab distance, and past col_max COL_FAR times more, so a part whose
+    /// colour is plainly not the area's (a grey slope on a brown roof) is all but kept out.
+    fn col_err(&self, e: f64) -> f64 {
+        if self.col_max > 0.0 && e > self.col_max { e + COL_FAR * (e - self.col_max) } else { e }
+    }
+
     /// Colour error of the cells that show, if this option took this colour there.
     fn colour_cost(&self, o: &Opt, oy: i32, ox: i32, oz: i32, colour: i32) -> f64 {
         let lab = &self.pal_lab[3 * colour as usize..3 * colour as usize + 3];
@@ -728,7 +737,7 @@ impl Data {
             if self.visible[i] && self.tcolour[i] >= 0 {
                 let t = &self.tlab[3 * i..3 * i + 3];
                 let (a, b, c) = ((t[0] - lab[0]) as f64, (t[1] - lab[1]) as f64, (t[2] - lab[2]) as f64);
-                s += (a * a + b * b + c * c).sqrt() * occ;
+                s += self.col_err((a * a + b * b + c * c).sqrt()) * occ;
             }
         }
         s
@@ -880,7 +889,7 @@ impl Data {
                     let (a, b, c) = ((t[0] - lab[0]) as f64, (t[1] - lab[1]) as f64, (t[2] - lab[2]) as f64);
                     let e = (a * a + b * b + c * c).sqrt();
                     all += e;
-                    if self.visible[i] { shown += e * occ; }
+                    if self.visible[i] { shown += self.col_err(e) * occ; }
                 }
             }
             if (shown, all) < (best.0, best.1) {
@@ -895,6 +904,8 @@ impl Data {
 // the proposal network (everything2lego/proposals.py: the same window,
 // features and layers)
 // ---------------------------------------------------------------------------
+
+const COL_FAR: f64 = 10.0;
 
 const WY: (i32, i32) = (-1, 4);
 const WX: (i32, i32) = (-2, 4);

@@ -524,6 +524,7 @@ class Weights:
     entropy_glob3: float = 0.0  # anti mode-collapse: energy -= entropy_glob3 * H(kl3) nats
     revkl_glob3: float = 0.0    # coverage: energy -= revkl_glob3 * E_pref3[log(ours+eps)] (anti mode-diffusion)
     col: float = 0.04
+    col_max: float = 0.0      # Lab distance past which a showing cell's colour error costs 10x more (0 = off; lib.rs col_err)
     loc: float = 1.0
     glob: float = 1.0
     sup: float = 40.0         # a part no stud holds falls off: all but forbidden
@@ -817,7 +818,10 @@ class State:
         ok = ~np.isnan(tl).any(axis=1)
         if not ok.any():
             return 0.0
-        return float((np.linalg.norm(tl[ok] - self.lab[colour], axis=1) * o[vis][ok]).sum())
+        e = np.linalg.norm(tl[ok] - self.lab[colour], axis=1)
+        if self.w.col_max > 0:
+            e = e + 10.0 * np.maximum(e - self.w.col_max, 0.0)
+        return float((e * o[vis][ok]).sum())
 
     def fid_delta(self, ys, xs, zs, bits) -> float:
         """Change in shape error from filling these empty cells so: per cell (wrong samples / 64)^2, so a hole costs
