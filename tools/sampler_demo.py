@@ -65,7 +65,7 @@ def target_from_mesh(path: str, studs: int, shell: int, kind: str | None = None,
                      seg_label: np.ndarray | None = None,
                      seg_kind_of: dict[int, str] | None = None,
                      carve: np.ndarray | None = None,
-                     smooth: int = 0) -> Target:
+                     smooth: int = 0, rim: int | None = None) -> Target:
     if smooth > 0:
         import trimesh, tempfile, os
         m = trimesh.load(path, force="mesh", process=False)
@@ -97,14 +97,19 @@ def target_from_mesh(path: str, studs: int, shell: int, kind: str | None = None,
         inner = binary_erosion(inner, structure=np.ones((3, 3, 3), bool) & np.array(
             [[[0, 0, 0], [0, 1, 0], [0, 0, 0]], [[0, 1, 0], [1, 1, 1], [0, 1, 0]], [[0, 0, 0], [0, 1, 0], [0, 0, 0]]], bool))
     want = (solid & ~inner) | ((frac > 0.1) & ~inner)
-    # the base: layer 0 is the model's full x-z shadow, one stud wider than
-    # the model, so the build sits on a plate that reaches past its walls.
+    # the base: layer 0 is the model's full x-z shadow, `rim` studs wider than
+    # the model, so the build sits on a plate that reaches past its walls
+    # (None: 0 when the mesh brings its own ground -- its bottom layer covers
+    # most of the shadow -- since the rim is then shape the mesh doesn't have).
     # Vehicles don't want a solid chassis plate — they sit on wheels at the
     # corners; let the mesh decide what layer 0 contains.
     shadow = want.any(0)
     from scipy.ndimage import binary_dilation as _dil
+    if rim is None:
+        rim = 0 if (frac[0][shadow] >= 0.5).mean() >= 0.5 else 1    # watermill 82 %, a mesh standing on nothing ~2 %
+        print(f"base rim {rim} (own ground covers {(frac[0][shadow] >= 0.5).mean():.0%} of the shadow)")
     if kind != "road_vehicle":
-        base = _dil(shadow, iterations=1)
+        base = _dil(shadow, iterations=rim) if rim else shadow   # iterations=0 would dilate to a fixed point
         want[0] |= base
         bits[0] = np.where(base, FULL, bits[0])
     if stand > 0:
@@ -218,6 +223,7 @@ def main() -> None:
     ap.add_argument("--sup-weight", type=float, default=0.0, help="energy per unsupported part (0 = keep the weights' own: 40 default, 100 learned); raise it when --size-weight would trade support for bigger parts")
     ap.add_argument("--learned-weights", action="store_true", help="energy weights fitted to real sets (Weights.learned(kind)) instead of the hand-set defaults")
     ap.add_argument("--colour-smooth", type=float, default=0.0, help="Potts-MRF colour smoothing of the target (colour_mrf.smooth beta, Lab units; ~40-80): fewer colour specks, so same-colour parts can merge")
+    ap.add_argument("--base-rim", type=int, default=None, help="studs the base plate (layer 0) reaches past the model's shadow; default: 0 when the mesh's bottom layer is its own ground, else 1")
     ap.add_argument("--stand", type=int, default=0, help="pad base plate by N studs (for figures or small objects)")
     ap.add_argument("--regions", default=None, help='JSON file mapping palette codes to kinds, e.g. {"0":"road_vehicle","4":"object"} — gives different sampler weights per colour region')
     ap.add_argument("--segmentation", default=None, help="npz from tools/segment_mesh.py: per-voxel region_kind (overrides --regions)")
@@ -255,7 +261,7 @@ def main() -> None:
         d = np.load(a.depth_carve, allow_pickle=True)
         extra = d["carve"]
         carve = extra if carve is None else (carve | extra)
-    target = target_from_mesh(a.mesh, a.studs, a.shell, a.kind, stand=a.stand, regions=regions,
+    target = target_from_mesh(a.mesh, a.studs, a.shell, a.kind, stand=a.stand, rim=a.base_rim, regions=regions,
                               seg_label=seg_label, seg_kind_of=seg_kind_of, carve=carve,
                               smooth=a.smooth)
     if a.whole_cells:
