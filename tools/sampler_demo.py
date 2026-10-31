@@ -218,7 +218,7 @@ def main() -> None:
     ap.add_argument("--bare-top-weight", type=float, default=0.0, help="energy per top stud left exposed where nothing will sit (cell above outside the target): tiles / slopes instead of studded parts there")
     ap.add_argument("--stack-weight", type=float, default=0.0, help="weight of n_bricks * KL(lined-up joints share || real 0.093): bricks overlap like real brickwork")
     ap.add_argument("--n-special", type=int, default=160, help="special (non plain-box) parts the build may use: the N most widely used by sets of its kind (vocabulary.json has ~1100)")
-    ap.add_argument("--shape-weight", type=float, default=None, help="energy per cell wholly wrong in shape (Weights.cov, default 4); the shape term is ~3 %% of the energy at 4, so statistics outweigh any sub-cell fit")
+    ap.add_argument("--shape-weight", type=float, default=16.0, help="energy per cell wholly wrong in shape (Weights.cov is 4: the shape term is then ~3 %% of the energy and statistics outweigh any sub-cell fit; 16 fits closer and still looks clean, 32+ adds busy detail)")
     ap.add_argument("--surface-fit", type=float, default=0.0, help="weight the shape term by distance to the mesh's surface (surface_fit.py; value = alpha, cost per stud of overhang; 0 = plain sample count)")
     ap.add_argument("--whole-cells", action="store_true", help="match the mesh at whole-cell detail (every target cell a full cube) instead of 4x4x4 sub-cells: round 1x1 plates no longer win by tracing tiny curves")
     ap.add_argument("--sup-weight", type=float, default=0.0, help="energy per unsupported part (0 = keep the weights' own: 40 default, 100 learned); raise it when --size-weight would trade support for bigger parts")
