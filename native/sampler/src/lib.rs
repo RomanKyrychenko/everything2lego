@@ -227,6 +227,7 @@ pub struct Problem {
     pub p_orient: f64,
     pub lock: *const u8, // H*X*Z: cells whose parts no move may change (a region rebuilt inside a fixed build); null = none
     pub col_max: f64, // Lab distance past which a showing cell's colour error costs COL_FAR times more (0 = off)
+    pub p_echo: f64,  // share of the echo move (taken from retile's): a part copied along the target's self-similar runs
 }
 
 /// Error map layers: shape, colour, support (unsupported, bare side connectors, exposed studs), surface direction,
@@ -389,6 +390,8 @@ struct Data {
     p_guide: f64,
     p_resolve: f64,
     p_orient: f64,
+    p_echo: f64,
+    sim: Vec<u32>,       // per cell: bit k set when the target around it matches the target around it + ECHO_T[k]
     lock: Vec<bool>,                                      // H*X*Z (empty when none)
     w_surf: f64,
     n_pclass: usize,
@@ -599,6 +602,8 @@ impl Data {
             p_guide: p.p_guide,
             p_resolve: p.p_resolve,
             p_orient: p.p_orient,
+            p_echo: p.p_echo,
+            sim: Vec::new(),
             lock: if p.lock.is_null() { Vec::new() } else { v(p.lock, n).iter().map(|&b| b != 0).collect() },
             w_surf: if p.cell_type.is_null() { 0.0 } else { p.w_surf },
             n_pclass: p.n_pclass.max(0) as usize,
@@ -645,6 +650,9 @@ impl Data {
             let m = *d.dir_start.last().unwrap();
             let raw = v(p.dir_rows, m * 7);
             d.dir_rows = (0..m).map(|r| [raw[7 * r], raw[7 * r + 1], raw[7 * r + 2], raw[7 * r + 3], raw[7 * r + 4], raw[7 * r + 5], raw[7 * r + 6]]).collect();
+        }
+        if d.p_echo > 0.0 {
+            d.sim = self_similarity(&d);
         }
         d.fid0 = if d.w_in.is_empty() { d.tbits.iter().map(|t| miss(t.count_ones())).sum() }
                  else { (0..n).map(|c| (0..64).filter(|&b| d.tbits[c] >> b & 1 == 1).map(|b| d.w_in[c * 64 + b] as f64).sum::<f64>()).sum::<f64>() / NSAMP };
@@ -3155,7 +3163,139 @@ fn motif(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
     Some(Undo::Retile { added, removed })
 }
 
-const MOVES: [&str; 14] = ["sideways", "masonry", "hinge", "swap", "re-top", "split", "stack", "merge", "retile", "pattern", "re-solve", "orient", "edge run", "curve fit"];
+/// Translations the target may repeat under, (dy, dx, dz): one stud along x or z, rising or falling up to a brick
+/// (a stair or a slanted surface repeats so), or straight up a plate to a brick (a wall's courses).
+const ECHO_T: [(i32, i32, i32); 17] = [(-3, 1, 0), (-2, 1, 0), (-1, 1, 0), (0, 1, 0), (1, 1, 0), (2, 1, 0), (3, 1, 0),
+    (-3, 0, 1), (-2, 0, 1), (-1, 0, 1), (0, 0, 1), (1, 0, 1), (2, 0, 1), (3, 0, 1), (1, 0, 0), (2, 0, 0), (3, 0, 0)];
+
+/// The target's self-similarity: for every wanted cell and translation t, whether the 3x3x3 cells around it match
+/// those around it + t -- sample masks within 6 % of the window's samples, the colours that show within the colour
+/// cap (12 when it is off).  Runs of such cells are where the target repeats, whatever the object.
+fn self_similarity(d: &Data) -> Vec<u32> {
+    let n = d.tbits.len();
+    let col_tol = if d.col_max > 0.0 { d.col_max } else { 12.0 };
+    let max_diff = (27.0 * 64.0 * 0.06) as u32;
+    let at = |y: i32, x: i32, z: i32| if d.inside(y, x, z) { Some(d.idx(y, x, z)) } else { None };
+    let mut sim = vec![0u32; n];
+    for c in 0..n {
+        if !d.want[c] || d.fill[c] < 0.5 {
+            continue;
+        }
+        let ci = c as i32;
+        let (y, x, z) = (ci / (d.x * d.z), (ci / d.z) % d.x, ci % d.z);
+        'tr: for (k, &(ty, tx, tz)) in ECHO_T.iter().enumerate() {
+            let (mut diff, mut ok) = (0u32, false);
+            for oy in -1..=1 {
+                for ox in -1..=1 {
+                    for oz in -1..=1 {
+                        let p = at(y + oy, x + ox, z + oz);
+                        let q = at(y + ty + oy, x + tx + ox, z + tz + oz);
+                        if oy == 0 && ox == 0 && oz == 0 {
+                            ok = q.map_or(false, |q| d.want[q] && d.fill[q] >= 0.5);
+                            if !ok { continue 'tr; }
+                        }
+                        let (bp, bq) = (p.map_or(0, |p| d.tbits[p]), q.map_or(0, |q| d.tbits[q]));
+                        diff += (bp ^ bq).count_ones();
+                        if diff > max_diff { continue 'tr; }
+                        if let (Some(p), Some(q)) = (p, q) {
+                            if d.visible[p] && d.visible[q] && d.tcolour[p] >= 0 && d.tcolour[q] >= 0 {
+                                let (a, b) = (&d.tlab[3 * p..3 * p + 3], &d.tlab[3 * q..3 * q + 3]);
+                                let e = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt() as f64;
+                                if e > col_tol { continue 'tr; }
+                            }
+                        }
+                    }
+                }
+            }
+            if ok { sim[c] |= 1 << k; }
+        }
+    }
+    let wanted = (0..n).filter(|&c| d.want[c] && d.fill[c] >= 0.5).count();
+    eprintln!("self-similarity: {} of {} wanted cells repeat along some translation, {:.1} translations each",
+              sim.iter().filter(|&&b| b != 0).count(), wanted,
+              sim.iter().map(|b| b.count_ones() as f64).sum::<f64>() / wanted.max(1) as f64);
+    sim
+}
+
+/// Echo: a part copied along a run where the target repeats (Data::sim), every copy at the stride that keeps copies
+/// apart; the parts in the copies' way go, their other cells are filled again, and the energy decides as for any move.
+/// Where the target repeats the build can then change a whole run at once instead of row by row.
+fn echo(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
+    let d = st.d;
+    if d.sim.is_empty() || d.want_cells.is_empty() {
+        return None;
+    }
+    let j = st.owner[st.pick_cell(rng) as usize];
+    if j < 0 {
+        return None;
+    }
+    let tpl = *st.item(j as usize);
+    let o = &d.opts[tpl.opt];
+    let a = (tpl.y + o.first.0, tpl.x + o.first.1, tpl.z + o.first.2);
+    let ks: Vec<usize> = (0..ECHO_T.len()).filter(|&k| d.sim[d.idx(a.0, a.1, a.2)] >> k & 1 == 1).collect();
+    if ks.is_empty() {
+        return None;
+    }
+    let k = ks[rng.below(ks.len())];
+    let t = ECHO_T[k];
+    let stride = if t.1 != 0 { o.w } else if t.2 != 0 { o.d } else { (o.h + t.0 - 1) / t.0 };
+    // a copy n strides away: every unit step on the way between matching cells, the copy inside the grid and the
+    // target, off locked cells
+    let fits = |n: i32| -> bool {
+        let s = n.signum();
+        for u in 0..n.abs() * stride {
+            let from = if s > 0 { u } else { -(u + 1) };
+            let (y, x, z) = (a.0 + from * t.0, a.1 + from * t.1, a.2 + from * t.2);
+            if !d.inside(y, x, z) || d.sim[d.idx(y, x, z)] >> k & 1 == 0 { return false; }
+        }
+        let (oy, ox, oz) = (tpl.y + n * stride * t.0, tpl.x + n * stride * t.1, tpl.z + n * stride * t.2);
+        if oy < 0 || ox < 0 || oz < 0 || oy + o.h > d.h || ox + o.w > d.x || oz + o.d > d.z { return false; }
+        o.cells.iter().all(|&(cy, cx, cz, _, occ)| {
+            let c = d.idx(oy + cy, ox + cx, oz + cz);
+            !(occ >= 0.5 && d.tbits[c] == 0) && (d.lock.is_empty() || !d.lock[c])
+        })
+    };
+    const REACH: i32 = 6;
+    let fwd = (1..=REACH).take_while(|&n| fits(n)).count() as i32;
+    let back = (1..=REACH).take_while(|&n| fits(-n)).count() as i32;
+    if fwd + back == 0 {
+        return None;
+    }
+    let (nf, nb) = loop {
+        let (f, b) = (rng.below(fwd as usize + 1) as i32, rng.below(back as usize + 1) as i32);
+        if f + b > 0 { break (f, b); }
+    };
+    let ns: Vec<i32> = (-nb..=nf).filter(|&n| n != 0).collect();
+    let mut owners: Vec<usize> = Vec::new();
+    for &n in &ns {
+        for &(cy, cx, cz, _, _) in &o.cells {
+            let i = st.owner[d.idx(tpl.y + n * stride * t.0 + cy, tpl.x + n * stride * t.1 + cx, tpl.z + n * stride * t.2 + cz)];
+            if i >= 0 && i != j && !owners.contains(&(i as usize)) {
+                owners.push(i as usize);
+            }
+        }
+    }
+    let mut freed: Vec<(i32, i32, i32)> = Vec::new();
+    let mut removed = Vec::new();
+    for i in owners {
+        let it = *st.item(i);
+        for &(py, px, pz, _, _) in &d.opts[it.opt].cells {
+            freed.push((it.y + py, it.x + px, it.z + pz));
+        }
+        removed.push(st.remove(i));
+    }
+    let mut added = Vec::new();
+    for &n in &ns {
+        let (y, x, z) = (tpl.y + n * stride * t.0, tpl.x + n * stride * t.1, tpl.z + n * stride * t.2);
+        let colour = d.colour_for(o, y, x, z, &mut filler.colour_counts);
+        added.push(st.add(Item { opt: tpl.opt, colour, y, x, z }));
+    }
+    freed.retain(|&(y, x, z)| st.owner[d.idx(y, x, z)] < 0 && d.want[d.idx(y, x, z)]);
+    added.extend(filler.fill(st, rng, freed));
+    Some(Undo::Retile { added, removed })
+}
+
+const MOVES: [&str; 15] = ["sideways", "masonry", "hinge", "swap", "re-top", "split", "stack", "merge", "retile", "pattern", "re-solve", "orient", "edge run", "curve fit", "echo"];
 
 fn propose(st: &mut State, filler: &mut Filler, groups: &[Vec<usize>], boxes: &[Vec<usize>], rng: &mut Rng) -> Option<(usize, Undo)> {
     if !st.d.snot_by_opt.is_empty() && rng.f64() < 0.05 {        // only drawn when sideways building is on
@@ -3176,6 +3316,7 @@ fn propose(st: &mut State, filler: &mut Filler, groups: &[Vec<usize>], boxes: &[
     else if r < 0.60 { (7, merge(st, rng)) }
     else if r < 0.60 + st.d.p_resolve { return resolve(st, filler, rng) }
     else if r < 0.60 + st.d.p_resolve + st.d.p_orient { (11, orient(st, filler, boxes, rng)) }
+    else if r < 0.60 + st.d.p_resolve + st.d.p_orient + st.d.p_echo { (14, echo(st, filler, rng)) }
     else { (8, retile(st, filler, rng)) };
     u.map(|u| (m, u))
 }

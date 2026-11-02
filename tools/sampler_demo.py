@@ -216,6 +216,7 @@ def main() -> None:
     ap.add_argument("--prefer-big", type=str, default="0", help="the filler tries bigger parts first: + W * ln(footprint, studs^2) on each candidate -- longer / wider, not taller (the energy still decides); W0:W1 falls linearly from W0 to W1 over the run")
     ap.add_argument("--direction-weight", type=float, default=0.0, help="surface direction: energy per stud-top of outward face area * (1 - cos) vs the mesh's direction (slopes on slanted roofs, tiles on flat tops)")
     ap.add_argument("--bare-top-weight", type=float, default=0.0, help="energy per top stud left exposed where nothing will sit (cell above outside the target): tiles / slopes instead of studded parts there")
+    ap.add_argument("--echo-share", type=float, default=0.1, help="share of the echo move (from retile's): a part copied along runs where the target repeats itself, so a regular stretch changes at once (watermill, 2 seeds: energy -1.7 %%, shape 0.851 -> 0.842 %%, base exposed 22 -> 19 %%); 0 = off")
     ap.add_argument("--stack-weight", type=float, default=0.0, help="weight of n_bricks * KL(lined-up joints share || real 0.093): bricks overlap like real brickwork")
     ap.add_argument("--n-special", type=int, default=160, help="special (non plain-box) parts the build may use: the N most widely used by sets of its kind (vocabulary.json has ~1100)")
     ap.add_argument("--colour-max", type=float, default=12.0, help="Lab distance past which a part's colour error on a showing cell costs 10x more: a part not made near the area's colour is all but kept out (watermill, 2 seeds: colour error 4.9 -> 1.5 at 12, 2.8 at 20, shape +1 %% / 0; 0 = off)")
@@ -293,6 +294,7 @@ def main() -> None:
         if a.sup_weight > 0: w.sup = a.sup_weight
         if a.shape_weight is not None: w.cov = a.shape_weight
         w.col_max = a.colour_max
+        w.echo = a.echo_share
         init, left = init_placements, iters
         if a.layers > 1:
             # bottom-up: each stage builds the target up to its cut, from the stages below; the mesh's shape stays

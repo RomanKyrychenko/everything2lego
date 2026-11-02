@@ -550,6 +550,7 @@ class Weights:
     flat_mix: bool = False    # with roof_mix: the other tops too, vs real sets' flat tops (surface_mix.flat_mix)
     surface_mix: float = 0.0  # part mix by surface type: + w * sum_t n_t * KL(mix in t || real sets'); native only
     motif: float = 0.0        # share of moves that place a building pattern of real sets (motifs.py); native only
+    echo: float = 0.0         # share of the echo move: a part copied along the target's self-similar runs; native only
     stack: float = 0.0        # n_bricks * KL(share of bricks right on a same-footprint brick || p_stack); native only
     p_stack: float = 0.093    # real buildings' median (build_stats.py stacked_bricks)
     bare_top: float = 0.0     # energy per top stud with nothing above and nothing to come (outside the target); native only
