@@ -29,7 +29,7 @@ from typing import Optional
 
 import numpy as np
 
-ABI = 23
+ABI = 24
 INFO_LEN = 20
 ERR_LAYERS = ("shape", "colour", "support", "direction", "statistics")   # lib.rs N_ERR
 PATHS4_BUCKETS = 8
@@ -128,6 +128,7 @@ class Problem(C.Structure):
         ("p_phase", C.c_double),                                        # phase move share (from retile's)
         ("w_sem", C.c_double), ("cell_cat", _P(C.c_int8)), ("opt_cat", _P(C.c_int32)),   # semantic labels (semantic_labels.py)
         ("cell_part", _P(C.c_int16)),                                   # mesh part per cell (part_labels.py); null = off
+        ("cell_area", _P(C.c_int32)),                                   # semantic area per cell; null = per-cell bonus
     ]
 
 
@@ -662,6 +663,8 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         p.w_sem = weights.sem
         p.cell_cat = _ptr(arr(target.cell_cat.reshape(-1), np.int8), C.c_int8)
         p.opt_cat = _ptr(arr([cats.index(v.category) if v.category in cats else -1 for v, _ in opts], np.int32), C.c_int32)
+        if getattr(weights, "sem_area", True):
+            p.cell_area = _ptr(arr(semantic_areas(target.cell_cat).reshape(-1), np.int32), C.c_int32)
     if getattr(target, "cell_part", None) is not None:
         p.cell_part = _ptr(arr(target.cell_part.reshape(-1), np.int16), C.c_int16)
     if getattr(target, "lock", None) is not None:
@@ -684,6 +687,17 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
     inf["_err_cell"] = err_cell.reshape(H, X, Z, len(ERR_LAYERS))               # "_": kept out of info.json
     inf["_err_item"] = err_item[:n * len(ERR_LAYERS)].reshape(n, len(ERR_LAYERS))
     return items, inf, hist[:int(hist_n[0])].tolist()
+
+
+def semantic_areas(cell_cat: np.ndarray) -> np.ndarray:
+    """Per cell its semantic area (-1 none): the 6-connected runs of cells with one label, numbered from 0."""
+    from scipy import ndimage
+    area, n = np.full(cell_cat.shape, -1, np.int32), 0
+    for c in np.unique(cell_cat[cell_cat >= 0]):
+        lab, k = ndimage.label(cell_cat == c)
+        area[lab > 0] = lab[lab > 0] - 1 + n
+        n += k
+    return area
 
 
 if __name__ == "__main__":
