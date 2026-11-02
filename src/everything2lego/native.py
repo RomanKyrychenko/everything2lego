@@ -29,7 +29,7 @@ from typing import Optional
 
 import numpy as np
 
-ABI = 19
+ABI = 20
 INFO_LEN = 20
 ERR_LAYERS = ("shape", "colour", "support", "direction", "statistics")   # lib.rs N_ERR
 PATHS4_BUCKETS = 8
@@ -124,6 +124,7 @@ class Problem(C.Structure):
         ("w_conn", C.c_double),                                         # per part not joined to the ground layer
         ("w_coll", C.c_double), ("prot_start", _P(C.c_int32)), ("prot_rows", _P(C.c_int32)),   # collisions
         ("w_grip", C.c_double), ("p_grip", C.c_double),                 # bonding: parts gripped by just one part
+        ("p_mirror", C.c_double), ("mirror_opt", _P(C.c_int32)),        # mirror move share; per option its image (x, z)
     ]
 
 
@@ -232,6 +233,61 @@ def snap_table(vocab, n_col: int) -> np.ndarray:
         d = np.where(ok[None, :], dist, np.inf)
         near = d.argmin(axis=1)
         out[p] = np.where(ok, np.arange(n_col), near).astype(np.int32)
+    return out
+
+
+def mirror_table(opts) -> np.ndarray:
+    """(n_opt, 2) int32: per option, the option that is its mirror image across an x plane and across a z plane --
+    the same part turned when it is symmetric, else its chiral counterpart (BrickAgent's verified mirror pairs) --
+    found by geometry: same box, sample masks of the mirrored box within 6 %, studs and holes mirrored as tie-break;
+    -1 when the part has no known mirror or no option matches.  Sideways and slope-course options: -1."""
+    from .sampler import SUB
+    out = np.full((len(opts), 2), -1, np.int32)
+    try:
+        from brickagent import catalog
+        from brickagent.reflection import counterpart
+    except ImportError:
+        return out
+
+    def resolve(stem):
+        try:
+            return catalog.resolve(stem)
+        except (KeyError, ValueError):
+            return stem
+    plain = [i for i, (_, o) in enumerate(opts) if o.snot is None and o.stack is None]
+    by_stem: dict[str, list[int]] = {}
+    for i in plain:
+        by_stem.setdefault(resolve(opts[i][0].part.ldraw.removesuffix(".dat")), []).append(i)
+
+    def box(o):
+        b = np.zeros(o.size, np.uint64)
+        b[tuple(o.cells.T)] = o.bits
+        return ((b[..., None] >> np.arange(SUB ** 3, dtype=np.uint64)) & np.uint64(1)).astype(bool).reshape(*o.size, SUB, SUB, SUB)
+    boxes = {}
+    for stem, idx in by_stem.items():
+        try:
+            other = resolve(counterpart(stem)[0])
+        except (KeyError, ValueError):
+            continue                                    # no verified mirror geometry for this part
+        for i in idx:
+            o = opts[i][1]
+            a = boxes.setdefault(i, box(o))
+            for axis in range(2):                       # mirror the box: cells along x (axis 1) / z (axis 2), and samples
+                img = np.flip(a, (1 + axis, 4 + axis))
+                h, W, D = o.size
+                flip = (lambda x, z: (W - 1 - x, z)) if axis == 0 else (lambda x, z: (x, D - 1 - z))
+                top, bot = {flip(*t) for t in o.top}, {flip(*t) for t in o.bottom}
+                best = None
+                for j in by_stem.get(other, ()):
+                    q = opts[j][1]
+                    if q.size != o.size:
+                        continue
+                    miss = int((boxes.setdefault(j, box(q)) ^ img).sum())
+                    score = (miss, len(top ^ set(q.top)) + len(bot ^ set(q.bottom)))
+                    if miss <= 0.06 * img.size and (best is None or score < best[0]):
+                        best = (score, j)
+                if best is not None:
+                    out[i, axis] = best[1]
     return out
 
 
@@ -447,6 +503,9 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
     err_cell = np.zeros(H * X * Z * len(ERR_LAYERS))
     err_item = np.zeros(cap * len(ERR_LAYERS))
     keep += list(out.values()) + [out_n, info, hist, hist_n, err_cell, err_item]
+    if getattr(weights, "mirror", 0.0) > 0:                                      # mirror move: each option's image
+        mt = arr(mirror_table(opts), np.int32)
+        size_fields.update(p_mirror=weights.mirror, mirror_opt=_ptr(mt, C.c_int32))
     size_fields.update(p_guide=getattr(weights, "guide", 0.0), guide_every=max(1000, iters // 400),
                        err_cell=_ptr(err_cell, C.c_double), err_item=_ptr(err_item, C.c_double),
                        p_resolve=getattr(weights, "resolve", 0.0), p_orient=getattr(weights, "orient", 0.0))

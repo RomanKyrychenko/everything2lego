@@ -36,7 +36,7 @@ FEATURES = Path(os.environ.get("LEGO_DATA", "/Volumes/PRO-G40/lego_data")) / "an
 
 KINDS = Path(os.environ.get("LEGO_DATA", "/Volumes/PRO-G40/lego_data")) / "analysis" / "set_kinds.csv"
 KEEP_SHAPE = {"cov", "sil", "sup", "direction", "dir_thr", "sdist"}          # --staged stage 1: the shape terms and support
-MOVE_SHARES = {"resolve", "orient", "guide", "motif", "echo", "big", "big_end", "p_sideways", "p_stack", "tile_boost",
+MOVE_SHARES = {"resolve", "orient", "guide", "motif", "echo", "mirror", "big", "big_end", "p_sideways", "p_stack", "tile_boost",
                "snot_boost", "snot_bonus", "fid_cap", "part"}     # not energy terms: kept as they are
 
 
@@ -232,6 +232,7 @@ def main() -> None:
     ap.add_argument("--grip-weight", type=float, default=0.0, help="weight of n_parts * KL(share of parts joined through top and bottom to just one part || real 0.113): interlocked courses instead of columns and lone plates; 0 = off")
     ap.add_argument("--surface-distance", type=float, default=0.0, help="energy per stud-top of a part's face area per tolerance (half a stud across, a plate up) it stands past one tolerance off the target: LEGO surface sticking out (an antenna) costs by its surface, not its few sub-samples; 0 = off")
     ap.add_argument("--staged", action="store_true", help="three stages: shape alone (shape, outline, direction, support); then fewest parts with the shape held (iters / 2 more steps); then colour with the parts held")
+    ap.add_argument("--mirror-share", type=float, default=0.0, help="share of the mirror move (from retile's): a part's mirror image (same part or its chiral counterpart) placed across a plane the target is mirror-symmetric about around it; 0 = off")
     ap.add_argument("--echo-share", type=float, default=0.1, help="share of the echo move (from retile's): a part copied along runs where the target repeats itself, so a regular stretch changes at once (watermill, 2 seeds: energy -1.7 %%, shape 0.851 -> 0.842 %%, base exposed 22 -> 19 %%); 0 = off")
     ap.add_argument("--stack-weight", type=float, default=0.0, help="weight of n_bricks * KL(lined-up joints share || real 0.093): bricks overlap like real brickwork")
     ap.add_argument("--n-special", type=int, default=160, help="special (non plain-box) parts the build may use: the N most widely used by sets of its kind (vocabulary.json has ~1100)")
@@ -318,6 +319,7 @@ def main() -> None:
         if a.shape_weight is not None: w.cov = a.shape_weight
         w.col_max = a.colour_max
         w.echo = a.echo_share
+        w.mirror = a.mirror_share
         w.sdist = a.surface_distance
         w.conn = a.connect_weight
         w.coll = a.collision_weight

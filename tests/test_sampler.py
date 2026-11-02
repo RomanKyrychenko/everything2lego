@@ -165,6 +165,24 @@ def test_region_kind_overrides_object_kind():
 
 
 @pytest.mark.skipif(not native.available(), reason="native sampler not built")
+def test_mirror_images_and_mirror_walk_keeps_its_energy():
+    """A wing's mirror image is the other wing, a brick's is itself; a walk with mirror moves on a target symmetric
+    about x keeps its energy."""
+    pytest.importorskip("brickagent")
+    opts = [(v, o) for p in ("3001.dat", "41769.dat", "41770.dat") for v in [_vp(p)] for o in v.orients]
+    t = native.mirror_table(opts)
+    for i, (v, o) in enumerate(opts):
+        want = {"3001.dat": "3001.dat", "41769.dat": "41770.dat", "41770.dat": "41769.dat"}[v.part.ldraw]
+        assert all(opts[j][0].part.ldraw == want and opts[j][1].size == o.size for j in t[i])
+    want = np.zeros((6, 10, 6), dtype=bool); want[:4, 1:9, 1:5] = True; want[4:, 2:4, 2:4] = want[4:, 6:8, 2:4] = True
+    target = sampler.Target(want, np.full(want.shape, 4), want.copy())
+    w = sampler.Weights(); w.mirror = 0.3
+    _, info = sampler.sample(target, _models(), iters=3000, seed=2, k_models=1, warmup=50, n_special=60,
+                             engine="native", weights=w)
+    assert info["energy"] == pytest.approx(info["energy_recomputed"], rel=1e-6)
+
+
+@pytest.mark.skipif(not native.available(), reason="native sampler not built")
 def test_error_guided_walk_with_resolve_keeps_its_energy_and_maps_its_error():
     """With error-guided moves the energy kept move by move is still the recomputed one, and the error map has one
     row per placement and every cell's shape error where the build differs from the target."""
