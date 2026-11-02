@@ -270,23 +270,20 @@ def main() -> None:
     ap.add_argument("--p-alone", type=float, default=0.3, help="... and, the region seen alone, that class still first with this probability")
     ap.add_argument("--samesh", nargs=2, metavar=("FACE2LABEL", "SEGMENTED"), default=None,
                     help="SAMesh face2label.json and segmented.glb: mesh parts as candidates (each whole, and the colour regions inside each)")
+    ap.add_argument("--snap-geometry", action="store_true", help="label the snapped target (as sampler_demo --snap-geometry)")
+    ap.add_argument("--snap-pitches", default="all", choices=["all", "roof"])
     a = ap.parse_args()
     from everything2lego.sampler import vocabulary
-    from everything2lego.semantic_v2.mesh_target import MeshTarget
     from sampler_demo import target_from_mesh
-    t = target_from_mesh(a.mesh, a.studs, shell=2)       # the sampler's own target: its cells, as --studs builds them
-    mt = MeshTarget.from_path(a.mesh, max_studs=a.studs, n_samples=40000, min_island_cells=8)
+    # the sampler's own target: its cells, as --studs (and --snap-geometry) builds them, and its mesh and frame
+    t = target_from_mesh(a.mesh, a.studs, shell=2, snap_geometry=a.snap_geometry, snap_pitches=a.snap_pitches)
+    mt = t.mesh_target
     mesh, T = mt.mesh, mt.mesh_to_voxel.astype(np.float64)
     flab = cell_part = None
     if a.samesh:
-        import trimesh
-        from everything2lego.voxelize import load_mesh
-        from part_labels import cell_parts, face_labels
-        m0 = load_mesh(a.mesh)
-        m0.process(validate=True)                        # as part_labels: SAMesh's frame, MeshTarget's face order
-        assert len(m0.faces) == len(mesh.faces), "MeshTarget's mesh has other faces than load_mesh's"
-        flab, dist = face_labels(m0, json.loads(Path(a.samesh[0]).read_text()),
-                                 trimesh.load(a.samesh[1], force="mesh", process=False))
+        from part_labels import cell_parts, target_face_labels
+        flab, dist = target_face_labels(a.mesh, t, a.samesh[0], a.samesh[1], a.studs,
+                                        a.snap_pitches if a.snap_geometry else None)
         cell_part, part_ids, _ = cell_parts(t, mt, flab)
         part_rank = {int(l): i for i, l in enumerate(part_ids)}
         print(f"SAMesh: {len(np.unique(flab))} parts, face match max distance {dist.max():.2g}", flush=True)
