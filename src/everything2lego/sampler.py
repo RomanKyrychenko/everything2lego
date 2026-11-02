@@ -570,6 +570,7 @@ class Weights:
     direction: float = 0.0    # surface direction (surface_dir.py): outward faces' area * (1 - cos) vs the mesh; native only
     dir_thr: float = 0.5      # faces count as outward when cos > this (sides hidden by neighbours stay free)
     sem: float = 0.0          # energy -= sem per cell a part fills whose semantic label (Target.cell_cat) is its category; native only
+    sem_area: bool = True     # sem per area (6-connected run of one label) up to its smallest part's cells, not per cell
 
     @classmethod
     def learned(cls, kind: Optional[str] = None) -> "Weights":

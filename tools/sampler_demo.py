@@ -274,6 +274,7 @@ def main() -> None:
     ap.add_argument("--snap-pitches", default="all", choices=["all", "roof"], help="pitch set for --snap-geometry: all slope row pitches, or roof = without 39.6 (studless cheese caps only; target_snap.PRESETS)")
     ap.add_argument("--semantic", default=None, help="npz from tools/semantic_labels.py (same --studs): per-cell part category (window, door, wheel, fence, plant)")
     ap.add_argument("--semantic-weight", type=float, default=0.0, help="with --semantic: energy bonus per cell a part fills whose label is its Rebrickable category (and the filler proposes such parts there); 0 = off")
+    ap.add_argument("--semantic-mode", choices=("area", "cell"), default="area", help="area: the bonus per labelled area (6-connected run of one label) saturates once one part fills it; cell: per labelled cell any part fills")
     ap.add_argument("--parts", default=None, help="npz from tools/part_labels.py (same --studs): per-cell mesh part; mirror planes are found per part and mirror / echo map cells only within their part")
     ap.add_argument("--smooth", type=int, default=0, help="apply N iterations of Taubin smoothing to the mesh before voxelising (reduces 1-stud surface noise; 5-10 is a reasonable range)")
     a = ap.parse_args()
@@ -361,6 +362,7 @@ def main() -> None:
         w.coll = a.collision_weight
         w.grip = a.grip_weight
         w.sem = a.semantic_weight
+        w.sem_area = a.semantic_mode == "area"
         def build(w):
             init, left = init_placements, iters
             if a.layers > 1:

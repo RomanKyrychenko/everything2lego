@@ -268,3 +268,27 @@ def test_semantic_labels_draw_their_parts():
         return [(x, z) for v, o, c, y, x, z in got if v.category == "Windows and Doors"]
     assert windows(0.0) == []
     assert (2, 0) in windows(50.0)
+
+
+@pytest.mark.skipif(not native.available(), reason="native sampler not built")
+def test_semantic_area_bonus_saturates_with_one_part():
+    """A 24-cell window area: a 12-cell window in it earns 12 * w, a second window earns nothing more in area mode
+    (24 * w per cell)."""
+    from everything2lego.pack import Placement
+    win = _vp("60592.dat")                                      # 1 x 2 x 2 window: 12 cells
+    def bonus(n_win, area):
+        want = np.zeros((12, 2, 1), bool); want[:6 * n_win] = True
+        target = sampler.Target(want, np.full(want.shape, 4), want.copy(), cell_cat=np.zeros(want.shape, np.int8),
+                                categories=("Windows and Doors",))
+        stats, vocab = sampler.Stats(_models()), sampler.select_vocabulary(None, 0) + (win,)
+        def energy(sem):
+            w = sampler.Weights(); w.sem, w.sem_area = sem, area
+            got, info, _ = native.run(target, stats, vocab, None, w, iters=0, warmup=0, seed=0, t_start_share=0.05,
+                                      t_final_share=0.002, top_k=12, log_every=50,
+                                      init_placements=[Placement(win.part, 4, 0, 0, 6 * i, 2, 1, 0) for i in range(n_win)],
+                                      opts_logprior=sampler.option_logprior(vocab, stats, None))
+            assert len(got) == n_win and info["energy"] == pytest.approx(info["energy_recomputed"])
+            return info["energy"]
+        return energy(0.0) - energy(2.0)
+    assert bonus(1, True) == pytest.approx(24) and bonus(2, True) == pytest.approx(24)
+    assert bonus(2, False) == pytest.approx(48)

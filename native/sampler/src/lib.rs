@@ -267,6 +267,10 @@ pub struct Problem {
     // mesh parts (tools/part_labels.py): H*X*Z part id (-1 none; null = off); mirror planes are found per part and
     // mirror / echo map a cell only onto cells of its own part
     pub cell_part: *const i16,
+    // semantic areas (null = per-cell bonus above): H*X*Z area id (-1 none), an area being a 6-connected run of cells
+    // with one label; energy -= w_sem * sum over areas of min(cells covered by parts of its category, cap), cap = the
+    // area's size or its category's smallest part's cells if fewer: one part fills it, a second earns nothing
+    pub cell_area: *const i32,
 }
 
 /// Error map layers: shape, colour, support (unsupported, bare side connectors, exposed studs), surface direction,
@@ -443,6 +447,8 @@ struct Data {
     w_sem: f64,
     cell_cat: Vec<i8>,
     opt_cat: Vec<i32>,
+    cell_area: Vec<i32>, // empty = per-cell bonus
+    area_cap: Vec<i32>,
     prot: Vec<Vec<(i32, i32, i32, u64)>>, // per option: cells (box-local) its geometry reaches past its own, with the sub-samples
     sdist: Vec<f32>,
     sd_start: Vec<usize>,
@@ -676,6 +682,8 @@ impl Data {
             w_sem: if p.cell_cat.is_null() || p.opt_cat.is_null() { 0.0 } else { p.w_sem },
             cell_cat: if p.cell_cat.is_null() || p.opt_cat.is_null() { Vec::new() } else { v(p.cell_cat, n) },
             opt_cat: if p.cell_cat.is_null() || p.opt_cat.is_null() { Vec::new() } else { v(p.opt_cat, n_opt) },
+            cell_area: Vec::new(),
+            area_cap: Vec::new(),
             prot: if p.prot_rows.is_null() || p.prot_start.is_null() { Vec::new() } else {
                 let st = v(p.prot_start, n_opt + 1);
                 let raw = v(p.prot_rows, st[n_opt] as usize * 3);
@@ -729,6 +737,15 @@ impl Data {
             w_in: if p.w_out.is_null() || p.w_in.is_null() { Vec::new() } else { v(p.w_in, n * 64) },
             fid0: 0.0,
         };
+        if d.w_sem != 0.0 && !p.cell_area.is_null() {
+            d.cell_area = v(p.cell_area, n);
+            let mut size = vec![0i32; d.cell_area.iter().map(|&a| a + 1).max().unwrap_or(0) as usize];
+            let mut cat = vec![0i8; size.len()];
+            for (i, &a) in d.cell_area.iter().enumerate() { if a >= 0 { size[a as usize] += 1; cat[a as usize] = d.cell_cat[i]; } }
+            let mut small = vec![i32::MAX; 128];                    // per category: its smallest part's cells
+            for (k, &c) in d.opt_cat.iter().enumerate() { if c >= 0 { small[c as usize] = small[c as usize].min(d.opts[k].cells.len() as i32); } }
+            d.area_cap = size.iter().zip(&cat).map(|(&s, &c)| s.min(small[c.max(0) as usize])).collect();
+        }
         let n_motif = p.n_motif.max(0) as usize;
         if p.p_motif > 0.0 && n_motif > 0 && !p.motif_rows.is_null() {
             d.motif_start = v(p.motif_start, n_motif + 1).iter().map(|&s| s as usize).collect();
@@ -897,6 +914,30 @@ impl Data {
         if self.w_sem == 0.0 || self.opt_cat[k] < 0 { return 0.0; }
         let c = self.opt_cat[k] as i8;
         self.opts[k].cells.iter().filter(|&&(y, x, z, _, _)| self.cell_cat[self.idx(oy + y, ox + x, oz + z)] == c).count() as f64
+    }
+
+    /// Labelled cells option k placed at (oy, ox, oz) covers in each semantic area: (area, cells).
+    fn sem_area_hits(&self, k: usize, oy: i32, ox: i32, oz: i32) -> Vec<(usize, i32)> {
+        let mut v: Vec<(usize, i32)> = Vec::new();
+        if self.w_sem == 0.0 || self.opt_cat[k] < 0 { return v; }
+        let c = self.opt_cat[k] as i8;
+        for &(y, x, z, _, _) in &self.opts[k].cells {
+            let i = self.idx(oy + y, ox + x, oz + z);
+            if self.cell_cat[i] != c || self.cell_area[i] < 0 { continue; }
+            let a = self.cell_area[i] as usize;
+            match v.iter_mut().find(|e| e.0 == a) { Some(e) => e.1 += 1, None => v.push((a, 1)) }
+        }
+        v
+    }
+
+    /// Semantic bonus (in cells) option k at (oy, ox, oz) adds to parts covering m[a] cells of each area (missing = 0):
+    /// its labelled cells, or in area mode the cells up to each area's cap.
+    fn sem_gain(&self, m: &[i32], k: usize, oy: i32, ox: i32, oz: i32) -> f64 {
+        if self.cell_area.is_empty() { return self.sem_hits(k, oy, ox, oz); }
+        self.sem_area_hits(k, oy, ox, oz).iter().map(|&(a, n)| {
+            let (m, cap) = (m.get(a).copied().unwrap_or(0), self.area_cap[a]);
+            ((m + n).min(cap) - m.min(cap)) as f64
+        }).sum()
     }
 
     /// Surface distance of option k placed at (oy, ox, oz): over its surface rows, area * how far past one tolerance
@@ -1291,6 +1332,7 @@ struct State<'a> {
     dirp: f64,          // surface direction cost of all live parts
     sdp: f64,           // surface distance cost of all live parts
     semp: f64,          // semantic hits of all live parts (w_sem)
+    area_m: Vec<i32>,   // per semantic area: its cells covered by live parts of its category
     n_bare_top: f64,
     lock_hits: u64,      // adds and removes that touched a locked cell (a move doing so is undone)
     mark: Vec<u32>,
@@ -1360,6 +1402,7 @@ impl<'a> State<'a> {
             dirp: 0.0,
             sdp: 0.0,
             semp: 0.0,
+            area_m: vec![0; d.area_cap.len()],
             n_bare_top: 0.0,
             lock_hits: 0,
             mark: Vec::new(),
@@ -1878,7 +1921,8 @@ impl<'a> State<'a> {
         self.fid += d.fid_delta(o, it.y, it.x, it.z);
         self.dirp += d.dir_cost(it.opt, it.y, it.x, it.z);
         self.sdp += d.sdist_cost(it.opt, it.y, it.x, it.z);
-        self.semp += d.sem_hits(it.opt, it.y, it.x, it.z);
+        self.semp += d.sem_gain(&self.area_m, it.opt, it.y, it.x, it.z);
+        if !d.cell_area.is_empty() { for (a, n) in d.sem_area_hits(it.opt, it.y, it.x, it.z) { self.area_m[a] += n; } }
         if d.w_size != 0.0 { self.size_n[d.opt_class[it.opt]] += 1.0; }
         if d.w_surf != 0.0 { self.surf_n[d.surf_type(it.opt, it.y, it.x, it.z) * d.n_pclass + d.opt_pclass[it.opt]] += 1.0; }
         if d.w_sideways != 0.0 && d.opt_sideways[it.opt] { self.n_side += 1.0; }
@@ -2010,7 +2054,8 @@ impl<'a> State<'a> {
         self.fid -= d.fid_delta(o, it.y, it.x, it.z);
         self.dirp -= d.dir_cost(it.opt, it.y, it.x, it.z);
         self.sdp -= d.sdist_cost(it.opt, it.y, it.x, it.z);
-        self.semp -= d.sem_hits(it.opt, it.y, it.x, it.z);
+        if !d.cell_area.is_empty() { for (a, n) in d.sem_area_hits(it.opt, it.y, it.x, it.z) { self.area_m[a] -= n; } }
+        self.semp -= d.sem_gain(&self.area_m, it.opt, it.y, it.x, it.z);
         if d.w_size != 0.0 { self.size_n[d.opt_class[it.opt]] -= 1.0; }
         if d.w_surf != 0.0 { self.surf_n[d.surf_type(it.opt, it.y, it.x, it.z) * d.n_pclass + d.opt_pclass[it.opt]] -= 1.0; }
         if d.w_sideways != 0.0 && d.opt_sideways[it.opt] { self.n_side -= 1.0; }
@@ -2371,7 +2416,7 @@ fn rank_cell(d: &Data, y: i32, x: i32, z: i32) -> Ranked {
         // the colour it would get here is fixed by the target too: a part not made in the target's colour ranks lower
         let colour = d.colour_for(o, oy, ox, oz, &mut counts);
         let mut score = d.style * lp - d.w_cov * wrong - d.w_dir * d.dir_cost(k, oy, ox, oz)
-            - d.w_col * d.colour_cost(o, oy, ox, oz, colour) + d.w_sem * d.sem_hits(k, oy, ox, oz);
+            - d.w_col * d.colour_cost(o, oy, ox, oz, colour) + d.w_sem * d.sem_gain(&[], k, oy, ox, oz);
         if d.w_surf != 0.0 {                            // what real sets build this kind of surface from
             let c = d.opt_pclass[k];
             score += d.style * (d.surf_lpref[d.surf_type(k, oy, ox, oz) * d.n_pclass + c] - d.surf_lmarg[c]);
@@ -2564,7 +2609,7 @@ impl Filler {
                 _ => Filler::stat_score(st, k, oy, ox, oz),
             }
             + self.w_big * ((o.w * o.d) as f64).ln();                // footprint: longer / wider, not taller
-        let mut fit = d.w_sem * d.sem_hits(k, oy, ox, oz) - d.w_dir * d.dir_cost(k, oy, ox, oz) - d.w_cov * resid
+        let mut fit = d.w_sem * d.sem_gain(&st.area_m, k, oy, ox, oz) - d.w_dir * d.dir_cost(k, oy, ox, oz) - d.w_cov * resid
             - d.w_sil * st.sil_delta(o, oy, ox, oz) as f64 / (SUB * SUB) as f64
             - d.w_col * d.colour_cost(o, oy, ox, oz, colour);
         if !Filler::held(st, o, oy, ox, oz) {
@@ -4286,5 +4331,5 @@ pub unsafe extern "C" fn e2l_sample(p: *const Problem) -> i32 {
 /// The layout version: Python checks it before calling.
 #[no_mangle]
 pub extern "C" fn e2l_abi() -> i32 {
-    23
+    24
 }
