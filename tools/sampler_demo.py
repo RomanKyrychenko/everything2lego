@@ -234,6 +234,7 @@ def main() -> None:
     ap.add_argument("--staged", action="store_true", help="three stages: shape alone (shape, outline, direction, support); then fewest parts with the shape held (iters / 2 more steps); then colour with the parts held")
     ap.add_argument("--mirror-share", type=float, default=0.0, help="share of the mirror move (from retile's): a part's mirror image (same part or its chiral counterpart) placed across a plane the target is mirror-symmetric about around it; 0 = off")
     ap.add_argument("--echo-share", type=float, default=0.1, help="share of the echo move (from retile's): a part copied along runs where the target repeats itself, so a regular stretch changes at once (watermill, 2 seeds: energy -1.7 %%, shape 0.851 -> 0.842 %%, base exposed 22 -> 19 %%); 0 = off")
+    ap.add_argument("--phase-share", type=float, default=0.0, help="share of the phase move (from retile's): a window's plates cleared and rebuilt as bricks on the course phase (y mod 3) most brick-height parts there start at, the rest by the filler; 0 = off")
     ap.add_argument("--stack-weight", type=float, default=0.0, help="weight of n_bricks * KL(lined-up joints share || real 0.093): bricks overlap like real brickwork")
     ap.add_argument("--n-special", type=int, default=160, help="special (non plain-box) parts the build may use: the N most widely used by sets of its kind (vocabulary.json has ~1100)")
     ap.add_argument("--colour-max", type=float, default=12.0, help="Lab distance past which a part's colour error on a showing cell costs 10x more: a part not made near the area's colour is all but kept out (watermill, 2 seeds: colour error 4.9 -> 1.5 at 12, 2.8 at 20, shape +1 %% / 0; 0 = off)")
@@ -320,6 +321,7 @@ def main() -> None:
         w.col_max = a.colour_max
         w.echo = a.echo_share
         w.mirror = a.mirror_share
+        w.phase = a.phase_share
         w.sdist = a.surface_distance
         w.conn = a.connect_weight
         w.coll = a.collision_weight

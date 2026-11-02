@@ -29,7 +29,7 @@ from typing import Optional
 
 import numpy as np
 
-ABI = 20
+ABI = 21
 INFO_LEN = 20
 ERR_LAYERS = ("shape", "colour", "support", "direction", "statistics")   # lib.rs N_ERR
 PATHS4_BUCKETS = 8
@@ -125,6 +125,7 @@ class Problem(C.Structure):
         ("w_coll", C.c_double), ("prot_start", _P(C.c_int32)), ("prot_rows", _P(C.c_int32)),   # collisions
         ("w_grip", C.c_double), ("p_grip", C.c_double),                 # bonding: parts gripped by just one part
         ("p_mirror", C.c_double), ("mirror_opt", _P(C.c_int32)),        # mirror move share; per option its image (x, z)
+        ("p_phase", C.c_double),                                        # phase move share (from retile's)
     ]
 
 
@@ -540,7 +541,7 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         halo_start=_ptr(arr(hs, np.int32), C.c_int32),
         halo_yxz=_ptr(arr(np.concatenate(halo), np.int32), C.c_int32),
         w_cov=weights.cov, w_col=weights.col, col_max=weights.col_max, p_echo=getattr(weights, "echo", 0.0), fid_cap=getattr(weights, "fid_cap", 0.0), w_conn=getattr(weights, "conn", 0.0),
-        w_grip=getattr(weights, "grip", 0.0), p_grip=getattr(weights, "p_grip", 0.113),
+        w_grip=getattr(weights, "grip", 0.0), p_grip=getattr(weights, "p_grip", 0.113), p_phase=getattr(weights, "phase", 0.0),
         w_part=getattr(weights, "part", 0.0), recolour=int(getattr(weights, "recolour", False)), w_loc=weights.loc, w_glob=weights.glob,
         w_sup=weights.sup, w_side=weights.side,
         n_ref=stats.density * float(target.fill.sum()), w_dens=weights.dens, dens_sd=stats.density_sd,
