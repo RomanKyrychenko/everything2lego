@@ -550,6 +550,14 @@ class Weights:
     flat_mix: bool = False    # with roof_mix: the other tops too, vs real sets' flat tops (surface_mix.flat_mix)
     surface_mix: float = 0.0  # part mix by surface type: + w * sum_t n_t * KL(mix in t || real sets'); native only
     motif: float = 0.0        # share of moves that place a building pattern of real sets (motifs.py); native only
+    grip: float = 0.0         # n_parts * KL(share of parts joined through top and bottom to just one part || p_grip); native only
+    p_grip: float = 0.113     # real building sets' median (tools/learn/build_stats.py single_grip)
+    coll: float = 0.0         # per collision of geometry reaching past a part's cells (part_surface protrusions); native only
+    conn: float = 0.0         # per part with no chain of connections to the ground layer; native only
+    sdist: float = 0.0        # surface distance: parts' face area * how far past a tolerance it stands off the target; native only
+    part: float = 0.0         # energy per part (fewest parts); native only
+    recolour: bool = False    # starting parts (init_placements) take the engine's colour for their place; native only
+    fid_cap: float = 0.0      # shape budget: moves leaving the (unweighted) shape term above it and worse are rejected; native only
     echo: float = 0.0         # share of the echo move: a part copied along the target's self-similar runs; native only
     stack: float = 0.0        # n_bricks * KL(share of bricks right on a same-footprint brick || p_stack); native only
     p_stack: float = 0.093    # real buildings' median (build_stats.py stacked_bricks)

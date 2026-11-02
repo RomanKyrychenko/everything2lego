@@ -85,6 +85,28 @@ def stats(path: Path) -> dict | None:
             if (j := own.get((y + a, x + b, z + c), k)) != k}                    # side by side, as the sampler's level pairs
     side = [(a, b) for a, b in allp if abs(lo[a, 1] - lo[b, 1]) < 0.3 and abs(hi[a, 1] - hi[b, 1]) < 0.3]
     row_same = np.mean([it[a][0] == it[b][0] and it[a][1] == it[b][1] for a, b in side]) if side else 0.0
+    # colour patches: same-colour connected regions of showing cells; the size of the patch a showing cell is in
+    cells = [c for c, k in own.items() if k in shows and any((c[0] + a, c[1] + b, c[2] + e) not in own for a, b, e in nbr)]
+    seen, sizes = set(), []
+    for c0 in cells:
+        if c0 in seen: continue
+        col = it[own[c0]][1]; stack = [c0]; seen.add(c0); n = 0
+        while stack:
+            y, x, z = stack.pop(); n += 1
+            for a, b, e in nbr:
+                q = (y + a, x + b, z + e)
+                if q not in seen and q in own and it[own[q]][1] == col and any((q[0] + a2, q[1] + b2, q[2] + e2) not in own for a2, b2, e2 in nbr):
+                    seen.add(q); stack.append(q)
+        sizes.append(n)
+    sizes = np.array(sizes, float)
+    patch = float(np.median(np.repeat(sizes, sizes.astype(int)))) if len(sizes) else 0.0
+    # grip: how many parts each part couples with through its top and bottom faces (boxes touching, footprints
+    # overlapping) -- staggered seams make it 2+, stacked columns and lone plates 1
+    pairs_v = {(k, j) for (y, x, z), k in own.items() for j in [own.get((y + 1, x, z))] if j is not None and j != k}
+    nb_v = defaultdict(set)
+    for k, j in pairs_v: nb_v[k].add(j); nb_v[j].add(k)
+    g = np.array([len(nb_v[k]) for k in range(len(it))])
+    single_grip = float((g == 1).mean()); grip_mean = float(g.mean())
     top = {}                                                                      # height map seen from above
     for (y, x, z) in own: top[(x, z)] = max(top.get((x, z), -1), y + 1)
     dh = [abs(top[(x, z)] - top[q]) for (x, z) in top for q in ((x + 1, z), (x, z + 1)) if q in top]
@@ -95,7 +117,7 @@ def stats(path: Path) -> dict | None:
             "brick_len>=4": float((w[is_brick] >= 3.99).mean()) if is_brick.any() else 0.0,
             "bare_studs": bare / max(1, studded.sum()), "stacked_bricks": stacked / nb, "sideways": 1 - up.mean(),
             "colours/100": 100 * len({x[1] for x in it}) / len(it), "same_colour_touch": same_col, "row_same_part": row_same,
-            "plate_steps": steps, "parts": len(it)}
+            "plate_steps": steps, "colour_patch": patch, "patch_share": patch / max(1, len(cells)), "patches/100": 100 * len(sizes) / max(1, len(cells)), "single_grip": single_grip, "grip_mean": grip_mean, "parts": len(it)}
 
 
 def main() -> None:

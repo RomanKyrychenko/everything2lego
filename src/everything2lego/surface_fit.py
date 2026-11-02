@@ -33,6 +33,19 @@ def weights(bits: np.ndarray, alpha: float = 1.0, band: float = 1.0, deep: float
     return order(w_out).astype(np.float32), order(w_in).astype(np.float32)
 
 
+TOL = (8.0, 10.0, 10.0)                                     # LDU (y, x, z): one plate up, half a stud across
+
+
+def standoff(bits: np.ndarray) -> np.ndarray:
+    """bits (H, X, Z) uint64 target masks -> (H*X*Z*64,) float32 in the engine's order: each sub-sample's distance to
+    the target in tolerances (TOL), 0 inside it.  The engine charges a part's faces past 1 (sampler surface distance)."""
+    from scipy.ndimage import distance_transform_edt
+    T = unpack(bits)
+    d = distance_transform_edt(~T, sampling=tuple(s / t for s, t in zip(SAMPLE, TOL)))
+    H, X, Z = bits.shape
+    return d.reshape(H, SUB, X, SUB, Z, SUB).transpose(0, 2, 4, 1, 3, 5).reshape(-1).astype(np.float32)
+
+
 if __name__ == "__main__":                                 # self-check on a box target
     from .sampler import FULL
     b = np.zeros((6, 6, 6), np.uint64); b[1:4, 1:5, 1:5] = FULL
@@ -41,4 +54,6 @@ if __name__ == "__main__":                                 # self-check on a box
     assert wi[2, 2, 2].min() == 1.0 or wi[2, 2, 2].max() == 1.0          # interior cell: near the surface at this size
     assert wo[0, 0, 0].max() > wo[0, 1, 1].max() >= 1.0                  # further out costs more
     assert wo[2, 2, 2].max() <= 1.0 and wi[5, 5, 5].max() <= 1.0
+    s = standoff(b).reshape(6, 6, 6, 64)
+    assert s[2, 2, 2].max() == 0 and 0.2 < s[0, 2, 2].min() and s[0, 0, 0].max() > 2      # inside 0; a plate below ~1; a corner far
     print("ok: outside cost", round(float(wo[0, 1, 1].mean()), 2), "->", round(float(wo[0, 0, 0].mean()), 2))

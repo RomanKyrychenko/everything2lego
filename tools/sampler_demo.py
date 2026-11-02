@@ -35,6 +35,11 @@ FEATURES = Path(os.environ.get("LEGO_DATA", "/Volumes/PRO-G40/lego_data")) / "an
 
 
 KINDS = Path(os.environ.get("LEGO_DATA", "/Volumes/PRO-G40/lego_data")) / "analysis" / "set_kinds.csv"
+KEEP_SHAPE = {"cov", "sil", "sup", "direction", "dir_thr", "sdist"}          # --staged stage 1: the shape terms and support
+MOVE_SHARES = {"resolve", "orient", "guide", "motif", "echo", "big", "big_end", "p_sideways", "p_stack", "tile_boost",
+               "snot_boost", "snot_bonus", "fid_cap", "part"}     # not energy terms: kept as they are
+
+
 def mesh_bits(t: MeshTarget, shape) -> np.ndarray:
     """Each grid cell's shape: the mesh voxelised SUB times finer in grid
     units (studs, plates, studs), closed and filled solid, each cell's
@@ -65,13 +70,18 @@ def target_from_mesh(path: str, studs: int, shell: int, kind: str | None = None,
                      seg_label: np.ndarray | None = None,
                      seg_kind_of: dict[int, str] | None = None,
                      carve: np.ndarray | None = None,
-                     smooth: int = 0, rim: int | None = None) -> Target:
-    if smooth > 0:
+                     smooth: int = 0, rim: int | None = None, snap_geometry: bool = False) -> Target:
+    if smooth > 0 or snap_geometry:
         import trimesh, tempfile, os
         m = trimesh.load(path, force="mesh", process=False)
         # gentle Taubin: lamb/nu balanced close enough that cumulative volume
         # loss is minimal; purpose is to kill 1-face noise, not reshape
         trimesh.smoothing.filter_taubin(m, iterations=smooth, lamb=0.1, nu=-0.11)
+        if snap_geometry:
+            from everything2lego.target_snap import snap
+            m, rep = snap(m, studs=studs)
+            print(f"snap geometry: {rep['n_snapped']}/{rep['n_regions']} regions, {rep['snapped_area']:.0%} of the surface, "
+                  f"vertices moved {rep['move_mean_studs']:.2f} studs mean, {rep['move_max_studs']:.2f} max")
         tmp = tempfile.NamedTemporaryFile(suffix=".glb", delete=False)
         m.export(tmp.name)
         tmp.close()
@@ -216,6 +226,12 @@ def main() -> None:
     ap.add_argument("--prefer-big", type=str, default="0", help="the filler tries bigger parts first: + W * ln(footprint, studs^2) on each candidate -- longer / wider, not taller (the energy still decides); W0:W1 falls linearly from W0 to W1 over the run")
     ap.add_argument("--direction-weight", type=float, default=0.0, help="surface direction: energy per stud-top of outward face area * (1 - cos) vs the mesh's direction (slopes on slanted roofs, tiles on flat tops)")
     ap.add_argument("--bare-top-weight", type=float, default=0.0, help="energy per top stud left exposed where nothing will sit (cell above outside the target): tiles / slopes instead of studded parts there")
+    ap.add_argument("--colour-regions", type=float, default=0.0, help="read the target's colours by regions (colour_regions.py): showing cells merged by Ward's rule to this many regions per showing cell, each region in one colour (real sets' median 0.038); 0 = off")
+    ap.add_argument("--collision-weight", type=float, default=1000.0, help="energy per collision of a part's geometry reaching past its cells (side stud, clip, handle) or a stud under no hole, unless they join there (watermill, 2 seeds with --connect-weight: BrickNet collisions 108 -> 3-7); 0 = off")
+    ap.add_argument("--connect-weight", type=float, default=1000.0, help="energy per part with no chain of connections (stud in hole, side connectors) to the ground layer: islands resting on the build without a connection (watermill, 2 seeds: pieces 206 -> 62-69, parts falling in PyBullet 259 -> 12-37); 0 = off")
+    ap.add_argument("--grip-weight", type=float, default=0.0, help="weight of n_parts * KL(share of parts joined through top and bottom to just one part || real 0.113): interlocked courses instead of columns and lone plates; 0 = off")
+    ap.add_argument("--surface-distance", type=float, default=0.0, help="energy per stud-top of a part's face area per tolerance (half a stud across, a plate up) it stands past one tolerance off the target: LEGO surface sticking out (an antenna) costs by its surface, not its few sub-samples; 0 = off")
+    ap.add_argument("--staged", action="store_true", help="three stages: shape alone (shape, outline, direction, support); then fewest parts with the shape held (iters / 2 more steps); then colour with the parts held")
     ap.add_argument("--echo-share", type=float, default=0.1, help="share of the echo move (from retile's): a part copied along runs where the target repeats itself, so a regular stretch changes at once (watermill, 2 seeds: energy -1.7 %%, shape 0.851 -> 0.842 %%, base exposed 22 -> 19 %%); 0 = off")
     ap.add_argument("--stack-weight", type=float, default=0.0, help="weight of n_bricks * KL(lined-up joints share || real 0.093): bricks overlap like real brickwork")
     ap.add_argument("--n-special", type=int, default=160, help="special (non plain-box) parts the build may use: the N most widely used by sets of its kind (vocabulary.json has ~1100)")
@@ -247,6 +263,7 @@ def main() -> None:
     ap.add_argument("--init-guidance-model", default=None, help="path to an OMR-only CNN checkpoint for CFG when the --init-from-cnn is a hybrid/distilled model")
     ap.add_argument("--init-guidance", type=float, default=1.0, help="CFG scale for the CNN seed (1.0 = pure conditional, >1 amplifies, <1 blends toward unconditional)")
     ap.add_argument("--subassemblies", type=int, default=0, help="group placements into N-part submodels in an MPD .ldr (real sets have 11-26 sub-assemblies; 25 is a reasonable target)")
+    ap.add_argument("--snap-geometry", action="store_true", help="turn the mesh's smooth surfaces to pitches LEGO slopes build, headings to the grid axes, before voxelising (target_snap.py)")
     ap.add_argument("--smooth", type=int, default=0, help="apply N iterations of Taubin smoothing to the mesh before voxelising (reduces 1-stud surface noise; 5-10 is a reasonable range)")
     a = ap.parse_args()
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
@@ -266,12 +283,18 @@ def main() -> None:
         carve = extra if carve is None else (carve | extra)
     target = target_from_mesh(a.mesh, a.studs, a.shell, a.kind, stand=a.stand, rim=a.base_rim, regions=regions,
                               seg_label=seg_label, seg_kind_of=seg_kind_of, carve=carve,
-                              smooth=a.smooth)
+                              smooth=a.smooth, snap_geometry=a.snap_geometry)
     if a.whole_cells:
         target.bits = np.where(target.want, FULL, np.uint64(0)).astype(np.uint64); target.fill = target.want.astype(float)
     if a.colour_smooth > 0:
         from everything2lego.colour_mrf import smooth
         target.colour = smooth(target.colour, target.want, beta=a.colour_smooth)
+    if a.colour_regions > 0:
+        from everything2lego.colour_regions import regions
+        n0 = len(np.unique(target.colour[target.want & target.visible]))
+        target.colour = regions(target.colour, target.want, target.visible, density=a.colour_regions)
+        print(f"colour regions: {a.colour_regions * 100:.1f} per 100 showing cells; colours shown {n0} -> "
+              f"{len(np.unique(target.colour[target.want & target.visible]))}")
     models = load_models()
     t0 = time.time()
     from everything2lego.sampler import Weights
@@ -295,32 +318,63 @@ def main() -> None:
         if a.shape_weight is not None: w.cov = a.shape_weight
         w.col_max = a.colour_max
         w.echo = a.echo_share
-        init, left = init_placements, iters
-        if a.layers > 1:
-            # bottom-up: each stage builds the target up to its cut, from the stages below; the mesh's shape stays
-            # whole (only which cells are built is cut), so the cut is no surface and needs no direction; its studs
-            # are covered by the next stage, so exposed studs are not counted until the whole is optimised
+        w.sdist = a.surface_distance
+        w.conn = a.connect_weight
+        w.coll = a.collision_weight
+        w.grip = a.grip_weight
+        def build(w):
+            init, left = init_placements, iters
+            if a.layers > 1:
+                # bottom-up: each stage builds the target up to its cut, from the stages below; the mesh's shape stays
+                # whole (only which cells are built is cut), so the cut is no surface and needs no direction; its studs
+                # are covered by the next stage, so exposed studs are not counted until the whole is optimised
+                import copy
+                from everything2lego.region_rebuild import _cells
+                ys = np.nonzero(target.want.any((1, 2)))[0]
+                lo, hi = int(ys.min()), int(ys.max()) + 1
+                per = iters // a.layers                      # a layer of 1/N of the height gets 1/N of the steps
+                wl = copy.copy(w); wl.bare_top = w.bare_top * a.layer_bare
+                for k in range(1, a.layers + 1):
+                    tk = copy.copy(target)
+                    tk.want = target.want & (np.arange(target.want.shape[0])[:, None, None] < lo + -(-(hi - lo) * k // a.layers))
+                    if init:                                 # a part reaching past the cut starts the next stage over
+                        init = [p for p in init if tk.want[tuple(_cells(p).T)].all()]
+                    init, li = sample(tk, models, iters=per, seed=seed + 1000 * k, weights=wl, tile_boost=a.tile_boost,
+                                      snot_boost=a.snot_boost, opt_bias=opt_bias, init_placements=init, engine=a.engine,
+                                      snot=a.snot, n_special=a.n_special, courses=a.slope_courses, colour_share=a.target_colours)
+                    print(f"layer {k}/{a.layers}: {int(tk.want.sum())} cells, {li['parts']} parts, energy {li['energy']:.0f}", flush=True)
+                init = [p for p in init if target.want[tuple(_cells(p).T)].all()]
+                left = int(iters * a.whole_share)
+            _ps, _info = sample(target, models, iters=left, seed=seed, weights=w,
+                                 tile_boost=a.tile_boost, snot_boost=a.snot_boost, opt_bias=opt_bias,
+                                 init_placements=init, engine=a.engine, snot=a.snot, n_special=a.n_special, courses=a.slope_courses,
+                                 colour_share=a.target_colours)
+            return _ps, _info
+        if a.staged:
+            # three stages, each optimised with the earlier ones held: (1) shape alone -- shape, outline, surface
+            # direction and support, nothing else; (2) fewest parts, the shape term not let past stage 1's and the shape
+            # terms kept above a part's worth so they only break ties; (3) colour, the parts as they are
             import copy
-            from everything2lego.region_rebuild import _cells
-            ys = np.nonzero(target.want.any((1, 2)))[0]
-            lo, hi = int(ys.min()), int(ys.max()) + 1
-            per = iters // a.layers                      # a layer of 1/N of the height gets 1/N of the steps
-            wl = copy.copy(w); wl.bare_top = w.bare_top * a.layer_bare
-            for k in range(1, a.layers + 1):
-                tk = copy.copy(target)
-                tk.want = target.want & (np.arange(target.want.shape[0])[:, None, None] < lo + -(-(hi - lo) * k // a.layers))
-                if init:                                 # a part reaching past the cut starts the next stage over
-                    init = [p for p in init if tk.want[tuple(_cells(p).T)].all()]
-                init, li = sample(tk, models, iters=per, seed=seed + 1000 * k, weights=wl, tile_boost=a.tile_boost,
-                                  snot_boost=a.snot_boost, opt_bias=opt_bias, init_placements=init, engine=a.engine,
-                                  snot=a.snot, n_special=a.n_special, courses=a.slope_courses, colour_share=a.target_colours)
-                print(f"layer {k}/{a.layers}: {int(tk.want.sum())} cells, {li['parts']} parts, energy {li['energy']:.0f}", flush=True)
-            init = [p for p in init if target.want[tuple(_cells(p).T)].all()]
-            left = int(iters * a.whole_share)
-        _ps, _info = sample(target, models, iters=left, seed=seed, weights=w,
-                             tile_boost=a.tile_boost, snot_boost=a.snot_boost, opt_bias=opt_bias,
-                             init_placements=init, engine=a.engine, snot=a.snot, n_special=a.n_special, courses=a.slope_courses,
-                             colour_share=a.target_colours)
+            from dataclasses import fields
+            zero = [f.name for f in fields(Weights) if f.type in ("float", float) and f.name not in KEEP_SHAPE]
+            w1 = copy.copy(w)
+            for name in zero:
+                if name not in MOVE_SHARES: setattr(w1, name, 0.0)
+            w1.flat_mix = False
+            _ps, _info = build(w1)
+            print(f"stage 1 (shape): shape term {_info['fidelity']:.1f}, {_info['parts']} parts", flush=True)
+            w2 = copy.copy(w1); w2.fid_cap = _info["fidelity"] * (1 + 1e-9); w2.part = 1.0
+            _ps, _info = sample(target, models, iters=iters // 2, seed=seed + 7, weights=w2, tile_boost=a.tile_boost,
+                                snot_boost=a.snot_boost, opt_bias=opt_bias, init_placements=list(_ps), engine=a.engine,
+                                snot=a.snot, n_special=a.n_special, courses=a.slope_courses, colour_share=a.target_colours)
+            print(f"stage 2 (parts): shape term {_info['fidelity']:.1f}, {_info['parts']} parts", flush=True)
+            w3 = copy.copy(w2); w3.col, w3.col_max, w3.recolour = w.col, w.col_max, True
+            _ps, _info = sample(target, models, iters=0, seed=seed + 8, weights=w3, tile_boost=a.tile_boost,
+                                snot_boost=a.snot_boost, opt_bias=opt_bias, init_placements=list(_ps), engine=a.engine,
+                                snot=a.snot, n_special=a.n_special, courses=a.slope_courses, colour_share=a.target_colours)
+            print(f"stage 3 (colour): shape term {_info['fidelity']:.1f}, {_info['parts']} parts", flush=True)
+        else:
+            _ps, _info = build(w)
         if a.rebuild_regions > 0:
             from everything2lego.region_rebuild import rebuild_worst, evaluate
             kw = dict(weights=w, tile_boost=a.tile_boost, snot_boost=a.snot_boost, engine=a.engine, snot=a.snot or a.region_snot,

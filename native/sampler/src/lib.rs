@@ -228,6 +228,31 @@ pub struct Problem {
     pub lock: *const u8, // H*X*Z: cells whose parts no move may change (a region rebuilt inside a fixed build); null = none
     pub col_max: f64, // Lab distance past which a showing cell's colour error costs COL_FAR times more (0 = off)
     pub p_echo: f64,  // share of the echo move (taken from retile's): a part copied along the target's self-similar runs
+    // shape first: a move that leaves the shape term (unweighted) above this and worse than before is rejected, so
+    // the other terms improve the build only within this shape budget; 0 = off
+    pub fid_cap: f64,
+    pub w_part: f64,   // energy per part (fewest parts; 0 = off)
+    pub recolour: i32, // 1: the starting parts take the colour colour_for gives them, not the one passed in
+    // surface distance: energy += w_sdist * sum over parts' surface (sd_rows: the library triangles' area per
+    // sub-sample, part_surface.py) of area * max(d - 1, 0), d = that sub-sample's distance to the target in
+    // tolerances (sdist, 0 inside): LEGO surface standing off the target, thin parts included
+    pub w_sdist: f64,
+    pub sdist: *const f32,    // h*x*z*64
+    pub sd_start: *const i32, // n_opt + 1
+    pub sd_rows: *const f32,  // (sy, sx, sz, area) per row
+    // connectivity: energy += w_conn per part with no chain of connections (stud on hole, side connectors) to the
+    // ground layer -- a part resting on another without a connection, an island built on top; 0 = off
+    pub w_conn: f64,
+    // collisions: energy += w_coll per (part, cell) where the part's geometry reaching past the cells it claims
+    // (prot_rows: box-local sub-samples, part_surface.protrusion_tables) meets another part's sub-samples there, unless
+    // the two join by side connectors (a side stud in a hole); 0 = off
+    pub w_coll: f64,
+    pub prot_start: *const i32, // n_opt + 1
+    pub prot_rows: *const i32,  // (sy, sx, sz) per row
+    // bonding: energy += w_grip * n_parts * KL(Bernoulli(share of parts joined through top and bottom to exactly one
+    // part) || p_grip): real sets interlock (staggered seams), a column or a lone plate on one part does not; 0 = off
+    pub w_grip: f64,
+    pub p_grip: f64,
 }
 
 /// Error map layers: shape, colour, support (unsupported, bare side connectors, exposed studs), surface direction,
@@ -245,6 +270,7 @@ fn miss(wrong: u32) -> f64 {
     e * e
 }
 const SUB: i32 = 4;
+const BOTTOM: u64 = 0xFFFF;                                  // a cell's lowest layer of sub-samples
 
 // ---------------------------------------------------------------------------
 // random numbers: xoshiro256**, seeded by splitmix64
@@ -391,6 +417,18 @@ struct Data {
     p_resolve: f64,
     p_orient: f64,
     p_echo: f64,
+    fid_cap: f64,
+    w_part: f64,
+    recolour: bool,
+    w_sdist: f64,
+    w_conn: f64,
+    w_coll: f64,
+    w_grip: f64,
+    p_grip: f64,
+    prot: Vec<Vec<(i32, i32, i32, u64)>>, // per option: cells (box-local) its geometry reaches past its own, with the sub-samples
+    sdist: Vec<f32>,
+    sd_start: Vec<usize>,
+    sd_rows: Vec<[f32; 4]>,
     sim: Vec<u32>,       // per cell: bit k set when the target around it matches the target around it + ECHO_T[k]
     lock: Vec<bool>,                                      // H*X*Z (empty when none)
     w_surf: f64,
@@ -603,6 +641,34 @@ impl Data {
             p_resolve: p.p_resolve,
             p_orient: p.p_orient,
             p_echo: p.p_echo,
+            fid_cap: p.fid_cap,
+            w_part: p.w_part,
+            recolour: p.recolour != 0,
+            w_conn: p.w_conn,
+            w_coll: if p.prot_rows.is_null() { 0.0 } else { p.w_coll },
+            w_grip: p.w_grip,
+            p_grip: p.p_grip.clamp(1e-4, 1.0 - 1e-4),
+            prot: if p.prot_rows.is_null() || p.prot_start.is_null() { Vec::new() } else {
+                let st = v(p.prot_start, n_opt + 1);
+                let raw = v(p.prot_rows, st[n_opt] as usize * 3);
+                (0..n_opt).map(|k| {
+                    let mut by: Vec<(i32, i32, i32, u64)> = Vec::new();
+                    for r in st[k] as usize..st[k + 1] as usize {
+                        let (sy, sx, sz) = (raw[3 * r], raw[3 * r + 1], raw[3 * r + 2]);
+                        let c = (sy.div_euclid(SUB), sx.div_euclid(SUB), sz.div_euclid(SUB));
+                        let b = 1u64 << ((sy.rem_euclid(SUB) * SUB + sx.rem_euclid(SUB)) * SUB + sz.rem_euclid(SUB));
+                        match by.iter_mut().find(|e| (e.0, e.1, e.2) == c) { Some(e) => e.3 |= b, None => by.push((c.0, c.1, c.2, b)) }
+                    }
+                    by
+                }).collect()
+            },
+            w_sdist: if p.sdist.is_null() || p.sd_rows.is_null() { 0.0 } else { p.w_sdist },
+            sdist: if p.sdist.is_null() || p.sd_rows.is_null() { Vec::new() } else { v(p.sdist, n * 64) },
+            sd_start: if p.sd_start.is_null() { Vec::new() } else { v(p.sd_start, n_opt + 1).iter().map(|&s| s as usize).collect() },
+            sd_rows: if p.sd_rows.is_null() || p.sd_start.is_null() { Vec::new() } else {
+                let m = *v(p.sd_start, n_opt + 1).last().unwrap() as usize;
+                v(p.sd_rows, m * 4).chunks(4).map(|r| [r[0], r[1], r[2], r[3]]).collect()
+            },
             sim: Vec::new(),
             lock: if p.lock.is_null() { Vec::new() } else { v(p.lock, n).iter().map(|&b| b != 0).collect() },
             w_surf: if p.cell_type.is_null() { 0.0 } else { p.w_surf },
@@ -730,6 +796,13 @@ impl Data {
         (r * self.scols[a] + c) as usize
     }
 
+    /// The colour option k takes when it replaces a part of `colour`: that colour when the part is made in it; with
+    /// colour off (w_col 0: shape and part count first, colour after) the nearest it is made in.
+    fn made_in(&self, k: usize, colour: i32) -> Option<i32> {
+        let c = self.snap[self.opts[k].part * self.n_col + colour as usize];
+        if c == colour || self.w_col == 0.0 { Some(c) } else { None }
+    }
+
     /// One showing cell's colour error: its Lab distance, and past col_max COL_FAR times more, so a part whose
     /// colour is plainly not the area's (a grey slope on a brown roof) is all but kept out.
     fn col_err(&self, e: f64) -> f64 {
@@ -775,6 +848,24 @@ impl Data {
             if dot > self.dir_thr * r[6] as f64 { s += r[6] as f64 - dot; }
         }
         s
+    }
+
+    /// Surface distance of option k placed at (oy, ox, oz): over its surface rows, area * how far past one tolerance
+    /// the row's sub-sample stands off the target.
+    fn sdist_cost(&self, k: usize, oy: i32, ox: i32, oz: i32) -> f64 {
+        if self.w_sdist == 0.0 { return 0.0; }
+        let mut cost = 0f64;
+        for r in &self.sd_rows[self.sd_start[k]..self.sd_start[k + 1]] {
+            let q = [oy * SUB + r[0] as i32, ox * SUB + r[1] as i32, oz * SUB + r[2] as i32];
+            if q[0] < 0 || q[1] < 0 || q[2] < 0 || q[0] >= self.h * SUB || q[1] >= self.x * SUB || q[2] >= self.z * SUB {
+                continue;                                             // the part is inside its box, the box on the grid
+            }
+            let c = self.idx(q[0] / SUB, q[1] / SUB, q[2] / SUB);
+            let b = ((q[0] % SUB) * SUB + q[1] % SUB) * SUB + q[2] % SUB;
+            let dist = self.sdist[c * 64 + b as usize] as f64;
+            if dist > 1.0 { cost += r[3] as f64 * (dist - 1.0); }
+        }
+        cost
     }
 
     fn fid_delta(&self, o: &Opt, oy: i32, ox: i32, oz: i32) -> f64 {
@@ -1111,6 +1202,14 @@ struct State<'a> {
     live_pos: Vec<usize>,
     unsup: Vec<bool>,
     n_unsup: i64,
+    grounded: Vec<bool>, // a chain of connections joins it to the ground layer (w_conn)
+    vgrip: Vec<u32>,    // parts each is joined to through its top and bottom (w_grip)
+    n_single: f64,      // parts joined so to exactly one
+    prot_at: Vec<Vec<(usize, u64)>>, // per cell: the parts whose geometry reaches into it from outside, and where (w_coll)
+    n_coll: i64,
+    n_ungr: i64,
+    cseen: Vec<u32>,     // connectivity searches' visit marks, by generation
+    cgen: u32,
     kl1: Kl, // touching pairs
     kl2: Kl, // paths of two through a shared neighbour
     kl3: Kl, // 4-walks a-b-c-d, keyed by (a_tok, d_tok, direction, mid_bucket)
@@ -1131,6 +1230,7 @@ struct State<'a> {
     n_stack: f64,     // brick-on-same-footprint-brick pairs
     bare_top: Vec<f64>, // per item: its exposed top studs (w_bare_top)
     dirp: f64,          // surface direction cost of all live parts
+    sdp: f64,           // surface distance cost of all live parts
     n_bare_top: f64,
     lock_hits: u64,      // adds and removes that touched a locked cell (a move doing so is undone)
     mark: Vec<u32>,
@@ -1164,6 +1264,14 @@ impl<'a> State<'a> {
             live_pos: Vec::new(),
             unsup: Vec::new(),
             n_unsup: 0,
+            grounded: Vec::new(),
+            vgrip: Vec::new(),
+            n_single: 0.0,
+            prot_at: if d.w_coll != 0.0 { vec![Vec::new(); d.tbits.len()] } else { Vec::new() },
+            n_coll: 0,
+            n_ungr: 0,
+            cseen: Vec::new(),
+            cgen: 0,
             kl1: Kl::new(d.n_tok * d.n_tok * 3),
             kl2: Kl::new(d.n_tok * d.n_tok * 3),
             kl3: if d.paths4_enabled() {
@@ -1190,6 +1298,7 @@ impl<'a> State<'a> {
             n_stack: 0.0,
             bare_top: Vec::new(),
             dirp: 0.0,
+            sdp: 0.0,
             n_bare_top: 0.0,
             lock_hits: 0,
             mark: Vec::new(),
@@ -1605,12 +1714,17 @@ impl<'a> State<'a> {
     fn energy(&self) -> f64 {
         let d = self.d;
         self.content() + self.style_loss() + d.w_sup * self.n_unsup as f64 + d.w_side * self.bare as f64
+            + d.w_conn * self.n_ungr as f64
+            + d.w_coll * self.n_coll as f64
+            + d.w_grip * self.grip_kl()
             + d.w_size * self.size_kl()
             + d.w_surf * self.surf_kl()
             + d.w_sideways * self.sideways_kl()
             + d.w_stack * self.stack_kl()
             + d.w_bare_top * self.n_bare_top
             + d.w_dir * self.dirp
+            + d.w_sdist * self.sdp
+            + d.w_part * self.live.len() as f64
     }
 
     /// Bricks among `nb` that sit right on / under brick i with the same footprint (a lined-up joint).
@@ -1684,6 +1798,9 @@ impl<'a> State<'a> {
             None => {
                 self.items.push(None);
                 self.unsup.push(false);
+                self.grounded.push(false);
+                self.vgrip.push(0);
+                self.cseen.push(0);
                 self.bare_top.push(0.0);
                 self.live_pos.push(0);
                 self.adj.push(Vec::new());
@@ -1698,6 +1815,7 @@ impl<'a> State<'a> {
         let o = &d.opts[it.opt];
         self.fid += d.fid_delta(o, it.y, it.x, it.z);
         self.dirp += d.dir_cost(it.opt, it.y, it.x, it.z);
+        self.sdp += d.sdist_cost(it.opt, it.y, it.x, it.z);
         if d.w_size != 0.0 { self.size_n[d.opt_class[it.opt]] += 1.0; }
         if d.w_surf != 0.0 { self.surf_n[d.surf_type(it.opt, it.y, it.x, it.z) * d.n_pclass + d.opt_pclass[it.opt]] += 1.0; }
         if d.w_sideways != 0.0 && d.opt_sideways[it.opt] { self.n_side += 1.0; }
@@ -1728,6 +1846,23 @@ impl<'a> State<'a> {
         ids.push(i);
         self.refresh_support(&ids);
         self.refresh_bare_top(&ids);
+        if d.w_grip != 0.0 {
+            let l = self.vlinks(i);
+            for &j in &l { self.grip_step(j, 1); }
+            self.vgrip[i] = l.len() as u32;
+            if l.len() == 1 { self.n_single += 1.0; }
+        }
+        if d.w_coll != 0.0 {
+            for &(cy, cx, cz, m) in &d.prot[it.opt] {
+                if d.inside(it.y + cy, it.x + cx, it.z + cz) {
+                    self.prot_at[d.idx(it.y + cy, it.x + cx, it.z + cz)].push((i, m));
+                }
+            }
+            self.n_coll += self.collisions(i);
+        }
+        if d.w_conn != 0.0 {
+            self.ground_add(i);
+        }
         i
     }
 
@@ -1771,6 +1906,21 @@ impl<'a> State<'a> {
     fn remove(&mut self, i: usize) -> Item {
         let it = *self.item(i);
         self.touch_lock(&it);
+        let linked = if self.d.w_conn != 0.0 { self.links(i) } else { Vec::new() };
+        if self.d.w_grip != 0.0 {
+            if self.vgrip[i] == 1 { self.n_single -= 1.0; }
+            self.vgrip[i] = 0;
+            for j in self.vlinks(i) { self.grip_step(j, -1); }
+        }
+        if self.d.w_coll != 0.0 {
+            self.n_coll -= self.collisions(i);
+            let d = self.d;
+            for &(cy, cx, cz, _) in &d.prot[it.opt] {
+                if d.inside(it.y + cy, it.x + cx, it.z + cz) {
+                    self.prot_at[d.idx(it.y + cy, it.x + cx, it.z + cz)].retain(|&(k, _)| k != i);
+                }
+            }
+        }
         // Snapshot adj containing i for paths4 reverse-counting (closed walks).
         let nb_live: Vec<(usize, u8)> = self.adj[i].clone();
         if self.d.w_stack != 0.0 && self.d.opt_brick[it.opt] {
@@ -1796,6 +1946,7 @@ impl<'a> State<'a> {
         self.bare -= d.bare_sides(o, it.y, it.x, it.z);
         self.fid -= d.fid_delta(o, it.y, it.x, it.z);
         self.dirp -= d.dir_cost(it.opt, it.y, it.x, it.z);
+        self.sdp -= d.sdist_cost(it.opt, it.y, it.x, it.z);
         if d.w_size != 0.0 { self.size_n[d.opt_class[it.opt]] -= 1.0; }
         if d.w_surf != 0.0 { self.surf_n[d.surf_type(it.opt, it.y, it.x, it.z) * d.n_pclass + d.opt_pclass[it.opt]] -= 1.0; }
         if d.w_sideways != 0.0 && d.opt_sideways[it.opt] { self.n_side -= 1.0; }
@@ -1814,7 +1965,161 @@ impl<'a> State<'a> {
         self.n_bare_top -= self.bare_top[i];                       // i is gone; its neighbours may now show studs
         self.bare_top[i] = 0.0;
         self.refresh_bare_top(&ids);
+        if self.d.w_conn != 0.0 {
+            self.ground_remove(i, &linked);
+        }
         it
+    }
+
+    /// Whether i and its neighbour j (adj direction `dir` from i) are joined: a stud of the lower in a hole of the
+    /// upper, or side connectors that meet.
+    fn joined(&self, i: usize, j: usize, dir: u8) -> bool {
+        let d = self.d;
+        let (a, b) = (self.item(i), self.item(j));
+        let (oa, ob) = (&d.opts[a.opt], &d.opts[b.opt]);
+        match dir {
+            DOWN => b.y + ob.h == a.y && oa.bottom.iter().any(|&(dx, dz)| {
+                self.owner[d.idx(a.y - 1, a.x + dx, a.z + dz)] == j as i32 && ob.has_top(a.x + dx - b.x, a.z + dz - b.z)
+            }),
+            UP => a.y + oa.h == b.y && oa.top.iter().any(|&(dx, dz)| {
+                self.owner[d.idx(b.y, a.x + dx, a.z + dz)] == j as i32 && ob.has_bottom(a.x + dx - b.x, a.z + dz - b.z)
+            }),
+            _ => d.sides_join(oa, a.y, a.x, a.z, ob, b.y, b.x, b.z) || d.sides_join(ob, b.y, b.x, b.z, oa, a.y, a.x, a.z),
+        }
+    }
+
+    fn links(&self, i: usize) -> Vec<usize> {
+        self.adj[i].iter().filter(|&&(j, dir)| self.joined(i, j, dir)).map(|&(j, _)| j).collect()
+    }
+
+    /// Collisions of live part i: its geometry past its cells meeting another part's sub-samples, and other parts'
+    /// geometry reaching into its cells and meeting its sub-samples -- each unless the two join at their sides.
+    fn collisions(&self, i: usize) -> i64 {
+        let d = self.d;
+        let a = self.item(i);
+        let oa = &d.opts[a.opt];
+        let apart = |j: usize| {
+            let b = self.item(j);
+            let ob = &d.opts[b.opt];
+            !(d.sides_join(oa, a.y, a.x, a.z, ob, b.y, b.x, b.z) || d.sides_join(ob, b.y, b.x, b.z, oa, a.y, a.x, a.z))
+        };
+        let mut n = 0;
+        for &(cy, cx, cz, m) in &d.prot[a.opt] {
+            let (y, x, z) = (a.y + cy, a.x + cx, a.z + cz);
+            if !d.inside(y, x, z) { continue; }
+            let c = d.idx(y, x, z);
+            let j = self.owner[c];
+            if j >= 0 && j as usize != i && self.cur[c] & m != 0 && apart(j as usize) { n += 1; }
+        }
+        for &(y, x, z, bits, _) in &oa.cells {
+            let c = d.idx(a.y + y, a.x + x, a.z + z);
+            for &(k, m) in &self.prot_at[c] {
+                if k != i && bits & m != 0 && apart(k) { n += 1; }
+            }
+            // a stud from below where this part has no hole and comes down to its bottom (a tooth, a clip, a solid base)
+            if y == 0 && a.y > 0 && bits & BOTTOM != 0 && !oa.has_bottom(x, z) {
+                let j = self.owner[d.idx(a.y - 1, a.x + x, a.z + z)];
+                if j >= 0 {
+                    let b = self.item(j as usize);
+                    if b.y + d.opts[b.opt].h == a.y && d.opts[b.opt].has_top(a.x + x - b.x, a.z + z - b.z) { n += 1; }
+                }
+            }
+        }
+        // its own studs under a part above with no hole there
+        for &(dx, dz) in &oa.top {
+            let (y, x, z) = (a.y + oa.h, a.x + dx, a.z + dz);
+            if !d.inside(y, x, z) { continue; }
+            let c = d.idx(y, x, z);
+            let j = self.owner[c];
+            if j >= 0 && j as usize != i && self.cur[c] & BOTTOM != 0 {
+                let b = self.item(j as usize);
+                if b.y == y && !d.opts[b.opt].has_bottom(x - b.x, z - b.z) { n += 1; }
+            }
+        }
+        n
+    }
+
+    /// The parts i is joined to through its top and bottom (stud in hole).
+    fn vlinks(&self, i: usize) -> Vec<usize> {
+        self.adj[i].iter().filter(|&&(j, dir)| dir != LEVEL && self.joined(i, j, dir)).map(|&(j, _)| j).collect()
+    }
+
+    fn grip_step(&mut self, j: usize, by: i32) {
+        let old = self.vgrip[j];
+        let new = (old as i32 + by) as u32;
+        self.n_single += (new == 1) as u8 as f64 - (old == 1) as u8 as f64;
+        self.vgrip[j] = new;
+    }
+
+    /// n_parts * KL(Bernoulli(parts joined through top and bottom to exactly one part / parts) || Bernoulli(p_grip))
+    fn grip_kl(&self) -> f64 {
+        let n = self.live.len() as f64;
+        if self.d.w_grip == 0.0 || n <= 0.0 { return 0.0; }
+        let (q, p) = ((self.n_single / n).clamp(1e-9, 1.0 - 1e-9), self.d.p_grip);
+        n * (q * (q / p).ln() + (1.0 - q) * ((1.0 - q) / (1.0 - p)).ln())
+    }
+
+    /// A part on the ground layer holds the build there only when joined to some other part (a lone tile lying on
+    /// the ground is a piece of its own).
+    fn anchor(&self, k: usize) -> bool {
+        self.item(k).y == 0 && !self.links(k).is_empty()
+    }
+
+    /// A new part: grounded when it anchors, or is joined to a grounded part or to a part on the ground layer (which
+    /// then anchors); then everything joined to it that was not is grounded too.
+    fn ground_add(&mut self, i: usize) {
+        let links = self.links(i);
+        let on_ground = (self.item(i).y == 0 && !links.is_empty())
+            || links.iter().any(|&j| self.grounded[j] || self.item(j).y == 0);
+        if !on_ground {
+            self.grounded[i] = false;
+            self.n_ungr += 1;
+            return;
+        }
+        self.grounded[i] = true;
+        let mut stack: Vec<usize> = links.into_iter().filter(|&j| !self.grounded[j]).collect();
+        while let Some(j) = stack.pop() {
+            if self.grounded[j] { continue; }
+            self.grounded[j] = true;
+            self.n_ungr -= 1;
+            stack.extend(self.links(j).into_iter().filter(|&k| !self.grounded[k]));
+        }
+    }
+
+    /// A part gone: each grounded part it was joined to that no longer reaches the ground, with all joined to it,
+    /// is ungrounded.  The search walks grounded parts, downward joins first, so it usually ends in a few steps.
+    fn ground_remove(&mut self, i: usize, linked: &[usize]) {
+        if !self.grounded[i] {
+            self.n_ungr -= 1;
+            return;
+        }
+        self.grounded[i] = false;
+        for &j in linked {
+            if self.items[j].is_none() || !self.grounded[j] {
+                continue;
+            }
+            self.cgen = self.cgen.wrapping_add(1);
+            let g = self.cgen;
+            let (mut stack, mut seen, mut found) = (vec![j], vec![j], false);
+            self.cseen[j] = g;
+            while let Some(k) = stack.pop() {
+                if self.anchor(k) { found = true; break; }
+                let mut next: Vec<(usize, u8)> = self.adj[k].iter().copied()
+                    .filter(|&(m, dir)| self.grounded[m] && self.cseen[m] != g && self.joined(k, m, dir)).collect();
+                next.sort_by_key(|&(_, dir)| if dir == DOWN { 1 } else { 0 });   // popped last-in: down first
+                for (m, _) in next {
+                    self.cseen[m] = g;
+                    seen.push(m);
+                    stack.push(m);
+                }
+            }
+            if !found {
+                for k in seen {
+                    self.grounded[k] = false;
+                    self.n_ungr += 1;
+                }
+            }
+        }
     }
 
     /// Item i's share of the global statistics terms, by the chain rule: sum over the counts it adds of
@@ -2663,7 +2968,7 @@ fn merge(st: &mut State, rng: &mut Rng) -> Option<Undo> {
         }
         let b = *st.item(j);
         let bo = &d.opts[b.opt];
-        if bo.boxk != ao.boxk || bo.h != ao.h || b.colour != a.colour || b.y != a.y {
+        if bo.boxk != ao.boxk || bo.h != ao.h || (b.colour != a.colour && d.w_col != 0.0) || b.y != a.y {
             continue;
         }
         let (x0, z0) = (a.x.min(b.x), a.z.min(b.z));
@@ -2675,7 +2980,7 @@ fn merge(st: &mut State, rng: &mut Rng) -> Option<Undo> {
             Some(&k) => k,
             None => continue,
         };
-        if d.snap[d.opts[k].part * d.n_col + a.colour as usize] != a.colour {
+        if d.made_in(k, a.colour).is_none() {
             continue;
         }
         let area = (x1 - x0) * (z1 - z0);
@@ -2686,7 +2991,8 @@ fn merge(st: &mut State, rng: &mut Rng) -> Option<Undo> {
     let (_, j, x0, z0, _x1, _z1, k) = best?;
     let ra = st.remove(i);
     let rb = st.remove(j);
-    let k = st.add(Item { opt: k, colour: a.colour, y: a.y, x: x0, z: z0 });
+    let colour = d.made_in(k, a.colour)?;
+    let k = st.add(Item { opt: k, colour, y: a.y, x: x0, z: z0 });
     Some(Undo::Merge { k, a: ra, b: rb })
 }
 
@@ -3047,28 +3353,24 @@ fn stack(st: &mut State, rng: &mut Rng) -> Option<Undo> {
     let o = &d.opts[a.opt];
     if o.boxk == BRICK && o.h == 3 {
         let &kp = d.boxes.get(&(PLATE, 1, o.w, o.d))?;
-        if d.snap[d.opts[kp].part * d.n_col + a.colour as usize] != a.colour {
-            return None;
-        }
+        let c = d.made_in(kp, a.colour)?;
         let ra = st.remove(i);
         if !(0..3).all(|dy| cells_free(st, kp, a.y + dy, a.x, a.z)) {
             st.add(ra);
             return None;
         }
-        let added = (0..3).map(|dy| st.add(Item { opt: kp, colour: a.colour, y: a.y + dy, x: a.x, z: a.z })).collect();
+        let added = (0..3).map(|dy| st.add(Item { opt: kp, colour: c, y: a.y + dy, x: a.x, z: a.z })).collect();
         return Some(Undo::Retile { added, removed: vec![ra] });
     }
     if o.boxk == PLATE && o.h == 1 && a.y + 3 <= d.h {
         let &kb = d.boxes.get(&(BRICK, 3, o.w, o.d))?;
-        if d.snap[d.opts[kb].part * d.n_col + a.colour as usize] != a.colour {
-            return None;
-        }
+        let c = d.made_in(kb, a.colour)?;
         let mut idx = vec![i];
         for dy in 1..3 {
             let j = st.owner[d.idx(a.y + dy, a.x + o.first.1, a.z + o.first.2)];
             if j < 0 { return None; }
             let b = *st.item(j as usize);
-            if b.opt != a.opt || b.colour != a.colour || b.x != a.x || b.z != a.z || b.y != a.y + dy {
+            if b.opt != a.opt || (b.colour != a.colour && d.w_col != 0.0) || b.x != a.x || b.z != a.z || b.y != a.y + dy {
                 return None;
             }
             idx.push(j as usize);
@@ -3078,7 +3380,7 @@ fn stack(st: &mut State, rng: &mut Rng) -> Option<Undo> {
             for r in removed { st.add(r); }
             return None;
         }
-        let added = vec![st.add(Item { opt: kb, colour: a.colour, y: a.y, x: a.x, z: a.z })];
+        let added = vec![st.add(Item { opt: kb, colour: c, y: a.y, x: a.x, z: a.z })];
         return Some(Undo::Retile { added, removed });
     }
     None
@@ -3354,7 +3656,8 @@ unsafe fn run(p: &Problem) -> i32 {
                     && st.owner[d.idx(yy, xx, zz)] < 0
             });
             if ok {
-                st.add(Item { opt, colour: init_colour[i], y, x, z });
+                let colour = if d.recolour { d.colour_for(o, y, x, z, &mut filler.colour_counts) } else { init_colour[i] };
+                st.add(Item { opt, colour, y, x, z });
             }
         }
     }
@@ -3367,7 +3670,9 @@ unsafe fn run(p: &Problem) -> i32 {
         })
         .filter(|&(y, x, z)| st.owner[d.idx(y, x, z)] < 0 && (d.lock.is_empty() || !d.lock[d.idx(y, x, z)]))
         .collect();
-    filler.fill(&mut st, &mut rng, cells);
+    if !d.recolour {                                                   // recolouring keeps the parts as they are
+        filler.fill(&mut st, &mut rng, cells);
+    }
     let mut e = st.energy();
     let mut history = vec![e];
     let mut deltas = Vec::new();
@@ -3417,12 +3722,17 @@ unsafe fn run(p: &Problem) -> i32 {
         }
         let before = if d.opt_watch.is_empty() { [0f64; 8] } else { terms(&st) };
         let hits = st.lock_hits;
+        let fid_before = st.fid;
         let (m, u) = match propose(&mut st, &mut filler, &groups, &boxes, &mut rng) {
             Some(u) => u,
             None => continue,
         };
         if st.lock_hits != hits { undo(&mut st, u); continue; }
         n_prop[m] += 1;
+        if d.fid_cap > 0.0 && st.fid > d.fid_cap && st.fid > fid_before {
+            undo(&mut st, u);                                          // past the shape budget: not an option
+            continue;
+        }
         // diagnostics: E2L_WATCH_MOVE=<move name> watches that move, else moves adding a watched option
         let watched = !d.opt_watch.is_empty() && match (&watch_move, &u) {
             (Some(w), _) => *w == m,

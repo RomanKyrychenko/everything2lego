@@ -117,6 +117,13 @@ class Problem(C.Structure):
         ("lock", _P(C.c_uint8)),                                        # cells whose parts stay as they are (null: none)
         ("col_max", C.c_double),                                        # colour error cap (0 = off)
         ("p_echo", C.c_double),                                         # echo move share (from retile's)
+        ("fid_cap", C.c_double),                                        # shape budget (unweighted shape term; 0 = off)
+        ("w_part", C.c_double), ("recolour", C.c_int32),                # energy per part; recolour the starting parts
+        ("w_sdist", C.c_double), ("sdist", _P(C.c_float)),               # surface distance (surface_fit.standoff,
+        ("sd_start", _P(C.c_int32)), ("sd_rows", _P(C.c_float)),         # part_surface.tables)
+        ("w_conn", C.c_double),                                         # per part not joined to the ground layer
+        ("w_coll", C.c_double), ("prot_start", _P(C.c_int32)), ("prot_rows", _P(C.c_int32)),   # collisions
+        ("w_grip", C.c_double), ("p_grip", C.c_double),                 # bonding: parts gripped by just one part
     ]
 
 
@@ -342,6 +349,17 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         ds, dr, tn = arr(ds, np.int32), arr(dr, np.float32), arr(tn, np.float32)
         size_fields.update(w_dir=weights.direction, dir_thr=getattr(weights, "dir_thr", 0.5), t_normal=_ptr(tn, C.c_float),
                            dir_start=_ptr(ds, C.c_int32), dir_rows=_ptr(dr, C.c_float))
+    if getattr(weights, "coll", 0.0) > 0:                                        # geometry reaching past a part's cells
+        from .part_surface import protrusion_tables
+        ps, pr = protrusion_tables(opts)
+        size_fields.update(w_coll=weights.coll, prot_start=_ptr(arr(ps, np.int32), C.c_int32),
+                           prot_rows=_ptr(arr(pr.reshape(-1), np.int32), C.c_int32))
+    if getattr(weights, "sdist", 0.0) > 0:                                       # parts' real surface standing off the target
+        from .part_surface import tables as surface_tables
+        from .surface_fit import standoff
+        ss, sr = surface_tables(opts)
+        size_fields.update(w_sdist=weights.sdist, sdist=_ptr(arr(standoff(target.bits), np.float32), C.c_float),
+                           sd_start=_ptr(arr(ss, np.int32), C.c_int32), sd_rows=_ptr(arr(sr, np.float32), C.c_float))
     if getattr(weights, "roof_mix", 0.0) > 0:                                    # part mix on the target's pitched roof
         from . import surface_mix as sm
         roof, flat = sm.roof_mix(kind), sm.flat_mix(kind)
@@ -462,7 +480,9 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         n_conn=len(CONNECTORS), fits=_ptr(arr(FITS, np.uint8), C.c_uint8),
         halo_start=_ptr(arr(hs, np.int32), C.c_int32),
         halo_yxz=_ptr(arr(np.concatenate(halo), np.int32), C.c_int32),
-        w_cov=weights.cov, w_col=weights.col, col_max=weights.col_max, p_echo=getattr(weights, "echo", 0.0), w_loc=weights.loc, w_glob=weights.glob,
+        w_cov=weights.cov, w_col=weights.col, col_max=weights.col_max, p_echo=getattr(weights, "echo", 0.0), fid_cap=getattr(weights, "fid_cap", 0.0), w_conn=getattr(weights, "conn", 0.0),
+        w_grip=getattr(weights, "grip", 0.0), p_grip=getattr(weights, "p_grip", 0.113),
+        w_part=getattr(weights, "part", 0.0), recolour=int(getattr(weights, "recolour", False)), w_loc=weights.loc, w_glob=weights.glob,
         w_sup=weights.sup, w_side=weights.side,
         n_ref=stats.density * float(target.fill.sum()), w_dens=weights.dens, dens_sd=stats.density_sd,
         p_ref=stats.part_density * float(target.fill.sum()), w_cnt=weights.cnt, cnt_sd=stats.part_density_sd,
