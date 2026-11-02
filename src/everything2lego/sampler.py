@@ -352,6 +352,7 @@ class Target:
     lock: Optional[np.ndarray] = None  # (H, X, Z) bool: cells whose parts no move may change; native only (region_rebuild)
     cell_cat: Optional[np.ndarray] = None  # (H, X, Z) int8: index into `categories` of the cell's semantic label, -1 none
     categories: tuple = ()             # Rebrickable part categories cell_cat indexes (semantic_labels.py); native only
+    cell_part: Optional[np.ndarray] = None  # (H, X, Z) int16: mesh part id (part_labels.py), -1 none: per-part mirror / echo; native only
 
     def __post_init__(self):
         if self.bits is None:

@@ -29,7 +29,7 @@ from typing import Optional
 
 import numpy as np
 
-ABI = 22
+ABI = 23
 INFO_LEN = 20
 ERR_LAYERS = ("shape", "colour", "support", "direction", "statistics")   # lib.rs N_ERR
 PATHS4_BUCKETS = 8
@@ -127,6 +127,7 @@ class Problem(C.Structure):
         ("p_mirror", C.c_double), ("mirror_opt", _P(C.c_int32)),        # mirror move share; per option its image (x, z)
         ("p_phase", C.c_double),                                        # phase move share (from retile's)
         ("w_sem", C.c_double), ("cell_cat", _P(C.c_int8)), ("opt_cat", _P(C.c_int32)),   # semantic labels (semantic_labels.py)
+        ("cell_part", _P(C.c_int16)),                                   # mesh part per cell (part_labels.py); null = off
     ]
 
 
@@ -661,6 +662,8 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         p.w_sem = weights.sem
         p.cell_cat = _ptr(arr(target.cell_cat.reshape(-1), np.int8), C.c_int8)
         p.opt_cat = _ptr(arr([cats.index(v.category) if v.category in cats else -1 for v, _ in opts], np.int32), C.c_int32)
+    if getattr(target, "cell_part", None) is not None:
+        p.cell_part = _ptr(arr(target.cell_part.reshape(-1), np.int16), C.c_int16)
     if getattr(target, "lock", None) is not None:
         p.lock = _ptr(arr(target.lock, np.uint8), C.c_uint8)
     rc = lib.e2l_sample(C.byref(p))

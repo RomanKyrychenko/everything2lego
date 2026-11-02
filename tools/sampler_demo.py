@@ -271,6 +271,7 @@ def main() -> None:
     ap.add_argument("--snap-pitches", default="all", choices=["all", "roof"], help="pitch set for --snap-geometry: all slope row pitches, or roof = without 39.6 (studless cheese caps only; target_snap.PRESETS)")
     ap.add_argument("--semantic", default=None, help="npz from tools/semantic_labels.py (same --studs): per-cell part category (window, door, wheel, fence, plant)")
     ap.add_argument("--semantic-weight", type=float, default=0.0, help="with --semantic: energy bonus per cell a part fills whose label is its Rebrickable category (and the filler proposes such parts there); 0 = off")
+    ap.add_argument("--parts", default=None, help="npz from tools/part_labels.py (same --studs): per-cell mesh part; mirror planes are found per part and mirror / echo map cells only within their part")
     ap.add_argument("--smooth", type=int, default=0, help="apply N iterations of Taubin smoothing to the mesh before voxelising (reduces 1-stud surface noise; 5-10 is a reasonable range)")
     a = ap.parse_args()
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
@@ -296,6 +297,11 @@ def main() -> None:
         if d["cell_cat"].shape != target.want.shape:
             raise SystemExit(f"--semantic shape {d['cell_cat'].shape} != target {target.want.shape}: use the same --studs")
         target.cell_cat, target.categories = d["cell_cat"].astype(np.int8), tuple(str(c) for c in d["categories"])
+    if a.parts:
+        cp = np.load(a.parts)["cell_part"]
+        if cp.shape != target.want.shape:
+            raise SystemExit(f"--parts shape {cp.shape} != target {target.want.shape}: use the same --studs")
+        target.cell_part = cp.astype(np.int16)
     if a.whole_cells:
         target.bits = np.where(target.want, FULL, np.uint64(0)).astype(np.uint64); target.fill = target.want.astype(float)
     if a.colour_smooth > 0:

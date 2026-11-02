@@ -183,6 +183,22 @@ def test_mirror_images_and_mirror_walk_keeps_its_energy():
 
 
 @pytest.mark.skipif(not native.available(), reason="native sampler not built")
+def test_mirror_planes_per_part(capfd):
+    """Two boxes side by side, 4 and 6 studs wide, 6 and 3 plates tall: with parts each is symmetric about its own
+    centre (x = 1.5 and 6.5 studs), not about the pair's; a walk with mirror and echo moves keeps its energy."""
+    want = np.zeros((6, 10, 4), dtype=bool); want[:, :4] = True; want[:3, 4:] = True
+    part = np.full(want.shape, -1, np.int16); part[:, :4][want[:, :4]] = 0; part[:, 4:][want[:, 4:]] = 1
+    target = sampler.Target(want, np.full(want.shape, 4), want.copy(), cell_part=part)
+    w = sampler.Weights(); w.mirror = 0.3; w.echo = 0.1
+    _, info = sampler.sample(target, _models(), iters=2000, seed=2, k_models=1, warmup=50, n_special=60,
+                             engine="native", weights=w)
+    assert info["energy"] == pytest.approx(info["energy_recomputed"], rel=1e-6)
+    err = capfd.readouterr().err
+    rows = {int(l.split()[1].rstrip(":")): l.split("planes")[-1].strip() for l in err.splitlines() if l.startswith("  part ")}
+    assert rows == {0: "x = 1.5, z = 1.5", 1: "x = 6.5, z = 1.5"}, err
+
+
+@pytest.mark.skipif(not native.available(), reason="native sampler not built")
 def test_error_guided_walk_with_resolve_keeps_its_energy_and_maps_its_error():
     """With error-guided moves the energy kept move by move is still the recomputed one, and the error map has one
     row per placement and every cell's shape error where the build differs from the target."""

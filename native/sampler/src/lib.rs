@@ -264,6 +264,9 @@ pub struct Problem {
     pub w_sem: f64,
     pub cell_cat: *const i8,
     pub opt_cat: *const i32,
+    // mesh parts (tools/part_labels.py): H*X*Z part id (-1 none; null = off); mirror planes are found per part and
+    // mirror / echo map a cell only onto cells of its own part
+    pub cell_part: *const i16,
 }
 
 /// Error map layers: shape, colour, support (unsupported, bare side connectors, exposed studs), surface direction,
@@ -448,7 +451,9 @@ struct Data {
     p_mirror: f64,
     mirror_opt: Vec<[i32; 2]>,        // per option: its mirror image's option across x / z planes (-1 none)
     mirror_planes: Vec<(usize, i32)>, // (axis 0 = x, 1 = z; s): cell coordinate c -> s - c
-    msym: Vec<u8>,                    // per cell: bit k set when the target around it is mirror-symmetric about plane k
+    msym: Vec<u8>,                    // per cell: bit k set when the target around it is mirror-symmetric about plane gplanes[group][k]
+    gplanes: Vec<Vec<usize>>,         // per group (part, or one group without parts): its planes, indices into mirror_planes
+    cell_part: Vec<i16>,              // H*X*Z part id, -1 none (empty: no parts)
     lock: Vec<bool>,                                      // H*X*Z (empty when none)
     w_surf: f64,
     n_pclass: usize,
@@ -697,6 +702,8 @@ impl Data {
             mirror_opt: if p.mirror_opt.is_null() { Vec::new() } else { v(p.mirror_opt, n_opt * 2).chunks(2).map(|r| [r[0], r[1]]).collect() },
             mirror_planes: Vec::new(),
             msym: Vec::new(),
+            gplanes: Vec::new(),
+            cell_part: if p.cell_part.is_null() { Vec::new() } else { v(p.cell_part, n) },
             lock: if p.lock.is_null() { Vec::new() } else { v(p.lock, n).iter().map(|&b| b != 0).collect() },
             w_surf: if p.cell_type.is_null() { 0.0 } else { p.w_surf },
             n_pclass: p.n_pclass.max(0) as usize,
@@ -748,8 +755,11 @@ impl Data {
             d.sim = self_similarity(&d);
         }
         if d.p_mirror > 0.0 {
-            let (planes, msym) = mirror_symmetry(&d);
+            // with parts, the global planes first: their cells per part, for comparison (stderr)
+            let glob = if d.cell_part.is_empty() { Vec::new() } else { mirror_symmetry(&d, false, &[]).2 };
+            let (planes, gplanes, msym) = mirror_symmetry(&d, !d.cell_part.is_empty(), &glob);
             d.mirror_planes = planes;
+            d.gplanes = gplanes;
             d.msym = msym;
         }
         d.fid0 = if d.w_in.is_empty() { d.tbits.iter().map(|t| miss(t.count_ones())).sum() }
@@ -956,6 +966,16 @@ impl Data {
 
     fn inside(&self, y: i32, x: i32, z: i32) -> bool {
         y >= 0 && x >= 0 && z >= 0 && y < self.h && x < self.x && z < self.z
+    }
+
+    /// Cells c and q lie in the same mesh part (always, without parts).
+    fn same_part(&self, c: usize, q: usize) -> bool {
+        self.cell_part.is_empty() || self.cell_part[c] == self.cell_part[q]
+    }
+
+    /// The mirror group of cell c: its part (-1 none), or 0 without parts.
+    fn group(&self, c: usize) -> i32 {
+        if self.cell_part.is_empty() { 0 } else { self.cell_part[c] as i32 }
     }
 
     /// Its side connectors facing no cell of the object.
@@ -3541,7 +3561,7 @@ fn self_similarity(d: &Data) -> Vec<u32> {
                         let p = at(y + oy, x + ox, z + oz);
                         let q = at(y + ty + oy, x + tx + ox, z + tz + oz);
                         if oy == 0 && ox == 0 && oz == 0 {
-                            ok = q.map_or(false, |q| d.want[q] && d.fill[q] >= 0.5);
+                            ok = q.map_or(false, |q| d.want[q] && d.fill[q] >= 0.5 && d.same_part(c, q));
                             if !ok { continue 'tr; }
                         }
                         let (bp, bq) = (p.map_or(0, |p| d.tbits[p]), q.map_or(0, |q| d.tbits[q]));
@@ -3752,49 +3772,72 @@ fn mirror_cell((axis, s): (usize, i32), y: i32, x: i32, z: i32) -> (i32, i32, i3
     if axis == 0 { (y, s - x, z) } else { (y, x, s - z) }
 }
 
-const MIRROR_PLANES: usize = 4; // per axis, at most
+const MIRROR_PLANES: usize = 4; // per axis, at most (one per axis per part with parts)
 const MIRROR_MIN: f64 = 0.25;   // a plane counts when this share of the target's samples maps onto the target
+const MIRROR_PART_MIN: usize = 27; // a part's planes need this many wanted cells: below one 3x3x3 window the per-cell
+                                   // test compares mostly other parts' cells, and the part's score is noise
 
 /// The target's mirror symmetry about vertical planes x = s/2 and z = s/2 (half-stud lattice): first the planes
 /// under which much of the target maps onto itself (MIRROR_MIN of its samples; local maxima, the best MIRROR_PLANES
 /// per axis), then per cell whether the 3x3x3 cells around it match the mirrored cells around its mirror cell, with
-/// the tolerances of self_similarity.  Wherever the mesh is symmetric, whatever the object.
-fn mirror_symmetry(d: &Data) -> (Vec<(usize, i32)>, Vec<u8>) {
+/// the tolerances of self_similarity.  Wherever the mesh is symmetric, whatever the object.  `parts`: the same per
+/// mesh part (Data::cell_part) -- its samples onto its own samples, the best plane per axis, a cell's mirror cell in
+/// its part -- so a wing or a wheel is symmetric about its own centre wherever it sits.
+/// Returns the planes, per group (part, or one group) its planes' indices, and per cell the bits of its group's planes.
+/// `glob`: the global run's bits, to report its symmetric cells per part beside the part planes' (stderr).
+fn mirror_symmetry(d: &Data, parts: bool, glob: &[u8]) -> (Vec<(usize, i32)>, Vec<Vec<usize>>, Vec<u8>) {
     let n = d.tbits.len();
+    let group = |c: usize| if parts { d.group(c) } else { 0 };
     let solid = |c: usize| d.want[c] && d.fill[c] >= 0.5;
     let at = |y: i32, x: i32, z: i32| if d.inside(y, x, z) { Some(d.idx(y, x, z)) } else { None };
     let yxz = |c: usize| { let c = c as i32; (c / (d.x * d.z), (c / d.z) % d.x, c % d.z) };
     let mb: [Vec<u64>; 2] = [d.tbits.iter().map(|&b| mirror_bits(b, 0)).collect(), d.tbits.iter().map(|&b| mirror_bits(b, 1)).collect()];
-    let total: u64 = d.tbits.iter().map(|b| b.count_ones() as u64).sum();
-    let mut planes = Vec::new();
-    for axis in 0..2 {
-        let len = if axis == 0 { d.x } else { d.z };
-        let score: Vec<f64> = (0..2 * len - 1).map(|s| {
-            let mut m = 0u64;
-            for c in (0..n).filter(|&c| d.tbits[c] != 0) {
-                let (y, x, z) = yxz(c);
-                let (y, x, z) = mirror_cell((axis, s), y, x, z);
-                if let Some(q) = at(y, x, z) { m += (d.tbits[c] & mb[axis][q]).count_ones() as u64; }
+    let n_group = (0..n).map(|c| group(c) + 1).max().unwrap_or(0).max(1) as usize;
+    let mut members: Vec<Vec<usize>> = vec![Vec::new(); n_group];
+    for c in (0..n).filter(|&c| d.tbits[c] != 0 && group(c) >= 0) {
+        members[group(c) as usize].push(c);
+    }
+    let size: Vec<usize> = (0..n_group).map(|g| members[g].iter().filter(|&&c| solid(c)).count()).collect();
+    let mut planes: Vec<(usize, i32)> = Vec::new();
+    let mut gplanes: Vec<Vec<usize>> = vec![Vec::new(); n_group];
+    for g in (0..n_group).filter(|&g| !parts || size[g] >= MIRROR_PART_MIN) {
+        let total: u64 = members[g].iter().map(|&c| d.tbits[c].count_ones() as u64).sum();
+        for axis in 0..2 {
+            let len = if axis == 0 { d.x } else { d.z };
+            let score: Vec<f64> = (0..2 * len - 1).map(|s| {
+                let mut m = 0u64;
+                for &c in &members[g] {
+                    let (y, x, z) = yxz(c);
+                    let (y, x, z) = mirror_cell((axis, s), y, x, z);
+                    if let Some(q) = at(y, x, z) {
+                        if group(q) == g as i32 { m += (d.tbits[c] & mb[axis][q]).count_ones() as u64; }
+                    }
+                }
+                m as f64 / total.max(1) as f64
+            }).collect();
+            let mut best: Vec<usize> = (0..score.len()).filter(|&s| score[s] >= MIRROR_MIN
+                && (s == 0 || score[s] >= score[s - 1]) && (s + 1 == score.len() || score[s] > score[s + 1])).collect();
+            best.sort_by(|&a, &b| score[b].partial_cmp(&score[a]).unwrap());
+            for &s in best.iter().take(if parts { 1 } else { MIRROR_PLANES }) {
+                if !parts {
+                    eprintln!("mirror plane {} = {:.1} studs: {:.0} % of the target's samples map onto the target",
+                              ["x", "z"][axis], s as f64 / 2.0, 100.0 * score[s]);
+                }
+                gplanes[g].push(planes.len());
+                planes.push((axis, s as i32));
             }
-            m as f64 / total.max(1) as f64
-        }).collect();
-        let mut best: Vec<usize> = (0..score.len()).filter(|&s| score[s] >= MIRROR_MIN
-            && (s == 0 || score[s] >= score[s - 1]) && (s + 1 == score.len() || score[s] > score[s + 1])).collect();
-        best.sort_by(|&a, &b| score[b].partial_cmp(&score[a]).unwrap());
-        for &s in best.iter().take(MIRROR_PLANES) {
-            eprintln!("mirror plane {} = {:.1} studs: {:.0} % of the target's samples map onto the target",
-                      ["x", "z"][axis], s as f64 / 2.0, 100.0 * score[s]);
-            planes.push((axis, s as i32));
         }
     }
     let col_tol = if d.col_max > 0.0 { d.col_max } else { 12.0 };
     let max_diff = (27.0 * 64.0 * 0.06) as u32;
     let mut msym = vec![0u8; n];
-    for c in (0..n).filter(|&c| solid(c)) {
+    for c in (0..n).filter(|&c| solid(c) && group(c) >= 0) {
         let (y, x, z) = yxz(c);
-        'pl: for (k, &pl) in planes.iter().enumerate() {
+        let g = group(c);
+        'pl: for (k, &pi) in gplanes[g as usize].iter().enumerate() {
+            let pl = planes[pi];
             let (my, mx, mz) = mirror_cell(pl, y, x, z);
-            if at(my, mx, mz).map_or(true, |q| !solid(q)) { continue; }
+            if at(my, mx, mz).map_or(true, |q| !solid(q) || group(q) != g) { continue; }
             let mut diff = 0u32;
             for oy in -1..=1 {
                 for ox in -1..=1 {
@@ -3819,11 +3862,33 @@ fn mirror_symmetry(d: &Data) -> (Vec<(usize, i32)>, Vec<u8>) {
         }
     }
     let wanted = (0..n).filter(|&c| solid(c)).count();
-    eprintln!("mirror symmetry: {} of {} wanted cells match their mirror image about some plane ({})",
-              msym.iter().filter(|&&b| b != 0).count(), wanted,
-              planes.iter().enumerate().map(|(k, &(a, s))| format!("{} = {:.1}: {}", ["x", "z"][a], s as f64 / 2.0,
-                  msym.iter().filter(|&&b| b >> k & 1 == 1).count())).collect::<Vec<_>>().join(", "));
-    (planes, msym)
+    let hit = |c: usize| solid(c) && msym[c] != 0;
+    if !parts {
+        eprintln!("mirror symmetry: {} of {} wanted cells match their mirror image about some plane ({})",
+                  (0..n).filter(|&c| hit(c)).count(), wanted,
+                  planes.iter().enumerate().map(|(k, &(a, s))| format!("{} = {:.1}: {}", ["x", "z"][a], s as f64 / 2.0,
+                      msym.iter().filter(|&&b| b >> k & 1 == 1).count())).collect::<Vec<_>>().join(", "));
+    } else {
+        let (mut cnt, mut gcnt) = (vec![0usize; n_group], vec![0usize; n_group]);
+        for c in (0..n).filter(|&c| solid(c) && group(c) >= 0) {
+            cnt[group(c) as usize] += hit(c) as usize;
+            gcnt[group(c) as usize] += (!glob.is_empty() && glob[c] != 0) as usize;
+        }
+        let with = (0..n_group).filter(|&g| !gplanes[g].is_empty()).count();
+        eprintln!("mirror symmetry by part: {} of {} wanted cells match their mirror image in their part (with the global \
+                   planes' cells: {}); {} of {} parts (>= {} wanted cells: {}) have a plane", cnt.iter().sum::<usize>(), wanted,
+                  (0..n).filter(|&c| hit(c) || (solid(c) && !glob.is_empty() && glob[c] != 0)).count(), with, n_group,
+                  MIRROR_PART_MIN, size.iter().filter(|&&s| s >= MIRROR_PART_MIN).count());
+        let mut order: Vec<usize> = (0..n_group).collect();
+        order.sort_by_key(|&g| std::cmp::Reverse(size[g]));
+        for &g in order.iter().take(12) {
+            eprintln!("  part {:>2}: {:>5} wanted cells, {:>5} symmetric ({:>3.0} %; global planes {:>5})  planes {}", g, size[g],
+                      cnt[g], 100.0 * cnt[g] as f64 / size[g].max(1) as f64, gcnt[g],
+                      gplanes[g].iter().map(|&pi| format!("{} = {:.1}", ["x", "z"][planes[pi].0], planes[pi].1 as f64 / 2.0))
+                          .collect::<Vec<_>>().join(", "));
+        }
+    }
+    (planes, gplanes, msym)
 }
 
 /// Mirror: a part's mirror image (the same part turned, or its chiral counterpart: Data::mirror_opt) placed across a
@@ -3842,12 +3907,13 @@ fn mirror(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
     let tpl = *st.item(j as usize);
     let o = &d.opts[tpl.opt];
     let a = d.idx(tpl.y + o.first.0, tpl.x + o.first.1, tpl.z + o.first.2);
-    let ks: Vec<usize> = (0..d.mirror_planes.len()).filter(|&k| d.msym[a] >> k & 1 == 1).collect();
+    let g = d.group(a);
+    let ks: Vec<usize> = (0..8).filter(|&k| d.msym[a] >> k & 1 == 1).collect();
     if ks.is_empty() {
         return None;
     }
     let k = ks[rng.below(ks.len())];
-    let pl = d.mirror_planes[k];
+    let pl = d.mirror_planes[d.gplanes[g as usize][k]];
     let m = d.mirror_opt[tpl.opt][pl.0];
     if m < 0 {
         return None;
@@ -3855,7 +3921,7 @@ fn mirror(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
     let (m, mo) = (m as usize, &d.opts[m as usize]);
     if (mo.h, mo.w, mo.d) != (o.h, o.w, o.d) || !o.cells.iter().all(|&(cy, cx, cz, _, _)| {
         let c = d.idx(tpl.y + cy, tpl.x + cx, tpl.z + cz);
-        d.tbits[c] == 0 || d.msym[c] >> k & 1 == 1
+        d.tbits[c] == 0 || (d.group(c) == g && d.msym[c] >> k & 1 == 1)
     }) {
         return None;
     }
@@ -4180,5 +4246,5 @@ pub unsafe extern "C" fn e2l_sample(p: *const Problem) -> i32 {
 /// The layout version: Python checks it before calling.
 #[no_mangle]
 pub extern "C" fn e2l_abi() -> i32 {
-    22
+    23
 }
