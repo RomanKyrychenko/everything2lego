@@ -248,7 +248,9 @@ def load_hf(name: str):
     """(model, processor) of a transformers image-text checkpoint (CLIP, SigLIP 2), downloaded on first use."""
     os.environ.setdefault("HF_HOME", "/Volumes/PRO-G40/huggingface")
     from transformers import AutoModel, AutoProcessor
-    return AutoModel.from_pretrained(name).eval(), AutoProcessor.from_pretrained(name)
+    import torch
+    dev = "mps" if torch.backends.mps.is_available() else "cpu"
+    return AutoModel.from_pretrained(name).eval().to(dev), AutoProcessor.from_pretrained(name)
 
 
 def clip_probs(images: list) -> np.ndarray:
@@ -259,16 +261,16 @@ def clip_probs(images: list) -> np.ndarray:
         model, proc = load_hf(MODEL)
         with torch.no_grad():
             pad = dict(padding="max_length", max_length=64) if "siglip" in MODEL.lower() else dict(padding=True)
-            te = model.get_text_features(**proc(text=txt, return_tensors="pt", **pad))
+            te = model.get_text_features(**proc(text=txt, return_tensors="pt", **pad).to(model.device))
             te = getattr(te, "pooler_output", te)        # transformers 5: an output object
             te = te / te.norm(dim=-1, keepdim=True)
             te = te.reshape(len(CLASSES), len(TEMPLATES), -1).mean(1); te = te / te.norm(dim=-1, keepdim=True)
             out = []
             for b in range(0, len(images), 16):
-                ie = model.get_image_features(**proc(images=images[b:b + 16], return_tensors="pt"))
+                ie = model.get_image_features(**proc(images=images[b:b + 16], return_tensors="pt").to(model.device))
                 ie = getattr(ie, "pooler_output", ie)
                 ie = ie / ie.norm(dim=-1, keepdim=True)
-                out.append((model.logit_scale.exp() * ie @ te.T).softmax(-1).numpy())
+                out.append((model.logit_scale.exp() * ie @ te.T).softmax(-1).cpu().numpy())
         return np.concatenate(out) if out else np.zeros((0, len(CLASSES)))
     model, proc = load_clip()
     with torch.no_grad():
