@@ -199,6 +199,23 @@ def test_mirror_planes_per_part(capfd):
 
 
 @pytest.mark.skipif(not native.available(), reason="native sampler not built")
+def test_mirror_pair_of_parts(capfd):
+    """Two staircases, mirror images of each other across x = 4.5 studs with a gap between, as two parts: the pair's
+    plane is found (all samples map), and a walk with mirror moves across it keeps its energy."""
+    want = np.zeros((6, 10, 4), dtype=bool)
+    for x, hgt in enumerate((6, 4, 3, 2)):
+        want[:hgt, x] = want[:hgt, 9 - x] = True
+    part = np.full(want.shape, -1, np.int16); part[:, :5][want[:, :5]] = 0; part[:, 5:][want[:, 5:]] = 1
+    target = sampler.Target(want, np.full(want.shape, 4), want.copy(), cell_part=part)
+    w = sampler.Weights(); w.mirror = 0.3
+    _, info = sampler.sample(target, _models(), iters=2000, seed=2, k_models=1, warmup=50, n_special=60,
+                             engine="native", weights=w)
+    assert info["energy"] == pytest.approx(info["energy_recomputed"], rel=1e-6)
+    err = capfd.readouterr().err
+    assert [l for l in err.splitlines() if l.startswith("mirror pair")] == ["mirror pair parts 0 / 1: x = 4.5, 100 %"], err
+
+
+@pytest.mark.skipif(not native.available(), reason="native sampler not built")
 def test_error_guided_walk_with_resolve_keeps_its_energy_and_maps_its_error():
     """With error-guided moves the energy kept move by move is still the recomputed one, and the error map has one
     row per placement and every cell's shape error where the build differs from the target."""
