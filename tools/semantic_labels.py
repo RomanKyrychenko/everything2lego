@@ -240,12 +240,38 @@ def load_clip():
     return model.eval(), CLIPProcessor(image_processor=CLIPImageProcessor(), tokenizer=CLIPTokenizer.from_pretrained(vocab))
 
 
+MODEL = CLIP_ID                                  # --clip: any transformers CLIP / SigLIP checkpoint instead
+
+
+@lru_cache(maxsize=2)
+def load_hf(name: str):
+    """(model, processor) of a transformers image-text checkpoint (CLIP, SigLIP 2), downloaded on first use."""
+    os.environ.setdefault("HF_HOME", "/Volumes/PRO-G40/huggingface")
+    from transformers import AutoModel, AutoProcessor
+    return AutoModel.from_pretrained(name).eval(), AutoProcessor.from_pretrained(name)
+
+
 def clip_probs(images: list) -> np.ndarray:
     """(n_images, n_classes) softmax over CLASSES (prompt ensemble)."""
     import torch
+    txt = [t.format(p) for _, p, _ in CLASSES for t in TEMPLATES]
+    if MODEL != CLIP_ID:
+        model, proc = load_hf(MODEL)
+        with torch.no_grad():
+            pad = dict(padding="max_length", max_length=64) if "siglip" in MODEL.lower() else dict(padding=True)
+            te = model.get_text_features(**proc(text=txt, return_tensors="pt", **pad))
+            te = getattr(te, "pooler_output", te)        # transformers 5: an output object
+            te = te / te.norm(dim=-1, keepdim=True)
+            te = te.reshape(len(CLASSES), len(TEMPLATES), -1).mean(1); te = te / te.norm(dim=-1, keepdim=True)
+            out = []
+            for b in range(0, len(images), 16):
+                ie = model.get_image_features(**proc(images=images[b:b + 16], return_tensors="pt"))
+                ie = getattr(ie, "pooler_output", ie)
+                ie = ie / ie.norm(dim=-1, keepdim=True)
+                out.append((model.logit_scale.exp() * ie @ te.T).softmax(-1).numpy())
+        return np.concatenate(out) if out else np.zeros((0, len(CLASSES)))
     model, proc = load_clip()
     with torch.no_grad():
-        txt = [t.format(p) for _, p, _ in CLASSES for t in TEMPLATES]
         te = model.text_projection(model.text_model(**proc(text=txt, return_tensors="pt", padding=True)).pooler_output)
         te = te / te.norm(dim=-1, keepdim=True)
         te = te.reshape(len(CLASSES), len(TEMPLATES), -1).mean(1)
@@ -258,7 +284,7 @@ def clip_probs(images: list) -> np.ndarray:
     return np.concatenate(out) if out else np.zeros((0, len(CLASSES)))
 
 
-def main() -> None:
+def parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("mesh"); ap.add_argument("--studs", type=int, default=32)
     ap.add_argument("--out", required=True); ap.add_argument("--sheet", default=None)
@@ -272,7 +298,16 @@ def main() -> None:
                     help="SAMesh face2label.json and segmented.glb: mesh parts as candidates (each whole, and the colour regions inside each)")
     ap.add_argument("--snap-geometry", action="store_true", help="label the snapped target (as sampler_demo --snap-geometry)")
     ap.add_argument("--snap-pitches", default="all", choices=["all", "roof"])
-    a = ap.parse_args()
+    ap.add_argument("--clip", default=CLIP_ID, help="image-text model (transformers id; default the cached ViT-B/32)")
+    return ap
+
+
+def classify(a, alone_all: bool = False, pick=None) -> dict:
+    """Candidate regions of a.mesh, each with its CLIP probabilities ("prob"; "prob_alone" for the candidates seen
+    alone, every region with `alone_all`) and the keep rule applied.  -> the target, mesh, frame and regions.
+    `pick(mesh, regs) -> regs`: only these are scored (clip_bench.py)."""
+    global MODEL
+    MODEL = a.clip
     from everything2lego.sampler import vocabulary
     from sampler_demo import target_from_mesh
     # the sampler's own target: its cells, as --studs (and --snap-geometry) builds them, and its mesh and frame
@@ -298,6 +333,8 @@ def main() -> None:
             f = np.flatnonzero(flab == l)
             if fa[f].sum() / 2 >= a.min_area:
                 regs.append({"id": len(regs), "faces": f, "area": float(fa[f].sum() / 2), "part": int(l), "whole": True})
+    if pick is not None:
+        regs = pick(mesh, regs)
     print(f"{len(regs)} candidate regions ({len(mesh.faces)} faces)", flush=True)
     for r in regs:                                       # the way it faces, area-weighted, in stud space
         nm = (fn[r["faces"]] * fa[r["faces"], None]).sum(0); r["normal"] = nm / (np.linalg.norm(nm) + 1e-12)
@@ -316,11 +353,16 @@ def main() -> None:
                  p_sem=float(p[sem].max()), sem_cls=CLASSES[int(np.flatnonzero(sem)[np.argmax(p[sem])])][0])
         r["keep"] = bool(sem[o[0]] and r["p"] >= a.p_min and r["margin"] >= a.margin)
     # the region itself must be the feature, not a sliver beside it: seen alone, it is still most likely that class
-    cand = [r for r in regs if r["keep"]]
+    for r, p in zip(regs, prob):
+        r["prob"] = p
+    cand = [r for r in regs if r["keep"] or alone_all]
     alone = clip_probs([render(P, mesh.faces, fcol, fn, r["faces"], r["normal"], alone=True) for r in cand])
     # by category, not class: a pane alone reads "a door" as often as "a window" -- both are Windows and Doors
     ccat = np.array([c for _, _, c in CLASSES], dtype=object)
     for r, g in zip(cand, alone):
+        r["prob_alone"] = g
+        if not r["keep"]:
+            continue
         same = ccat == ccat[r["k"]]
         r["alone"], r["alone_cls"] = float(g[same].sum()), CLASSES[int(g.argmax())][0]
         r["keep"] = bool(same[g.argmax()] and r["alone"] >= a.p_alone)
@@ -337,6 +379,15 @@ def main() -> None:
     for r in regs:
         if r["keep"] and not r.get("whole") and r["part"] in whole:
             r["keep"], r["note"] = False, "inside a part kept whole"
+    return dict(t=t, mesh=mesh, T=T, regs=regs, cats=cats, cell_part=cell_part,
+                part_rank=part_rank if flab is not None else {}, P=P, fcol=fcol, fn=fn, ctx=ctx)
+
+
+def main() -> None:
+    a = parser().parse_args()
+    c = classify(a)
+    t, mesh, T, regs, cats, cell_part, part_rank = (c[k] for k in ("t", "mesh", "T", "regs", "cats", "cell_part", "part_rank"))
+    P, fcol, fn, ctx = c["P"], c["fcol"], c["fn"], c["ctx"]
     # kept regions -> the sampler's cells: surface samples (~16 per stud^2) to the nearest wanted cell within a cell,
     # then the box those cells span, its showing wanted cells (a window's pane and frame, a wheel's disc, not just the
     # patches the region's texels hit); a window / door that box grown into the wall (feature_box: one stud deep, to
@@ -369,7 +420,7 @@ def main() -> None:
         box &= (t.want if r["cls"] in EMBEDDED else show) & (cell_cat < 0)
         cell_cat[box] = c
         r["cells"], r["box"] = int(box.sum()), [int(v) for v in hi - lo]
-    table = [{k: (round(v, 3) if isinstance(v, float) else v) for k, v in r.items() if k not in ("faces", "normal")}
+    table = [{k: (round(v, 3) if isinstance(v, float) else v) for k, v in r.items() if k not in ("faces", "normal", "prob", "prob_alone")}
              for r in regs]
     np.savez_compressed(a.out, cell_cat=cell_cat, categories=np.array(cats), regions=json.dumps(table))
     for r in sorted((r for r in regs if r["keep"]), key=lambda r: (r["cls"], -r["area"])):
