@@ -4,7 +4,10 @@ Each statistic is something you can see in a render: the mix of bricks / plates 
 parts, how long the bricks are, how many studded tops are left bare, how often a brick sits exactly on a brick of
 the same size (stacked joints instead of a bonded wall), how many parts are mounted sideways, colours per 100 parts.
 
-    .venv-arm/bin/python tools/learn/build_stats.py build.ldr [--kind building --n 150]
+    .venv-arm/bin/python tools/learn/build_stats.py build.ldr [--kind building --n 150] [--extra-ref brickbench]
+
+--extra-ref brickbench adds the BrickBench (kulits/BrickBench-Runs, 'set' setting) agent-designed builds of building
+tasks as a second reference -- below human design quality, so a reference for "designed", not a target.
 """
 from __future__ import annotations
 
@@ -21,6 +24,20 @@ HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(HERE), str(HERE.parent / "set_study")]
 DATA = Path("/Volumes/PRO-G40/lego_data")
 _cat: dict = {}; _bb: dict = {}
+BRICKBENCH = DATA / "brickbench"                                                  # <agent>/set-XXX/model.mpd
+BB_AGENTS = ("astra", "opus55", "sol61", "gemini")
+# a set task is a building when one of its whole entities (from the task's questions) is one of these
+BB_BUILDING = {"castle", "gatehouse", "fortress", "mill", "house", "houses", "cottage", "diner", "restaurant", "store",
+               "pizzeria", "bar", "buildings", "town", "hacienda", "shop", "lobby", "booth"}
+
+
+def brickbench_buildings() -> list[Path]:
+    """model.mpd of BrickBench set tasks tagged as buildings, for the agents in BB_AGENTS that are downloaded."""
+    import json
+    tasks = json.load(open(BRICKBENCH / "set_tasks.json"))
+    ids = [t["id"] for t in tasks if any(q["kind"] == "entity" and q["subtype"] == "whole" and q["key"] in BB_BUILDING
+                                         for q in t["questions"])]
+    return [f for a in BB_AGENTS for i in ids if (f := BRICKBENCH / a / i / "model.mpd").exists()]
 
 
 def category(name: str) -> str:
@@ -123,6 +140,7 @@ def stats(path: Path) -> dict | None:
 def main() -> None:
     ap = argparse.ArgumentParser(); ap.add_argument("builds", type=Path, nargs="+")
     ap.add_argument("--kind", default="building"); ap.add_argument("--n", type=int, default=150); ap.add_argument("--min-parts", type=int, default=200)
+    ap.add_argument("--extra-ref", choices=["brickbench"], help="also show BrickBench agent-designed building builds")
     a = ap.parse_args()
     kinds = {r["id"]: r["kind"] for r in csv.DictReader(open(DATA / "analysis" / "set_kinds.csv"))}
     files = [f for f in sorted((DATA / "omr" / "files").glob("*.mpd")) if kinds.get(f.stem.split("_")[0]) == a.kind]
@@ -133,18 +151,31 @@ def main() -> None:
         if s and s["parts"] >= a.min_parts: real.append(s)
         if len(real) >= a.n: break
     print(f"real {a.kind} sets: {len(real)} (>= {a.min_parts} parts)")
+    extra = []
+    if a.extra_ref:
+        for f in brickbench_buildings():
+            try: s = stats(f)
+            except Exception: continue                                             # noqa: BLE001
+            if s and s["parts"] >= a.min_parts: extra.append(s)
+        print(f"brickbench building builds: {len(extra)} (>= {a.min_parts} parts)")
     ours = [(p, stats(p)) for p in a.builds]
     keys = [k for k in real[0] if k != "parts"]
     rows = []
     for k in keys:
         v = np.array([r[k] for r in real]); p10, med, p90 = np.percentile(v, [10, 50, 90])
         gap = [(s[k] - med) / max(1e-9, (p90 - p10) / 2) for _, s in ours]               # in half-ranges of the real spread
-        rows.append((max(abs(g) for g in gap), k, p10, med, p90, [s[k] for _, s in ours], gap))
+        bb = np.percentile([r[k] for r in extra], [10, 50, 90]) if extra else None
+        rows.append((max(abs(g) for g in gap), k, p10, med, p90, [s[k] for _, s in ours], gap, bb))
     names = [p.parent.name or p.stem for p, _ in ours]
-    print(f"{'statistic':15s} {'real p10':>8} {'median':>7} {'p90':>7}  " + "  ".join(f"{n[:14]:>14}" for n in names))
-    for _, k, p10, med, p90, vals, gap in sorted(rows, reverse=True):
-        print(f"{k:15s} {p10:8.3f} {med:7.3f} {p90:7.3f}  " + "  ".join(f"{v:8.3f} ({g:+4.1f})" for v, g in zip(vals, gap)))
-    print("(+/-x.x = distance from the real median in half real-ranges; |x| > 1 is outside the p10-p90 band)")
+    print(f"{'statistic':15s} {'real p10':>8} {'median':>7} {'p90':>7}  " + (f"{'bb p10':>7} {'median':>7} {'p90':>7}  " if extra else "")
+          + "  ".join(f"{n[:14]:>14}" for n in names))
+    for _, k, p10, med, p90, vals, gap, bb in sorted(rows, key=lambda r: r[0], reverse=True):
+        # * = outside both the real and the BrickBench p10-p90 bands
+        out = [bb is not None and not p10 <= v <= p90 and not bb[0] <= v <= bb[2] for v in vals]
+        print(f"{k:15s} {p10:8.3f} {med:7.3f} {p90:7.3f}  " + (f"{bb[0]:7.3f} {bb[1]:7.3f} {bb[2]:7.3f}  " if extra else "")
+              + "  ".join(f"{v:8.3f} ({g:+4.1f}){'*' if o else ' '}" for v, g, o in zip(vals, gap, out)))
+    print("(+/-x.x = distance from the real median in half real-ranges; |x| > 1 is outside the p10-p90 band"
+          + ("; * = outside both the real and the BrickBench p10-p90 bands)" if extra else ")"))
 
 
 if __name__ == "__main__":

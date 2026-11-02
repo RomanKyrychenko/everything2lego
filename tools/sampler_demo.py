@@ -70,7 +70,8 @@ def target_from_mesh(path: str, studs: int, shell: int, kind: str | None = None,
                      seg_label: np.ndarray | None = None,
                      seg_kind_of: dict[int, str] | None = None,
                      carve: np.ndarray | None = None,
-                     smooth: int = 0, rim: int | None = None, snap_geometry: bool = False) -> Target:
+                     smooth: int = 0, rim: int | None = None, snap_geometry: bool = False,
+                     snap_pitches: str = "all") -> Target:
     if smooth > 0 or snap_geometry:
         import trimesh, tempfile, os
         m = trimesh.load(path, force="mesh", process=False)
@@ -79,14 +80,15 @@ def target_from_mesh(path: str, studs: int, shell: int, kind: str | None = None,
         trimesh.smoothing.filter_taubin(m, iterations=smooth, lamb=0.1, nu=-0.11)
         if snap_geometry:
             from everything2lego.target_snap import snap
-            m, rep = snap(m, studs=studs)
+            m, rep = snap(m, studs=studs, pitches=snap_pitches)
             print(f"snap geometry: {rep['n_snapped']}/{rep['n_regions']} regions, {rep['snapped_area']:.0%} of the surface, "
                   f"vertices moved {rep['move_mean_studs']:.2f} studs mean, {rep['move_max_studs']:.2f} max")
         tmp = tempfile.NamedTemporaryFile(suffix=".glb", delete=False)
         m.export(tmp.name)
         tmp.close()
         try:
-            t = MeshTarget.from_path(tmp.name, max_studs=studs, n_samples=40000, min_island_cells=8)
+            # snap squares the mesh to the grid itself; aligning again would turn its snapped planes off the axes
+            t = MeshTarget.from_path(tmp.name, max_studs=studs, n_samples=40000, min_island_cells=8, align=not snap_geometry)
         finally:
             os.unlink(tmp.name)
     else:
@@ -265,7 +267,8 @@ def main() -> None:
     ap.add_argument("--init-guidance-model", default=None, help="path to an OMR-only CNN checkpoint for CFG when the --init-from-cnn is a hybrid/distilled model")
     ap.add_argument("--init-guidance", type=float, default=1.0, help="CFG scale for the CNN seed (1.0 = pure conditional, >1 amplifies, <1 blends toward unconditional)")
     ap.add_argument("--subassemblies", type=int, default=0, help="group placements into N-part submodels in an MPD .ldr (real sets have 11-26 sub-assemblies; 25 is a reasonable target)")
-    ap.add_argument("--snap-geometry", action="store_true", help="turn the mesh's smooth surfaces to pitches LEGO slopes build, headings to the grid axes, before voxelising (target_snap.py)")
+    ap.add_argument("--snap-geometry", action="store_true", help="turn the mesh's stud-scale planes to pitches LEGO slopes build, headings to the grid axes, the rest deformed smoothly, before voxelising (target_snap.py)")
+    ap.add_argument("--snap-pitches", default="all", choices=["all", "roof"], help="pitch set for --snap-geometry: all slope row pitches, or roof = without 39.6 (studless cheese caps only; target_snap.PRESETS)")
     ap.add_argument("--smooth", type=int, default=0, help="apply N iterations of Taubin smoothing to the mesh before voxelising (reduces 1-stud surface noise; 5-10 is a reasonable range)")
     a = ap.parse_args()
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
@@ -285,7 +288,7 @@ def main() -> None:
         carve = extra if carve is None else (carve | extra)
     target = target_from_mesh(a.mesh, a.studs, a.shell, a.kind, stand=a.stand, rim=a.base_rim, regions=regions,
                               seg_label=seg_label, seg_kind_of=seg_kind_of, carve=carve,
-                              smooth=a.smooth, snap_geometry=a.snap_geometry)
+                              smooth=a.smooth, snap_geometry=a.snap_geometry, snap_pitches=a.snap_pitches)
     if a.whole_cells:
         target.bits = np.where(target.want, FULL, np.uint64(0)).astype(np.uint64); target.fill = target.want.astype(float)
     if a.colour_smooth > 0:

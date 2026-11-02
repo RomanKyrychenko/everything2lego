@@ -59,8 +59,8 @@ class MeshTarget:
                    n_samples: int = 100_000,
                    color_samples: int = 120_000,
                    subvoxels: int = 1,
-                   min_island_cells: int = 0) -> "MeshTarget":
-        """Load a mesh from disk and build a MeshTarget."""
+                   min_island_cells: int = 0, align: bool = True) -> "MeshTarget":
+        """Load a mesh from disk and build a MeshTarget (align=False: the mesh is already square to the grid)."""
         mesh = load_mesh(path)
         # `voxelize.load_mesh` intentionally skips trimesh processing (for
         # reproducible voxelization). But the facet-based detector requires
@@ -74,7 +74,7 @@ class MeshTarget:
         return cls.from_mesh(mesh, max_studs=max_studs,
                               n_samples=n_samples,
                               color_samples=color_samples,
-                              subvoxels=subvoxels,
+                              subvoxels=subvoxels, align=align,
                               min_island_cells=min_island_cells)
 
     @classmethod
