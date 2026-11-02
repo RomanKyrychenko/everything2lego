@@ -3,27 +3,38 @@ asks for -- a window, a door, a wheel, a fence, plants -- where the mesh only
 paints it or barely models it, for the sampler's --semantic.
 
     python tools/semantic_labels.py mesh.glb --studs 32 --out labels.npz [--sheet sheet.png]
+        [--samesh face2label.json segmented.glb]
 
   - candidate regions at every scale, as selective search groups an image: the
     leaves are connected faces of one texture-colour cluster (k-means in Lab over
     each face's texel, smoothed over neighbours) and one facing axis; adjacent
     regions merge most similar first, and each merge of --min-area..--max-area
     stud^2 is a candidate (a window pane, the pane with its frame, a whole wheel);
+  - with --samesh (zero-shot mesh parts, as tools/part_labels.py reads them): leaves and merges stay inside one part,
+    each drawn with only its part around it (no wheel or eave in front of a window), and each part whole is a
+    candidate too (any size, drawn along its main facing axis, everything around it);
   - each candidate is drawn along its mean normal (a painter's-algorithm render
     in the texture's colours, its surroundings dimmed) and labelled zero-shot by
     CLIP against semantic classes (window, door, wheel, fence, ladder, plants:
     their Rebrickable category in the part vocabulary) and plain ones (wall,
     roof, stone, ground, grass, water, waterfall, wood, chimney: nothing special);
-  - kept when the best class is semantic, p >= --p-min (0.7), it leads the
+  - kept when the best class is semantic, p >= --p-min (0.75), it leads the
     runner-up by >= --margin (0.2), and drawn ALONE (no surroundings) the region
-    is still that class first with p >= --p-alone (0.3) -- with context alone,
-    every beam and sill beside a window is "a window" (CLIP reads the context);
-    calibrated on the watermill (32 studs, --sheet): real windows p 0.78-1.00,
-    alone 0.50-0.91; slivers beside them alone <= 0.25; a fence post p 0.58;
+    is still that Rebrickable category first with p >= --p-alone (0.3), summed over
+    its classes (a pane alone reads "door" as often as "window") -- with context
+    alone, every beam and sill beside a window is "a window" (CLIP reads the context);
+    a window / door region at least a tenth of the smallest such part's face;
+    calibrated on the watermill (32 studs, --sheet): real windows p 0.77-1.00,
+    alone 0.42-0.99; slivers beside them alone <= 0.25; a fence post p 0.58; a
+    window's side face p 0.71 "door" (hence 0.75); shutters read "door" 0.6-1.8 stud^2;
+    a whole part read as a window / door that holds a kept one is the wall around it;
+    a region inside a part kept whole as a wheel / fence / plant is a piece of it;
   - each kept region's surface is sampled, the samples go to the nearest wanted
     cell of the sampler's own target (sampler_demo.target_from_mesh, same
     --studs), and the showing wanted cells in the box they span take the label
-    (smaller regions first): `cell_cat` (H, X, Z) int8 into `categories`, -1 none.
+    (smaller regions first): `cell_cat` (H, X, Z) int8 into `categories`, -1 none;
+    a window / door takes that box grown one stud into the wall and to the smallest
+    such part (feature_box), its wanted cells; a whole part all of its cells.
 
 CLIP (laion/CLIP-ViT-B-32-laion2B-s34B-b79K) is read from the local HF cache only.
 """
@@ -53,6 +64,28 @@ CLASSES = [("window", "a window", "Windows and Doors"), ("door", "a door", "Wind
            ("ground", "the ground", None), ("grass", "grass", None), ("water", "water", None), ("waterfall", "a waterfall", None),
            ("wood", "wooden planks", None), ("chimney", "a chimney", None)]
 TEMPLATES = ("a 3D render of {}.", "a close-up of {} on a model.", "{}")
+# features set INTO a wall, filled to the smallest such part (plates high, studs wide) and one stud deep:
+# window 60592 1x2x2 (6 plates x 2 studs), door frame 60596 1x4x6 (18 plates x 4 studs)
+EMBEDDED = {"window": (6, 2), "door": (18, 4)}
+
+
+def feature_box(lo, hi, normal, size, shape) -> tuple[np.ndarray, np.ndarray]:
+    """The cell box (y plate, x, z) a part set into the wall would take: the region's box [lo, hi), grown one stud
+    inward (against `normal`, stud-space x y z) and, across the wall, to at least `size` (plates high, studs wide)."""
+    lo, hi = np.array(lo), np.array(hi)
+    n = np.asarray(normal, float)[[1, 0, 2]]             # -> cell axes (y, x, z)
+    ax = int(np.argmax(np.abs(n)))                       # facing axis
+    depth = int(np.ceil(1 / PLATE)) if ax == 0 else 1
+    if n[ax] > 0:
+        lo[ax] -= depth
+    else:
+        hi[ax] += depth
+    for b in {0, 1, 2} - {ax}:
+        need = size[0] if b == 0 else size[1]
+        grow = need - (hi[b] - lo[b])
+        if grow > 0:
+            lo[b] -= grow // 2; hi[b] += grow - grow // 2
+    return np.clip(lo, 0, shape), np.clip(hi, 0, shape)
 
 
 def face_colours(mesh) -> np.ndarray:
@@ -61,11 +94,13 @@ def face_colours(mesh) -> np.ndarray:
     return _face_color_lookup(mesh, mesh.triangles_center, np.arange(len(mesh.faces)))
 
 
-def regions(mesh, grid_T: np.ndarray, k: int, min_area: float, max_area: float, seed: int = 0) -> list[dict]:
-    """Candidate regions [{id, faces, area (stud^2)}] at every scale, as selective search (Uijlings et al. 2013)
+def regions(mesh, grid_T: np.ndarray, k: int, min_area: float, max_area: float, seed: int = 0,
+            part: np.ndarray | None = None) -> list[dict]:
+    """Candidate regions [{id, faces, area (stud^2), part}] at every scale, as selective search (Uijlings et al. 2013)
     groups an image: the leaves are connected faces of one colour cluster and one facing axis; adjacent regions merge
     most similar first (close mean colour, both small), and each merge of `min_area`..`max_area` stud^2 that grew its
-    larger part by half is a candidate -- a window pane, the pane with its frame, a whole wheel of many spokes."""
+    larger part by half is a candidate -- a window pane, the pane with its frame, a whole wheel of many spokes.
+    `part` (F,) mesh part label per face: leaves and merges stay inside one part (a window inside its wall band)."""
     import heapq
     from scipy.sparse import csr_matrix
     from sklearn.cluster import KMeans
@@ -79,16 +114,20 @@ def regions(mesh, grid_T: np.ndarray, k: int, min_area: float, max_area: float, 
     cl = KMeans(n_clusters=k, n_init=4, random_state=seed).fit_predict(lab)
     n = mesh.face_normals
     axis = np.argmax(np.abs(n), 1) * 2 + (n[np.arange(len(n)), np.argmax(np.abs(n), 1)] > 0)
-    comp = np.unique(_components(mesh, cl * 6 + axis), return_inverse=True)[1]
+    pid = np.zeros(len(lab), np.int64) if part is None else np.unique(part, return_inverse=True)[1]
+    comp = np.unique(_components(mesh, (cl * 6 + axis) + 6 * k * pid), return_inverse=True)[1]
     tri = stud_space(mesh.triangles.reshape(-1, 3), grid_T).reshape(-1, 3, 3)
     area = np.linalg.norm(np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]), axis=1) / 2
     m = comp.max() + 1
+    cpart = np.full(m, -1, np.int64)
+    if part is not None:
+        cpart[comp] = part
     ar = np.bincount(comp, area, m)
     col = np.stack([np.bincount(comp, lab[:, i] * area, m) for i in range(3)], 1) / np.maximum(ar, 1e-12)[:, None]
     leaves = {r: [r] for r in range(m)}
     nb = {r: set() for r in range(m)}
     for a, b in zip(comp[e[:, 0]], comp[e[:, 1]]):
-        if a != b:
+        if a != b and cpart[a] == cpart[b]:
             nb[a].add(b); nb[b].add(a)
     total = ar.sum()
     sim = lambda a, b: np.exp(-np.linalg.norm(col[a] - col[b]) / 20) + 1 - (ar[a] + ar[b]) / total
@@ -98,7 +137,7 @@ def regions(mesh, grid_T: np.ndarray, k: int, min_area: float, max_area: float, 
     alive, out = set(range(m)), []
     for r in range(m):
         if min_area <= ar[r] <= max_area:
-            out.append(np.flatnonzero(comp == r))
+            out.append((np.flatnonzero(comp == r), cpart[r]))
     while heap:
         _, a, b = heapq.heappop(heap)
         if a not in alive or b not in alive:
@@ -112,8 +151,8 @@ def regions(mesh, grid_T: np.ndarray, k: int, min_area: float, max_area: float, 
             nb[c] -= {a, b}; nb[c].add(r)
             heapq.heappush(heap, (-sim(r, c), r, c))
         if min_area <= ar[r] <= max_area and ar[r] >= 1.5 * max(ar[a], ar[b]):
-            out.append(np.flatnonzero(np.isin(comp, leaves[r])))
-    return [{"id": i, "faces": f, "area": float(area[f].sum())} for i, f in enumerate(out)]
+            out.append((np.flatnonzero(np.isin(comp, leaves[r])), cpart[leaves[r][0]]))
+    return [{"id": i, "faces": f, "area": float(area[f].sum()), "part": int(q)} for i, (f, q) in enumerate(out)]
 
 
 def stud_space(p: np.ndarray, T: np.ndarray) -> np.ndarray:
@@ -123,9 +162,10 @@ def stud_space(p: np.ndarray, T: np.ndarray) -> np.ndarray:
 
 
 def render(P: np.ndarray, faces: np.ndarray, fcol: np.ndarray, fn: np.ndarray, region: np.ndarray, normal: np.ndarray,
-           size: int = 224, ctx: float = 1.3, outline: bool = False, alone: bool = False):
+           size: int = 224, ctx: float = 1.3, outline: bool = False, alone: bool = False, context: np.ndarray | None = None):
     """The region seen along -normal (orthographic, stud-space vertices P), framed with `ctx` times its extent of
-    surroundings, the surroundings dimmed; faces painted far to near.  `alone`: the region by itself, nothing around it."""
+    surroundings, the surroundings dimmed; faces painted far to near.  `alone`: the region by itself, nothing around it;
+    `context` (F,) bool: only these faces as surroundings (its mesh part: no wheel or eave in front of a window)."""
     from PIL import Image, ImageDraw
     f = -np.asarray(normal, float)
     up = np.array([0.0, 1.0, 0.0]) if abs(f[1]) < 0.9 else np.array([0.0, 0.0, -1.0])
@@ -142,6 +182,8 @@ def render(P: np.ndarray, faces: np.ndarray, fcol: np.ndarray, fn: np.ndarray, r
     light = np.array([0.3, 0.8, -0.5]); light /= np.linalg.norm(light)
     if alone:
         sel &= inreg
+    elif context is not None:
+        sel &= context | inreg
     for i in np.flatnonzero(sel)[np.argsort(-cen[sel, 2])]:           # far first (depth along f, larger is farther)
         k = (0.75 + 0.25 * abs(fn[i] @ light)) * (1.0 if inreg[i] else 0.4)
         xy = [(size / 2 + (q[v, 0] - c[0]) * s, size / 2 - (q[v, 1] - c[1]) * s) for v in faces[i]]
@@ -223,9 +265,11 @@ def main() -> None:
     ap.add_argument("--k", type=int, default=16, help="colour clusters (k-means in Lab)")
     ap.add_argument("--min-area", type=float, default=0.5, help="smallest candidate region, stud^2")
     ap.add_argument("--max-area", type=float, default=48.0, help="largest candidate region, stud^2")
-    ap.add_argument("--p-min", type=float, default=0.7, help="keep a semantic label at this CLIP probability or more")
+    ap.add_argument("--p-min", type=float, default=0.75, help="keep a semantic label at this CLIP probability or more")
     ap.add_argument("--margin", type=float, default=0.2, help="... leading the runner-up class by this much")
     ap.add_argument("--p-alone", type=float, default=0.3, help="... and, the region seen alone, that class still first with this probability")
+    ap.add_argument("--samesh", nargs=2, metavar=("FACE2LABEL", "SEGMENTED"), default=None,
+                    help="SAMesh face2label.json and segmented.glb: mesh parts as candidates (each whole, and the colour regions inside each)")
     a = ap.parse_args()
     from everything2lego.sampler import vocabulary
     from everything2lego.semantic_v2.mesh_target import MeshTarget
@@ -233,16 +277,39 @@ def main() -> None:
     t = target_from_mesh(a.mesh, a.studs, shell=2)       # the sampler's own target: its cells, as --studs builds them
     mt = MeshTarget.from_path(a.mesh, max_studs=a.studs, n_samples=40000, min_island_cells=8)
     mesh, T = mt.mesh, mt.mesh_to_voxel.astype(np.float64)
-    regs = regions(mesh, T, a.k, a.min_area, a.max_area)
-    print(f"{len(regs)} candidate regions of {a.min_area}..{a.max_area} stud^2 ({len(mesh.faces)} faces)", flush=True)
+    flab = cell_part = None
+    if a.samesh:
+        import trimesh
+        from everything2lego.voxelize import load_mesh
+        from part_labels import cell_parts, face_labels
+        m0 = load_mesh(a.mesh)
+        m0.process(validate=True)                        # as part_labels: SAMesh's frame, MeshTarget's face order
+        assert len(m0.faces) == len(mesh.faces), "MeshTarget's mesh has other faces than load_mesh's"
+        flab, dist = face_labels(m0, json.loads(Path(a.samesh[0]).read_text()),
+                                 trimesh.load(a.samesh[1], force="mesh", process=False))
+        cell_part, part_ids, _ = cell_parts(t, mt, flab)
+        part_rank = {int(l): i for i, l in enumerate(part_ids)}
+        print(f"SAMesh: {len(np.unique(flab))} parts, face match max distance {dist.max():.2g}", flush=True)
+    regs = regions(mesh, T, a.k, a.min_area, a.max_area, part=flab)
     P, fcol = stud_space(mesh.vertices, T), face_colours(mesh)
     tri = P[mesh.faces]
     fn = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
     fa = np.linalg.norm(fn, axis=1)
     fn /= fa[:, None] + 1e-12
+    if flab is not None:                                 # each mesh part whole, any size, its surroundings all drawn
+        for l in np.unique(flab):
+            f = np.flatnonzero(flab == l)
+            if fa[f].sum() / 2 >= a.min_area:
+                regs.append({"id": len(regs), "faces": f, "area": float(fa[f].sum() / 2), "part": int(l), "whole": True})
+    print(f"{len(regs)} candidate regions ({len(mesh.faces)} faces)", flush=True)
     for r in regs:                                       # the way it faces, area-weighted, in stud space
         nm = (fn[r["faces"]] * fa[r["faces"], None]).sum(0); r["normal"] = nm / (np.linalg.norm(nm) + 1e-12)
-    prob = clip_probs([render(P, mesh.faces, fcol, fn, r["faces"], r["normal"]) for r in regs])
+        if r.get("whole"):                               # a closed part (a wheel's two faces cancel): its main facing axis
+            w, v = np.linalg.eigh((fn[r["faces"]] * fa[r["faces"], None]).T @ fn[r["faces"]])
+            r["normal"] = v[:, -1] * (1 if v[:, -1] @ nm >= 0 else -1)
+    # a region inside a part is seen with its part as surroundings; a whole part with everything around it
+    ctx = lambda r: None if flab is None or r.get("whole") else flab == r["part"]
+    prob = clip_probs([render(P, mesh.faces, fcol, fn, r["faces"], r["normal"], context=ctx(r)) for r in regs])
     present = {v.category for v in vocabulary()}
     cats = sorted({c for _, _, c in CLASSES if c in present})
     sem = np.array([c in cats for _, _, c in CLASSES])
@@ -254,12 +321,30 @@ def main() -> None:
     # the region itself must be the feature, not a sliver beside it: seen alone, it is still most likely that class
     cand = [r for r in regs if r["keep"]]
     alone = clip_probs([render(P, mesh.faces, fcol, fn, r["faces"], r["normal"], alone=True) for r in cand])
+    # by category, not class: a pane alone reads "a door" as often as "a window" -- both are Windows and Doors
+    ccat = np.array([c for _, _, c in CLASSES], dtype=object)
     for r, g in zip(cand, alone):
-        r["alone"] = float(g[r["k"]])
-        r["keep"] = bool(g.argmax() == r["k"] and r["alone"] >= a.p_alone)
+        same = ccat == ccat[r["k"]]
+        r["alone"], r["alone_cls"] = float(g[same].sum()), CLASSES[int(g.argmax())][0]
+        r["keep"] = bool(same[g.argmax()] and r["alone"] >= a.p_alone)
+        if r["cls"] in EMBEDDED:                         # a feature a tenth of the smallest such part's face is a sill or shutter
+            h, w = EMBEDDED[r["cls"]]
+            r["keep"] &= r["area"] >= h * PLATE * w / 10
+    # a whole part read as a window or door holding a kept window / door region is the wall around it, not the feature
+    inner = {r["part"] for r in regs if r["keep"] and not r.get("whole") and r["cls"] in EMBEDDED}
+    for r in regs:
+        if r["keep"] and r.get("whole") and r["cls"] in EMBEDDED and r["part"] in inner:
+            r["keep"], r["note"] = False, "holds a kept window/door region"
+    # a region inside a part kept whole as a wheel / fence / plant is a piece of that one thing (a spoke, not a ladder)
+    whole = {r["part"] for r in regs if r["keep"] and r.get("whole") and r["cls"] not in EMBEDDED}
+    for r in regs:
+        if r["keep"] and not r.get("whole") and r["part"] in whole:
+            r["keep"], r["note"] = False, "inside a part kept whole"
     # kept regions -> the sampler's cells: surface samples (~16 per stud^2) to the nearest wanted cell within a cell,
     # then the box those cells span, its showing wanted cells (a window's pane and frame, a wheel's disc, not just the
-    # patches the region's texels hit); smaller regions first, a cell keeps its first label
+    # patches the region's texels hit); a window / door that box grown into the wall (feature_box: one stud deep, to
+    # the smallest such part), its wanted cells; a whole mesh part of another class all its cells (part_labels);
+    # smaller regions first, a cell keeps its first label
     import trimesh
     from scipy.spatial import cKDTree
     H, X, Z = t.want.shape
@@ -268,6 +353,12 @@ def main() -> None:
     show = t.want & t.visible
     cell_cat = np.full((H, X, Z), -1, np.int8)
     for r in sorted((r for r in regs if r["keep"]), key=lambda r: r["area"]):
+        c = cats.index(dict((n, c) for n, _, c in CLASSES)[r["cls"]])
+        if r.get("whole") and r["cls"] not in EMBEDDED:
+            box = (cell_part == part_rank.get(r["part"], -2)) & (cell_cat < 0)
+            cell_cat[box] = c
+            r["cells"] = int(box.sum())
+            continue
         sub = trimesh.Trimesh(mesh.vertices, mesh.faces[r["faces"]], process=False)
         pts, _ = trimesh.sample.sample_surface_even(sub, max(64, int(16 * r["area"])), seed=0)
         d, j = tree.query(pts @ T[:3, :3].T + T[:3, 3], distance_upper_bound=1.0)
@@ -275,16 +366,19 @@ def main() -> None:
         if not len(hit):
             continue
         lo, hi = hit.min(0), hit.max(0) + 1
+        if r["cls"] in EMBEDDED:
+            lo, hi = feature_box(lo, hi, r["normal"], EMBEDDED[r["cls"]], show.shape)
         box = np.zeros_like(show); box[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] = True
-        box &= show & (cell_cat < 0)
-        cell_cat[box] = cats.index(dict((n, c) for n, _, c in CLASSES)[r["cls"]])
-        r["cells"] = int(box.sum())
+        box &= (t.want if r["cls"] in EMBEDDED else show) & (cell_cat < 0)
+        cell_cat[box] = c
+        r["cells"], r["box"] = int(box.sum()), [int(v) for v in hi - lo]
     table = [{k: (round(v, 3) if isinstance(v, float) else v) for k, v in r.items() if k not in ("faces", "normal")}
              for r in regs]
     np.savez_compressed(a.out, cell_cat=cell_cat, categories=np.array(cats), regions=json.dumps(table))
     for r in sorted((r for r in regs if r["keep"]), key=lambda r: (r["cls"], -r["area"])):
-        print(f"  region {r['id']:>3}  {r['area']:6.1f} stud^2  {r['cls']:>7} p {r['p']:.2f} margin {r['margin']:.2f}"
-              f" alone {r['alone']:.2f}  -> {r.get('cells', 0)} cells")
+        print(f"  region {r['id']:>4} {'part' if r.get('whole') else 'in'} {r['part']:>4}  {r['area']:6.1f} stud^2  {r['cls']:>7}"
+              f" p {r['p']:.2f} margin {r['margin']:.2f} alone {r['alone']:.2f}  -> {r.get('cells', 0)} cells"
+              f" box {r.get('box', '-')}")
     print(f"-> {a.out}: cells per category " + ", ".join(f"{c} {int((cell_cat == i).sum())}" for i, c in enumerate(cats)))
     if a.sheet:
         from PIL import Image, ImageDraw
@@ -292,12 +386,12 @@ def main() -> None:
         S, cols = 160, 8
         sheet = Image.new("RGB", (cols * S, -(-len(show) // cols) * (S + 28)), "white")
         for i, r in enumerate(show):
-            im = render(P, mesh.faces, fcol, fn, r["faces"], r["normal"], size=S, outline=True)
+            im = render(P, mesh.faces, fcol, fn, r["faces"], r["normal"], size=S, outline=True, context=ctx(r))
             x, y = (i % cols) * S, (i // cols) * (S + 28)
             sheet.paste(im, (x, y))
             dr = ImageDraw.Draw(sheet)
             dr.text((x + 3, y + S + 1), f"#{r['id']} {r['cls']} {r['p']:.2f} m{r['margin']:.2f} a{r['alone']:.2f}", fill="green" if r["keep"] else "black")
-            dr.text((x + 3, y + S + 13), f"{r['sem_cls']} {r['p_sem']:.2f}  {r['area']:.1f}st2", fill="gray")
+            dr.text((x + 3, y + S + 13), f"{r['sem_cls']} {r['p_sem']:.2f} {r['area']:.1f}st2 {'P' if r.get('whole') else 'p'}{r['part']}", fill="gray")
         sheet.save(a.sheet)
         print(f"-> {a.sheet}")
 

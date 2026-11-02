@@ -158,8 +158,10 @@ def target_from_mesh(path: str, studs: int, shell: int, kind: str | None = None,
         region_kind = np.full(want.shape, "", dtype=object)
         for rid, k in seg_kind_of.items():
             region_kind[seg_label == int(rid)] = k
-    return Target(want=want, colour=colour, visible=visible, bits=bits, kind=kind,
-                   region_kind=region_kind, region_label=seg_label if seg_label is not None else None)
+    tg = Target(want=want, colour=colour, visible=visible, bits=bits, kind=kind,
+                region_kind=region_kind, region_label=seg_label if seg_label is not None else None)
+    tg.mesh_target = t                                             # the aligned mesh, for --colour-by-part's colour before snapping
+    return tg
 
 
 def load_models() -> list[dict]:
@@ -245,6 +247,7 @@ def main() -> None:
     ap.add_argument("--whole-cells", action="store_true", help="match the mesh at whole-cell detail (every target cell a full cube) instead of 4x4x4 sub-cells: round 1x1 plates no longer win by tracing tiny curves")
     ap.add_argument("--sup-weight", type=float, default=0.0, help="energy per unsupported part (0 = keep the weights' own: 40 default, 100 learned); raise it when --size-weight would trade support for bigger parts")
     ap.add_argument("--learned-weights", action="store_true", help="energy weights fitted to real sets (Weights.learned(kind)) instead of the hand-set defaults")
+    ap.add_argument("--colour-by-part", action="store_true", help="read colour by region before snapping (colour_regions.regions_by_part): each mesh part's (--parts; else the whole target's) showing cells merged by Ward's rule on the mesh's continuous Lab to 0.038 regions per showing cell (at least 1 per part), each region snapped once to the palette colour nearest its mean, among the target's colours (or --target-colours')")
     ap.add_argument("--colour-smooth", type=float, default=0.0, help="Potts-MRF colour smoothing of the target (colour_mrf.smooth beta, Lab units; ~40-80): fewer colour specks, so same-colour parts can merge")
     ap.add_argument("--base-rim", type=int, default=None, help="studs the base plate (layer 0) reaches past the model's shadow; default: 0 when the mesh's bottom layer is its own ground, else 1")
     ap.add_argument("--stand", type=int, default=0, help="pad base plate by N studs (for figures or small objects)")
@@ -307,6 +310,21 @@ def main() -> None:
     if a.colour_smooth > 0:
         from everything2lego.colour_mrf import smooth
         target.colour = smooth(target.colour, target.want, beta=a.colour_smooth)
+    if a.colour_by_part:
+        from everything2lego.colour_regions import cell_lab, regions_by_part
+        from everything2lego.sampler import target_colours
+        from everything2lego.colors import palette as _pal
+        show = target.want & target.visible
+        n0 = len(np.unique(target.colour[show]))
+        allowed = None
+        if a.target_colours > 0:
+            codes = target_colours(target.colour, show, a.target_colours)
+            allowed = np.array([i for i, c in enumerate(_pal()) if c.code in codes])
+        mt = target.mesh_target
+        lab = cell_lab(mt.mesh, mt.mesh_to_voxel, target.want.shape)
+        target.colour = regions_by_part(lab, target.colour, target.want, target.visible, target.cell_part, allowed=allowed)
+        print(f"colour by part ({'per mesh part' if target.cell_part is not None else 'global'}): colours shown {n0} -> "
+              f"{len(np.unique(target.colour[show]))}")
     if a.colour_regions > 0:
         from everything2lego.colour_regions import regions
         n0 = len(np.unique(target.colour[target.want & target.visible]))
