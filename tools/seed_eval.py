@@ -76,7 +76,7 @@ def measure(d: Path, studs: int) -> dict:
     m = build_mesh(d / "model.ldr")
     shape = compare(m, input_mesh(MESH, studs), d / "model.glb")
     return {"energy": info["energy"], "parts": info["parts"], "unsupported": info["unsupported"],
-            "shape_pct": shape["chamfer_pct"], **exposed(d / "model.ldr"), "off_colour": off_colour(d / "model.ldr", info)}
+            "shape_pct": shape["chamfer_pct"], "missing_pct": shape["missing_pct"], "extra_pct": shape["extra_pct"], **exposed(d / "model.ldr"), "off_colour": off_colour(d / "model.ldr", info)}
 
 
 def run_seed(name: str, seed: int, args: list[str]) -> Path:

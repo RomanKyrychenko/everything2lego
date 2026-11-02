@@ -69,11 +69,33 @@ def stats(path: Path) -> dict | None:
     for k in np.flatnonzero(is_brick): key[(round(lo[k, 0], 1), round(lo[k, 2], 1), round(hi[k, 0], 1), round(hi[k, 2], 1))].append(k)
     stacked = sum(1 for ks in key.values() for a in ks for b in ks if a != b and abs(lo[b, 1] - hi[a, 1]) < 0.3)
     nb = max(1, is_brick.sum())
+    # arrangement on the outside: owner of each cell, parts that show (a cell with an empty neighbour)
+    own = {}
+    for k in range(len(it)):
+        for y in range(int(round(lo[k, 1] - base[1])), int(round(hi[k, 1] - base[1]))):
+            for x in range(int(np.floor(lo[k, 0] - base[0])), int(np.ceil(hi[k, 0] - base[0]))):
+                for z in range(int(np.floor(lo[k, 2] - base[2])), int(np.ceil(hi[k, 2] - base[2]))):
+                    own[(y, x, z)] = k
+    nbr = ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
+    shows = {k for (y, x, z), k in own.items() if any((y + a, x + b, z + c) not in own for a, b, c in nbr)}
+    pairs = {(min(k, j), max(k, j)) for (y, x, z), k in own.items() if k in shows
+             for a, b, c in nbr if (j := own.get((y + a, x + b, z + c), k)) != k and j in shows}
+    same_col = np.mean([it[a][1] == it[b][1] for a, b in pairs]) if pairs else 0.0
+    allp = {(min(k, j), max(k, j)) for (y, x, z), k in own.items() for a, b, c in nbr[2:]
+            if (j := own.get((y + a, x + b, z + c), k)) != k}                    # side by side, as the sampler's level pairs
+    side = [(a, b) for a, b in allp if abs(lo[a, 1] - lo[b, 1]) < 0.3 and abs(hi[a, 1] - hi[b, 1]) < 0.3]
+    row_same = np.mean([it[a][0] == it[b][0] and it[a][1] == it[b][1] for a, b in side]) if side else 0.0
+    top = {}                                                                      # height map seen from above
+    for (y, x, z) in own: top[(x, z)] = max(top.get((x, z), -1), y + 1)
+    dh = [abs(top[(x, z)] - top[q]) for (x, z) in top for q in ((x + 1, z), (x, z + 1)) if q in top]
+    dh = np.array([d for d in dh if d > 0])
+    steps = float(((dh >= 1) & (dh <= 2)).mean()) if len(dh) else 0.0
     return {"bricks": is_brick.mean(), "plates": is_plate.mean(), "tiles": is_tile.mean(), "slopes": is_slope.mean(),
             "round": is_round.mean(), "1x1": one.mean(), "brick_len": float(w[is_brick].mean()) if is_brick.any() else 0.0,
             "brick_len>=4": float((w[is_brick] >= 3.99).mean()) if is_brick.any() else 0.0,
             "bare_studs": bare / max(1, studded.sum()), "stacked_bricks": stacked / nb, "sideways": 1 - up.mean(),
-            "colours/100": 100 * len({x[1] for x in it}) / len(it), "parts": len(it)}
+            "colours/100": 100 * len({x[1] for x in it}) / len(it), "same_colour_touch": same_col, "row_same_part": row_same,
+            "plate_steps": steps, "parts": len(it)}
 
 
 def main() -> None:

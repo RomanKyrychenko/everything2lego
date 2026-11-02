@@ -136,6 +136,9 @@ def compare(build, inp, out: Path, n: int = 60000) -> dict:
            "hausdorff_studs": float(max(d_in.max(), d_b.max())), "hausdorff95_studs": float(max(np.percentile(d_in, 95), np.percentile(d_b, 95))),
            "covered": float((d_in <= 1).mean()), "extra": float((d_b > 1).mean()), "shift_ldu": [round(float(v), 1) for v in shift],
            "points": [len(pi), len(pb)]}
+    tol = np.array([10.0, 8.0, 10.0])                                            # LDU (x, y, z): half a stud across, a plate up
+    res["missing_pct"] = float(100 * (cKDTree(pb / tol).query(pi / tol)[0] > 1).mean())   # input surface beyond tolerance of LEGO
+    res["extra_pct"] = float(100 * (cKDTree(pi / tol).query(pb / tol)[0] > 1).mean())     # LEGO surface beyond tolerance of input
     # overlay: occupancy of surface samples per view at half-stud pixels
     lo = np.minimum(pb.min(0), pi.min(0)); hi = np.maximum(pb.max(0), pi.max(0)); px = STUD / 2
     tiles = []
