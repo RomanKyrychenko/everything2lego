@@ -253,6 +253,7 @@ pub struct Problem {
     // part) || p_grip): real sets interlock (staggered seams), a column or a lone plate on one part does not; 0 = off
     pub w_grip: f64,
     pub p_grip: f64,
+    pub p_phase: f64, // share of the phase move (taken from retile's): a window's plates rebuilt as bricks on one course phase
 }
 
 /// Error map layers: shape, colour, support (unsupported, bare side connectors, exposed studs), surface direction,
@@ -425,6 +426,7 @@ struct Data {
     w_coll: f64,
     w_grip: f64,
     p_grip: f64,
+    p_phase: f64,
     prot: Vec<Vec<(i32, i32, i32, u64)>>, // per option: cells (box-local) its geometry reaches past its own, with the sub-samples
     sdist: Vec<f32>,
     sd_start: Vec<usize>,
@@ -648,6 +650,7 @@ impl Data {
             w_coll: if p.prot_rows.is_null() { 0.0 } else { p.w_coll },
             w_grip: p.w_grip,
             p_grip: p.p_grip.clamp(1e-4, 1.0 - 1e-4),
+            p_phase: p.p_phase,
             prot: if p.prot_rows.is_null() || p.prot_start.is_null() { Vec::new() } else {
                 let st = v(p.prot_start, n_opt + 1);
                 let raw = v(p.prot_rows, st[n_opt] as usize * 3);
@@ -3339,8 +3342,8 @@ fn split(st: &mut State, rng: &mut Rng) -> Option<Undo> {
     Some(Undo::Retile { added, removed: vec![ra] })
 }
 
-/// Stack: a plain brick becomes three plates of its footprint, or three such plates stacked in one colour become
-/// the brick.
+/// Stack: a plain brick becomes three plates of its footprint, or three such plates stacked become the brick (in
+/// their colour, or when they differ, the one colour_for gives it).
 fn stack(st: &mut State, rng: &mut Rng) -> Option<Undo> {
     const BRICK: i32 = 0;
     const PLATE: i32 = 1;
@@ -3366,15 +3369,19 @@ fn stack(st: &mut State, rng: &mut Rng) -> Option<Undo> {
         let &kb = d.boxes.get(&(BRICK, 3, o.w, o.d))?;
         let c = d.made_in(kb, a.colour)?;
         let mut idx = vec![i];
+        let mut mixed = false;
         for dy in 1..3 {
             let j = st.owner[d.idx(a.y + dy, a.x + o.first.1, a.z + o.first.2)];
             if j < 0 { return None; }
             let b = *st.item(j as usize);
-            if b.opt != a.opt || (b.colour != a.colour && d.w_col != 0.0) || b.x != a.x || b.z != a.z || b.y != a.y + dy {
+            if b.opt != a.opt || b.x != a.x || b.z != a.z || b.y != a.y + dy {
                 return None;
             }
+            mixed |= b.colour != a.colour;
             idx.push(j as usize);
         }
+        // plates of different colours: the brick takes the colour nearest the target, the colour cost decides
+        let c = if mixed { d.colour_for(&d.opts[kb], a.y, a.x, a.z, &mut Vec::new()) } else { c };
         let removed: Vec<Item> = idx.into_iter().map(|j| st.remove(j)).collect();
         if !cells_free(st, kb, a.y, a.x, a.z) {
             for r in removed { st.add(r); }
@@ -3597,7 +3604,98 @@ fn echo(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
     Some(Undo::Retile { added, removed })
 }
 
-const MOVES: [&str; 15] = ["sideways", "masonry", "hinge", "swap", "re-top", "split", "stack", "merge", "retile", "pattern", "re-solve", "orient", "edge run", "curve fit", "echo"];
+/// Phase: plate rafts back into bricks.  An error-guided window a few studs wide and 6-9 plates tall takes the course
+/// phase (y mod 3) most brick-height parts around it start at (a random one when there are none); its plates go, and
+/// the freed cells are covered first by plain bricks on that phase (bottom up, the longest that fits under a random
+/// length cap, so shorter bricks get proposed too), then by the filler.  The energy decides as for any move.
+fn phase(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
+    const BRICK: i32 = 0;
+    const PLATE: i32 = 1;
+    let d = st.d;
+    if d.want_cells.is_empty() {
+        return None;
+    }
+    let c = st.pick_cell(rng);
+    let (cy, cx, cz) = (c / (d.x * d.z), (c / d.z) % d.x, c % d.z);
+    let hy = 6 + rng.below(4) as i32;
+    let (hx, hz) = (1 + rng.below(3) as i32, 1 + rng.below(3) as i32);
+    let y0 = (cy - rng.below(hy as usize) as i32).max(0);
+    let (y1, (x0, x1), (z0, z1)) = ((y0 + hy).min(d.h), ((cx - hx + 1).max(0), (cx + hx).min(d.x)), ((cz - hz + 1).max(0), (cz + hz).min(d.z)));
+    // votes: cells of parts a multiple of 3 plates tall, by the phase they start at, over the window and 2 studs round
+    let (mut votes, mut plates) = ([0usize; 3], Vec::new());
+    let g = st.next_gen();
+    for y in y0..y1 {
+        for x in (x0 - 2).max(0)..(x1 + 2).min(d.x) {
+            for z in (z0 - 2).max(0)..(z1 + 2).min(d.z) {
+                let j = st.owner[d.idx(y, x, z)];
+                if j < 0 || st.mark[j as usize] == g {
+                    continue;
+                }
+                st.mark[j as usize] = g;
+                let it = st.item(j as usize);
+                let o = &d.opts[it.opt];
+                if o.h % 3 == 0 {
+                    votes[it.y.rem_euclid(3) as usize] += o.cells.len();
+                } else if o.boxk == PLATE && o.h == 1 && x >= x0 && x < x1 && z >= z0 && z < z1 {
+                    plates.push(j as usize);
+                }
+            }
+        }
+    }
+    if plates.len() < 3 {
+        return None;
+    }
+    let best = *votes.iter().max().unwrap();
+    let ph = if best == 0 { rng.below(3) as i32 } else { (0..3).find(|&p| votes[p] == best).unwrap() as i32 };
+    let mut freed = std::collections::HashSet::new();
+    let mut removed = Vec::with_capacity(plates.len());
+    for j in plates {
+        let it = st.remove(j);
+        for &(py, px, pz, _, _) in &d.opts[it.opt].cells {
+            freed.insert((it.y + py, it.x + px, it.z + pz));
+        }
+        removed.push(it);
+    }
+    for y in y0..y1 {
+        for x in x0..x1 {
+            for z in z0..z1 {
+                if d.want[d.idx(y, x, z)] && st.owner[d.idx(y, x, z)] < 0 {
+                    freed.insert((y, x, z));
+                }
+            }
+        }
+    }
+    let cap = [2, 3, 4, 6, 8, 16][rng.below(6)];
+    let mut bricks: Vec<(i32, usize)> = d.boxes.iter().filter(|(b, _)| b.0 == BRICK && b.1 == 3 && b.2.max(b.3) <= cap)
+        .map(|(b, &k)| (b.2 * b.3, k)).collect();
+    bricks.sort_unstable_by(|a, b| b.cmp(a));
+    let mut cells: Vec<(i32, i32, i32)> = freed.iter().copied().collect();
+    cells.sort_unstable();
+    let mut added = Vec::new();
+    for &(y, x, z) in &cells {
+        if (y - ph).rem_euclid(3) != 0 || st.owner[d.idx(y, x, z)] >= 0 {
+            continue;
+        }
+        for &(_, k) in &bricks {
+            let o = &d.opts[k];
+            let (oy, ox, oz) = (y - o.first.0, x - o.first.1, z - o.first.2);
+            if o.cells.iter().all(|&(a, b, e, _, _)| freed.contains(&(oy + a, ox + b, oz + e)) && st.owner[d.idx(oy + a, ox + b, oz + e)] < 0) {
+                let colour = d.colour_for(o, oy, ox, oz, &mut filler.colour_counts);
+                added.push(st.add(Item { opt: k, colour, y: oy, x: ox, z: oz }));
+                break;
+            }
+        }
+    }
+    if added.is_empty() {                                   // no brick fits: not this move's business
+        for r in removed { st.add(r); }
+        return None;
+    }
+    cells.retain(|&(y, x, z)| st.owner[d.idx(y, x, z)] < 0);
+    added.extend(filler.fill(st, rng, cells));
+    Some(Undo::Retile { added, removed })
+}
+
+const MOVES: [&str; 16] = ["sideways", "masonry", "hinge", "swap", "re-top", "split", "stack", "merge", "retile", "pattern", "re-solve", "orient", "edge run", "curve fit", "echo", "phase"];
 
 fn propose(st: &mut State, filler: &mut Filler, groups: &[Vec<usize>], boxes: &[Vec<usize>], rng: &mut Rng) -> Option<(usize, Undo)> {
     if !st.d.snot_by_opt.is_empty() && rng.f64() < 0.05 {        // only drawn when sideways building is on
@@ -3619,6 +3717,7 @@ fn propose(st: &mut State, filler: &mut Filler, groups: &[Vec<usize>], boxes: &[
     else if r < 0.60 + st.d.p_resolve { return resolve(st, filler, rng) }
     else if r < 0.60 + st.d.p_resolve + st.d.p_orient { (11, orient(st, filler, boxes, rng)) }
     else if r < 0.60 + st.d.p_resolve + st.d.p_orient + st.d.p_echo { (14, echo(st, filler, rng)) }
+    else if r < 0.60 + st.d.p_resolve + st.d.p_orient + st.d.p_echo + st.d.p_phase { (15, phase(st, filler, rng)) }
     else { (8, retile(st, filler, rng)) };
     u.map(|u| (m, u))
 }
@@ -3883,5 +3982,5 @@ pub unsafe extern "C" fn e2l_sample(p: *const Problem) -> i32 {
 /// The layout version: Python checks it before calling.
 #[no_mangle]
 pub extern "C" fn e2l_abi() -> i32 {
-    19
+    20
 }

@@ -559,6 +559,7 @@ class Weights:
     recolour: bool = False    # starting parts (init_placements) take the engine's colour for their place; native only
     fid_cap: float = 0.0      # shape budget: moves leaving the (unweighted) shape term above it and worse are rejected; native only
     echo: float = 0.0         # share of the echo move: a part copied along the target's self-similar runs; native only
+    phase: float = 0.0        # share of the phase move: a window's plates rebuilt as bricks on its dominant course phase; native only
     stack: float = 0.0        # n_bricks * KL(share of bricks right on a same-footprint brick || p_stack); native only
     p_stack: float = 0.093    # real buildings' median (build_stats.py stacked_bricks)
     bare_top: float = 0.0     # energy per top stud with nothing above and nothing to come (outside the target); native only
