@@ -29,7 +29,7 @@ from typing import Optional
 
 import numpy as np
 
-ABI = 21
+ABI = 22
 INFO_LEN = 20
 ERR_LAYERS = ("shape", "colour", "support", "direction", "statistics")   # lib.rs N_ERR
 PATHS4_BUCKETS = 8
@@ -126,6 +126,7 @@ class Problem(C.Structure):
         ("w_grip", C.c_double), ("p_grip", C.c_double),                 # bonding: parts gripped by just one part
         ("p_mirror", C.c_double), ("mirror_opt", _P(C.c_int32)),        # mirror move share; per option its image (x, z)
         ("p_phase", C.c_double),                                        # phase move share (from retile's)
+        ("w_sem", C.c_double), ("cell_cat", _P(C.c_int8)), ("opt_cat", _P(C.c_int32)),   # semantic labels (semantic_labels.py)
     ]
 
 
@@ -655,6 +656,11 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
             p.n_init = 0
     else:
         p.n_init = 0
+    if getattr(weights, "sem", 0.0) > 0 and getattr(target, "cell_cat", None) is not None:   # parts of a cell's labelled category
+        cats = list(target.categories)
+        p.w_sem = weights.sem
+        p.cell_cat = _ptr(arr(target.cell_cat.reshape(-1), np.int8), C.c_int8)
+        p.opt_cat = _ptr(arr([cats.index(v.category) if v.category in cats else -1 for v, _ in opts], np.int32), C.c_int32)
     if getattr(target, "lock", None) is not None:
         p.lock = _ptr(arr(target.lock, np.uint8), C.c_uint8)
     rc = lib.e2l_sample(C.byref(p))

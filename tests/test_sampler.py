@@ -215,3 +215,23 @@ def test_locked_parts_stay_and_a_region_rebuilt_splices_back():
     assert ri["energy"] == pytest.approx(ri["energy_recomputed"], rel=1e-6)
     assert {key(p) for p in ps if not rr._inside(p, box)} <= {key(p) for p in out}
     assert all(rr._inside(p, box) for p in out if key(p) not in {key(q) for q in ps})
+
+
+@pytest.mark.skipif(not native.available(), reason="native sampler not built")
+def test_semantic_labels_draw_their_parts():
+    """Cells labelled 'Windows and Doors' in a wall get a window with the semantic bonus on, and the energy kept move
+    by move (bonus included) is the recomputed one."""
+    want = np.ones((6, 6, 1), dtype=bool)
+    cat = np.full(want.shape, -1, np.int8); cat[:, 2:4, :] = 0
+    target = sampler.Target(want, np.full(want.shape, 4), want.copy(), cell_cat=cat, categories=("Windows and Doors",))
+    stats = sampler.Stats(_models())
+    vocab = sampler.select_vocabulary(None, 0) + (_vp("60592.dat"),)
+    def windows(sem):
+        w = sampler.Weights(); w.sem = sem
+        got, info, _ = native.run(target, stats, vocab, None, w, iters=5000, warmup=20, seed=0, t_start_share=0.05,
+                                  t_final_share=0.002, top_k=12, log_every=50,
+                                  opts_logprior=sampler.option_logprior(vocab, stats, None))
+        assert info["energy"] == pytest.approx(info["energy_recomputed"], rel=1e-6)
+        return [(x, z) for v, o, c, y, x, z in got if v.category == "Windows and Doors"]
+    assert windows(0.0) == []
+    assert (2, 0) in windows(50.0)

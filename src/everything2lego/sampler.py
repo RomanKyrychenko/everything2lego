@@ -350,6 +350,8 @@ class Target:
     region_kind: Optional[np.ndarray] = None   # (H, X, Z) str, per-cell kind; overrides `kind` where set
     region_label: Optional[np.ndarray] = None  # (H, X, Z) int, per-cell architectural label (classify_regions.LABEL); used by masonry_shift and future pattern moves
     lock: Optional[np.ndarray] = None  # (H, X, Z) bool: cells whose parts no move may change; native only (region_rebuild)
+    cell_cat: Optional[np.ndarray] = None  # (H, X, Z) int8: index into `categories` of the cell's semantic label, -1 none
+    categories: tuple = ()             # Rebrickable part categories cell_cat indexes (semantic_labels.py); native only
 
     def __post_init__(self):
         if self.bits is None:
@@ -566,6 +568,7 @@ class Weights:
     bare_top: float = 0.0     # energy per top stud with nothing above and nothing to come (outside the target); native only
     direction: float = 0.0    # surface direction (surface_dir.py): outward faces' area * (1 - cos) vs the mesh; native only
     dir_thr: float = 0.5      # faces count as outward when cos > this (sides hidden by neighbours stay free)
+    sem: float = 0.0          # energy -= sem per cell a part fills whose semantic label (Target.cell_cat) is its category; native only
 
     @classmethod
     def learned(cls, kind: Optional[str] = None) -> "Weights":
