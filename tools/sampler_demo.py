@@ -273,10 +273,10 @@ def main() -> None:
     ap.add_argument("--snap-geometry", action="store_true", help="turn the mesh's stud-scale planes to pitches LEGO slopes build, headings to the grid axes, the rest deformed smoothly, before voxelising (target_snap.py)")
     ap.add_argument("--snap-pitches", default="all", choices=["all", "roof"], help="pitch set for --snap-geometry: all slope row pitches, or roof = without 39.6 (studless cheese caps only; target_snap.PRESETS)")
     ap.add_argument("--semantic", default=None, help="npz from tools/semantic_labels.py (same --studs): per-cell part category (window, door, wheel, fence, plant)")
-    ap.add_argument("--semantic-weight", type=float, default=0.0, help="with --semantic: energy bonus per cell a part fills whose label is its Rebrickable category (and the filler proposes such parts there); 0 = off")
+    ap.add_argument("--semantic-weight", type=float, default=16.0, help="with --semantic: energy bonus per cell a part fills whose label is its Rebrickable category, per labelled area up to one part (--semantic-mode area), and the filler proposes such parts there (watermill, 2 seeds: 9-10 window parts, visible windows; shape 0.864 -> 0.873 %%); 0 = off")
     ap.add_argument("--semantic-mode", choices=("area", "cell"), default="area", help="area: the bonus per labelled area (6-connected run of one label) saturates once one part fills it; cell: per labelled cell any part fills")
     ap.add_argument("--parts", default=None, help="npz from tools/part_labels.py (same --studs): per-cell mesh part; mirror planes are found per part and mirror / echo map cells only within their part")
-    ap.add_argument("--prepare-parts", action="store_true", help="run (or read from its cache) tools/prepare_parts.py for this mesh at --studs (and --snap-geometry): SAMesh parts and CLIP labels, then as --parts P --colour-by-part --semantic L; an explicit --parts / --semantic wins")
+    ap.add_argument("--prepare-parts", action=argparse.BooleanOptionalAction, default=True, help="on by default (watermill, 2 seeds: one roof colour, colour patches/100 7.7 -> 5.5, visible windows); skipped with a warning when SAMesh's venv is missing; run (or read from its cache) tools/prepare_parts.py for this mesh at --studs (and --snap-geometry): SAMesh parts and CLIP labels, then as --parts P --colour-by-part --semantic L; an explicit --parts / --semantic wins")
     ap.add_argument("--smooth", type=int, default=0, help="apply N iterations of Taubin smoothing to the mesh before voxelising (reduces 1-stud surface noise; 5-10 is a reasonable range)")
     a = ap.parse_args()
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
@@ -299,8 +299,11 @@ def main() -> None:
                               smooth=a.smooth, snap_geometry=a.snap_geometry, snap_pitches=a.snap_pitches)
     if a.prepare_parts:
         from prepare_parts import prepare
-        pp, pl = prepare(a.mesh, a.studs, snap_pitches=a.snap_pitches if a.snap_geometry else None)
-        a.parts, a.semantic, a.colour_by_part = a.parts or str(pp), a.semantic or str(pl), True
+        try:
+            pp, pl = prepare(a.mesh, a.studs, snap_pitches=a.snap_pitches if a.snap_geometry else None)
+            a.parts, a.semantic, a.colour_by_part = a.parts or str(pp), a.semantic or str(pl), True
+        except SystemExit as e:                              # no SAMesh here: build without parts
+            print(f"warning: --prepare-parts skipped: {e}", file=sys.stderr)
     if a.semantic:
         d = np.load(a.semantic, allow_pickle=True)
         if d["cell_cat"].shape != target.want.shape:
