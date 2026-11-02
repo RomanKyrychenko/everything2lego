@@ -259,6 +259,11 @@ pub struct Problem {
     pub p_mirror: f64,
     pub mirror_opt: *const i32,
     pub p_phase: f64, // share of the phase move (taken from retile's): a window's plates rebuilt as bricks on one course phase
+    // semantic labels (tools/semantic_labels.py): energy -= w_sem * sum over parts of their cells whose label cell_cat
+    // (H*X*Z, -1 none) is the part's category opt_cat (n_opt, -1 none); the filler ranks / scores with the same bonus
+    pub w_sem: f64,
+    pub cell_cat: *const i8,
+    pub opt_cat: *const i32,
 }
 
 /// Error map layers: shape, colour, support (unsupported, bare side connectors, exposed studs), surface direction,
@@ -432,6 +437,9 @@ struct Data {
     w_grip: f64,
     p_grip: f64,
     p_phase: f64,
+    w_sem: f64,
+    cell_cat: Vec<i8>,
+    opt_cat: Vec<i32>,
     prot: Vec<Vec<(i32, i32, i32, u64)>>, // per option: cells (box-local) its geometry reaches past its own, with the sub-samples
     sdist: Vec<f32>,
     sd_start: Vec<usize>,
@@ -660,6 +668,9 @@ impl Data {
             w_grip: p.w_grip,
             p_grip: p.p_grip.clamp(1e-4, 1.0 - 1e-4),
             p_phase: p.p_phase,
+            w_sem: if p.cell_cat.is_null() || p.opt_cat.is_null() { 0.0 } else { p.w_sem },
+            cell_cat: if p.cell_cat.is_null() || p.opt_cat.is_null() { Vec::new() } else { v(p.cell_cat, n) },
+            opt_cat: if p.cell_cat.is_null() || p.opt_cat.is_null() { Vec::new() } else { v(p.opt_cat, n_opt) },
             prot: if p.prot_rows.is_null() || p.prot_start.is_null() { Vec::new() } else {
                 let st = v(p.prot_start, n_opt + 1);
                 let raw = v(p.prot_rows, st[n_opt] as usize * 3);
@@ -869,6 +880,13 @@ impl Data {
             if dot > self.dir_thr * r[6] as f64 { s += r[6] as f64 - dot; }
         }
         s
+    }
+
+    /// Cells of option k placed at (oy, ox, oz) labelled with its semantic category (w_sem).
+    fn sem_hits(&self, k: usize, oy: i32, ox: i32, oz: i32) -> f64 {
+        if self.w_sem == 0.0 || self.opt_cat[k] < 0 { return 0.0; }
+        let c = self.opt_cat[k] as i8;
+        self.opts[k].cells.iter().filter(|&&(y, x, z, _, _)| self.cell_cat[self.idx(oy + y, ox + x, oz + z)] == c).count() as f64
     }
 
     /// Surface distance of option k placed at (oy, ox, oz): over its surface rows, area * how far past one tolerance
@@ -1252,6 +1270,7 @@ struct State<'a> {
     bare_top: Vec<f64>, // per item: its exposed top studs (w_bare_top)
     dirp: f64,          // surface direction cost of all live parts
     sdp: f64,           // surface distance cost of all live parts
+    semp: f64,          // semantic hits of all live parts (w_sem)
     n_bare_top: f64,
     lock_hits: u64,      // adds and removes that touched a locked cell (a move doing so is undone)
     mark: Vec<u32>,
@@ -1320,6 +1339,7 @@ impl<'a> State<'a> {
             bare_top: Vec::new(),
             dirp: 0.0,
             sdp: 0.0,
+            semp: 0.0,
             n_bare_top: 0.0,
             lock_hits: 0,
             mark: Vec::new(),
@@ -1746,6 +1766,7 @@ impl<'a> State<'a> {
             + d.w_dir * self.dirp
             + d.w_sdist * self.sdp
             + d.w_part * self.live.len() as f64
+            - d.w_sem * self.semp
     }
 
     /// Bricks among `nb` that sit right on / under brick i with the same footprint (a lined-up joint).
@@ -1837,6 +1858,7 @@ impl<'a> State<'a> {
         self.fid += d.fid_delta(o, it.y, it.x, it.z);
         self.dirp += d.dir_cost(it.opt, it.y, it.x, it.z);
         self.sdp += d.sdist_cost(it.opt, it.y, it.x, it.z);
+        self.semp += d.sem_hits(it.opt, it.y, it.x, it.z);
         if d.w_size != 0.0 { self.size_n[d.opt_class[it.opt]] += 1.0; }
         if d.w_surf != 0.0 { self.surf_n[d.surf_type(it.opt, it.y, it.x, it.z) * d.n_pclass + d.opt_pclass[it.opt]] += 1.0; }
         if d.w_sideways != 0.0 && d.opt_sideways[it.opt] { self.n_side += 1.0; }
@@ -1968,6 +1990,7 @@ impl<'a> State<'a> {
         self.fid -= d.fid_delta(o, it.y, it.x, it.z);
         self.dirp -= d.dir_cost(it.opt, it.y, it.x, it.z);
         self.sdp -= d.sdist_cost(it.opt, it.y, it.x, it.z);
+        self.semp -= d.sem_hits(it.opt, it.y, it.x, it.z);
         if d.w_size != 0.0 { self.size_n[d.opt_class[it.opt]] -= 1.0; }
         if d.w_surf != 0.0 { self.surf_n[d.surf_type(it.opt, it.y, it.x, it.z) * d.n_pclass + d.opt_pclass[it.opt]] -= 1.0; }
         if d.w_sideways != 0.0 && d.opt_sideways[it.opt] { self.n_side -= 1.0; }
@@ -2328,7 +2351,7 @@ fn rank_cell(d: &Data, y: i32, x: i32, z: i32) -> Ranked {
         // the colour it would get here is fixed by the target too: a part not made in the target's colour ranks lower
         let colour = d.colour_for(o, oy, ox, oz, &mut counts);
         let mut score = d.style * lp - d.w_cov * wrong - d.w_dir * d.dir_cost(k, oy, ox, oz)
-            - d.w_col * d.colour_cost(o, oy, ox, oz, colour);
+            - d.w_col * d.colour_cost(o, oy, ox, oz, colour) + d.w_sem * d.sem_hits(k, oy, ox, oz);
         if d.w_surf != 0.0 {                            // what real sets build this kind of surface from
             let c = d.opt_pclass[k];
             score += d.style * (d.surf_lpref[d.surf_type(k, oy, ox, oz) * d.n_pclass + c] - d.surf_lmarg[c]);
@@ -2521,7 +2544,7 @@ impl Filler {
                 _ => Filler::stat_score(st, k, oy, ox, oz),
             }
             + self.w_big * ((o.w * o.d) as f64).ln();                // footprint: longer / wider, not taller
-        let mut fit = -d.w_dir * d.dir_cost(k, oy, ox, oz) - d.w_cov * resid
+        let mut fit = d.w_sem * d.sem_hits(k, oy, ox, oz) - d.w_dir * d.dir_cost(k, oy, ox, oz) - d.w_cov * resid
             - d.w_sil * st.sil_delta(o, oy, ox, oz) as f64 / (SUB * SUB) as f64
             - d.w_col * d.colour_cost(o, oy, ox, oz, colour);
         if !Filler::held(st, o, oy, ox, oz) {
@@ -4157,5 +4180,5 @@ pub unsafe extern "C" fn e2l_sample(p: *const Problem) -> i32 {
 /// The layout version: Python checks it before calling.
 #[no_mangle]
 pub extern "C" fn e2l_abi() -> i32 {
-    21
+    22
 }

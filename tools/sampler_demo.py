@@ -269,6 +269,8 @@ def main() -> None:
     ap.add_argument("--subassemblies", type=int, default=0, help="group placements into N-part submodels in an MPD .ldr (real sets have 11-26 sub-assemblies; 25 is a reasonable target)")
     ap.add_argument("--snap-geometry", action="store_true", help="turn the mesh's stud-scale planes to pitches LEGO slopes build, headings to the grid axes, the rest deformed smoothly, before voxelising (target_snap.py)")
     ap.add_argument("--snap-pitches", default="all", choices=["all", "roof"], help="pitch set for --snap-geometry: all slope row pitches, or roof = without 39.6 (studless cheese caps only; target_snap.PRESETS)")
+    ap.add_argument("--semantic", default=None, help="npz from tools/semantic_labels.py (same --studs): per-cell part category (window, door, wheel, fence, plant)")
+    ap.add_argument("--semantic-weight", type=float, default=0.0, help="with --semantic: energy bonus per cell a part fills whose label is its Rebrickable category (and the filler proposes such parts there); 0 = off")
     ap.add_argument("--smooth", type=int, default=0, help="apply N iterations of Taubin smoothing to the mesh before voxelising (reduces 1-stud surface noise; 5-10 is a reasonable range)")
     a = ap.parse_args()
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
@@ -289,6 +291,11 @@ def main() -> None:
     target = target_from_mesh(a.mesh, a.studs, a.shell, a.kind, stand=a.stand, rim=a.base_rim, regions=regions,
                               seg_label=seg_label, seg_kind_of=seg_kind_of, carve=carve,
                               smooth=a.smooth, snap_geometry=a.snap_geometry, snap_pitches=a.snap_pitches)
+    if a.semantic:
+        d = np.load(a.semantic, allow_pickle=True)
+        if d["cell_cat"].shape != target.want.shape:
+            raise SystemExit(f"--semantic shape {d['cell_cat'].shape} != target {target.want.shape}: use the same --studs")
+        target.cell_cat, target.categories = d["cell_cat"].astype(np.int8), tuple(str(c) for c in d["categories"])
     if a.whole_cells:
         target.bits = np.where(target.want, FULL, np.uint64(0)).astype(np.uint64); target.fill = target.want.astype(float)
     if a.colour_smooth > 0:
@@ -329,6 +336,7 @@ def main() -> None:
         w.conn = a.connect_weight
         w.coll = a.collision_weight
         w.grip = a.grip_weight
+        w.sem = a.semantic_weight
         def build(w):
             init, left = init_placements, iters
             if a.layers > 1:
