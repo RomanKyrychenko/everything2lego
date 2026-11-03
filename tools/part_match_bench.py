@@ -35,6 +35,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("bench", type=Path); ap.add_argument("--share", type=float, default=0.5)
     ap.add_argument("--ridge", type=float, default=1.0)
+    ap.add_argument("--twin", type=float, default=0.9)
     ap.add_argument("--model", default="google/siglip2-so400m-patch14-384")
     a = ap.parse_args()
     E = np.load(EMB / (a.model.replace("/", "__") + ".npz"))
@@ -52,28 +53,47 @@ def main() -> None:
     emb, alone, w, st = emb[ok], alone[ok], w[ok], st[ok]
     special = ~np.isin(cat[t], list(BASIC))
     print(f"{len(R)} sets; {ok.sum()} regions mostly one vocabulary part ({special.sum()} special), {len(idx)} parts")
-    scores = {"look": emb @ look.T, "look-alone": alone @ look.T, "name": emb @ text.T}
-    scores["look-alone+name"] = z(scores["look-alone"]) + z(scores["name"])
     L = nz(look)
-    scores["centred"] = nz(alone) @ L.T
+    tw = L @ L.T >= a.twin                              # look twins: no picture tells them apart
+    scores = {"look": emb @ look.T, "name": emb @ text.T, "centred": nz(alone) @ L.T}
     ridge, unseen = np.zeros_like(scores["look"]), np.zeros(len(t), bool)
+    proto = {k: np.full_like(ridge, -np.inf) for k in ("alone", "ctx")}
+    filled = np.zeros_like(ridge); zonly = np.zeros_like(ridge)
     for i in range(len(R)):                             # leave one set out
         tr, te = st != i, st == i
+        unseen[te] = ~np.isin(t[te], t[tr])
         m = alone[tr].mean(0); A = nz(alone[tr], m)
         W = np.linalg.solve(A.T @ A + a.ridge * np.eye(A.shape[1]), A.T @ L[t[tr]])
         ridge[te] = nz(nz(alone[te], m) @ W, 0) @ L.T
-        unseen[te] = ~np.isin(t[te], t[tr])
+        # a part's own embedding = the mean of its regions in the other sets (same renderer, same kind of mesh)
+        for k, X in (("alone", alone), ("ctx", emb)):
+            m = X[tr].mean(0); A = nz(X[tr], m); j = np.unique(t[tr])
+            Pj = nz(np.stack([A[t[tr] == p].mean(0) for p in j]), 0)
+            proto[k][np.ix_(te, j)] = nz(X[te], m) @ Pj.T
+            if k == "ctx":                              # parts no set holds: their look, mapped to where prototypes lie
+                V = np.linalg.solve(L[j].T @ L[j] + a.ridge * np.eye(L.shape[1]), L[j].T @ Pj)
+                P = nz(L @ V, 0); P[j] = Pj
+                ref = A @ P.T                           # each part scored on its own scale (training regions)
+                filled[te] = (nz(X[te], m) @ P.T - ref.mean(0)) / (ref.std(0) + 1e-9)
+                zp = filled[te].copy(); zp[:, np.setdiff1d(np.arange(len(L)), j)] = -np.inf; zonly[te] = zp
     scores["ridge"] = ridge
+    scores["proto-alone"], scores["proto-ctx"] = proto["alone"], proto["ctx"]
+    scores["proto-ctx+look"] = filled; scores["proto-ctx z"] = zonly
+    cand_sp = ~np.isin(cat, list(BASIC))
+    print(f"hit = the true part or a look twin (centred look cos >= {a.twin}); 'special' ranks special regions "
+          f"among the {cand_sp.sum()} special parts only")
     print(f"{'score':16s} {'set':8s} {'top1':>6s} {'top5':>6s} {'top20':>6s} {'cat@1':>6s}")
     for k, s in scores.items():
-        rank = (s > s[np.arange(len(s)), t][:, None]).sum(1)
-        cat1 = cat[s.argmax(1)] == cat[t]
-        for nm, m in (("all", np.ones(len(t), bool)), ("special", special), ("unseen", unseen)):
+        for nm, m, c in (("all", np.ones(len(t), bool), None), ("special", special, cand_sp),
+                         ("unseen", unseen & special, cand_sp)):
             if not m.any():
                 continue
-            f = lambda x: (w[m] * x[m]).sum() / w[m].sum()
-            print(f"{k:16s} {nm:8s} {f(rank == 0):6.3f} {f(rank < 5):6.3f} {f(rank < 20):6.3f} {f(cat1):6.3f}")
-
+            sc = s[m] if c is None else np.where(c, s[m], -np.inf)
+            top = np.argsort(-sc, 1)[:, :20]
+            hit = tw[t[m][:, None], top]
+            f = lambda x: (w[m] * x).sum() / w[m].sum()
+            print(f"{k:16s} {nm:8s} {f(hit[:, 0]):6.3f} {f(hit[:, :5].any(1)):6.3f} {f(hit.any(1)):6.3f} "
+                  f"{f(cat[top[:, 0]] == cat[t[m]]):6.3f}")
 
 if __name__ == "__main__":
     main()

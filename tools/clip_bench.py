@@ -226,6 +226,7 @@ def main() -> None:
     from semantic_labels import THRESHOLDS, setting
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", type=Path, required=True); ap.add_argument("--n", type=int, default=20)
+    ap.add_argument("--skip", type=int, default=0, help="start after this many sets (a second worker, same --out)")
     ap.add_argument("--studs", type=int, default=32)
     ap.add_argument("--clip", default=DEFAULT_MODEL, help="image-text model, as semantic_labels.py --clip")
     ap.add_argument("--views", type=int, default=3); ap.add_argument("--context-dim", type=float, default=0.4)
@@ -237,17 +238,24 @@ def main() -> None:
     extra = ["--clip", a.clip, "--views", str(a.views), "--context-dim", str(a.context_dim)]
     a.out.mkdir(parents=True, exist_ok=True)
     res = []
-    for f in sets(a.min_parts, a.max_parts):
+    for k, f in enumerate(sets(a.min_parts, a.max_parts)):
+        if k < a.skip:
+            continue
         if len(res) >= a.n:
             break
         cache = a.out / f"{f.stem}.npz"
+        claim = cache.with_suffix(".claim")             # workers sharing --out split the sets
         if not cache.exists():
+            try:
+                claim.touch(exist_ok=False)
+            except FileExistsError:
+                continue
             print(f"== {f.name}", flush=True)
             try:
                 r = run_set(f, a.studs, a.neg, extra)
             except Exception as e:                       # noqa: BLE001
                 print(f"   skipped: {e}", flush=True); continue
-            np.savez_compressed(cache, **r)
+            np.savez_compressed(cache, **r); claim.unlink()
         r = dict(np.load(cache, allow_pickle=True))
         if len(r["prob"]):
             res.append(r)
