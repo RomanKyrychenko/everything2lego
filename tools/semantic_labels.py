@@ -160,6 +160,19 @@ def regions(mesh, grid_T: np.ndarray, k: int, min_area: float, max_area: float, 
     return [{"id": i, "faces": f, "area": float(area[f].sum()), "part": int(q)} for i, (f, q) in enumerate(out)]
 
 
+def instance(cell_area: np.ndarray, cell_cat: np.ndarray, box: np.ndarray, c: int) -> int:
+    """The area (one feature: one window, one wheel) a kept region's box (bool, before cells taken by others are
+    removed) belongs to: an area of category c it overlaps by at least half the smaller of the two -- the pane and the
+    pane with its frame are one window -- else a new one.  Two windows side by side only touch: two areas."""
+    ids, n = np.unique(cell_area[box & (cell_cat == c)], return_counts=True)
+    if len(ids):
+        size = np.array([(cell_area == i).sum() for i in ids])
+        share = n / np.minimum(size, box.sum())
+        if share.max() >= 0.5:
+            return int(ids[share.argmax()])
+    return int(cell_area.max()) + 1
+
+
 def stud_space(p: np.ndarray, T: np.ndarray) -> np.ndarray:
     """Mesh points -> grid units (x stud, y plate, z stud) -> studs on every axis (isotropic, for drawing and areas)."""
     g = p @ T[:3, :3].T + T[:3, 3]
@@ -460,11 +473,14 @@ def main() -> None:
     tree = cKDTree(wc[:, [1, 0, 2]] + 0.5)
     show = t.want & t.visible
     cell_cat = np.full((H, X, Z), -1, np.int8)
+    cell_area = np.full((H, X, Z), -1, np.int32)         # which feature: the sampler's semantic areas
     for r in sorted((r for r in regs if r["keep"]), key=lambda r: r["area"]):
         c = cats.index(dict((n, c) for n, _, c in CLASSES)[r["cls"]])
         if r.get("whole") and r["cls"] not in EMBEDDED:
-            box = (cell_part == part_rank.get(r["part"], -2)) & (cell_cat < 0)
-            cell_cat[box] = c
+            full = cell_part == part_rank.get(r["part"], -2)
+            k = instance(cell_area, cell_cat, full, c)
+            box = full & (cell_cat < 0)
+            cell_cat[box], cell_area[box] = c, k
             r["cells"] = int(box.sum())
             continue
         sub = trimesh.Trimesh(mesh.vertices, mesh.faces[r["faces"]], process=False)
@@ -477,17 +493,20 @@ def main() -> None:
         if r["cls"] in EMBEDDED:
             lo, hi = feature_box(lo, hi, r["normal"], EMBEDDED[r["cls"]], show.shape)
         box = np.zeros_like(show); box[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] = True
-        box &= (t.want if r["cls"] in EMBEDDED else show) & (cell_cat < 0)
-        cell_cat[box] = c
+        box &= t.want if r["cls"] in EMBEDDED else show
+        k = instance(cell_area, cell_cat, box, c)
+        box &= cell_cat < 0
+        cell_cat[box], cell_area[box] = c, k
         r["cells"], r["box"] = int(box.sum()), [int(v) for v in hi - lo]
     table = [{k: (round(v, 3) if isinstance(v, float) else v) for k, v in r.items() if k not in ("faces", "normal", "prob", "prob_alone")}
              for r in regs]
-    np.savez_compressed(a.out, cell_cat=cell_cat, categories=np.array(cats), regions=json.dumps(table))
+    np.savez_compressed(a.out, cell_cat=cell_cat, cell_area=cell_area, categories=np.array(cats), regions=json.dumps(table))
     for r in sorted((r for r in regs if r["keep"]), key=lambda r: (r["cls"], -r["area"])):
         print(f"  region {r['id']:>4} {'part' if r.get('whole') else 'in'} {r['part']:>4}  {r['area']:6.1f} stud^2  {r['cls']:>7}"
               f" p {r['p']:.2f} margin {r['margin']:.2f} alone {r['alone']:.2f}  -> {r.get('cells', 0)} cells"
               f" box {r.get('box', '-')}")
-    print(f"-> {a.out}: cells per category " + ", ".join(f"{c} {int((cell_cat == i).sum())}" for i, c in enumerate(cats)))
+    print(f"-> {a.out}: cells (areas) per category " + ", ".join(
+        f"{c} {int((cell_cat == i).sum())} ({len(np.unique(cell_area[cell_cat == i]))})" for i, c in enumerate(cats)))
     if a.sheet:
         from PIL import Image, ImageDraw
         show = sorted(regs, key=lambda r: (not r["keep"], r["alone"] == 0, -r["p_sem"]))[:96]

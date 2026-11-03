@@ -309,6 +309,8 @@ def main() -> None:
         if d["cell_cat"].shape != target.want.shape:
             raise SystemExit(f"--semantic shape {d['cell_cat'].shape} != target {target.want.shape}: use the same --studs")
         target.cell_cat, target.categories = d["cell_cat"].astype(np.int8), tuple(str(c) for c in d["categories"])
+        if "cell_area" in d:                             # one area per feature (semantic_labels); older files: connected runs
+            target.cell_area = d["cell_area"].astype(np.int32)
     if a.parts:
         cp = np.load(a.parts)["cell_part"]
         if cp.shape != target.want.shape:

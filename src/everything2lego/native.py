@@ -664,7 +664,9 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         p.cell_cat = _ptr(arr(target.cell_cat.reshape(-1), np.int8), C.c_int8)
         p.opt_cat = _ptr(arr([cats.index(v.category) if v.category in cats else -1 for v, _ in opts], np.int32), C.c_int32)
         if getattr(weights, "sem_area", True):
-            p.cell_area = _ptr(arr(semantic_areas(target.cell_cat).reshape(-1), np.int32), C.c_int32)
+            area = getattr(target, "cell_area", None)
+            area = semantic_areas(target.cell_cat) if area is None else area
+            p.cell_area = _ptr(arr(area.reshape(-1), np.int32), C.c_int32)
     if getattr(target, "cell_part", None) is not None:
         p.cell_part = _ptr(arr(target.cell_part.reshape(-1), np.int16), C.c_int16)
     if getattr(target, "lock", None) is not None:
