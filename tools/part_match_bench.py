@@ -31,11 +31,31 @@ def nz(x: np.ndarray, m=None) -> np.ndarray:
     return x / (np.linalg.norm(x, axis=1, keepdims=True) + 1e-9)
 
 
+def write_protos(a, E, alone, t, special, held, tw, cand, unseen) -> None:
+    """Prototypes of all sets' regions; T = the temperature whose softmax over special parts gives the held-out true
+    part (or a twin) the most likelihood; q = the share of special regions whose part no other set held."""
+    m = alone.mean(0); A = nz(alone, m); j = np.unique(t)
+    P = nz(np.stack([A[t == p].mean(0) for p in j]), 0)
+    sel = special & ~unseen
+    s = np.where(cand & np.isfinite(held[sel]), held[sel], -np.inf); hit = tw[t[sel]] & np.isfinite(s)
+    def ll(T):
+        x = s / T; mx = x.max(1, keepdims=True)
+        lse = lambda y: mx[:, 0] + np.log(np.exp(y - mx).sum(1))
+        return (lse(np.where(hit, x, -np.inf)) - lse(x)).mean()
+    Ts = np.geomspace(0.003, 0.3, 41); T = float(Ts[np.argmax([ll(T) for T in Ts])])
+    q = float(unseen[special].mean())
+    f = EMB / (a.model.replace("/", "__") + ".protos.npz")
+    np.savez_compressed(f, ldraw=E["ldraw"][j], proto=P.astype(np.float16), mean=m.astype(np.float32), T=T, q=q)
+    print(f"-> {f}: {len(j)} parts, T {T:.4f} (held-out log-lik {ll(T):.3f}), unseen share {q:.3f}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("bench", type=Path); ap.add_argument("--share", type=float, default=0.5)
     ap.add_argument("--ridge", type=float, default=1.0)
     ap.add_argument("--twin", type=float, default=0.9)
+    ap.add_argument("--write", action="store_true", help="write the prototypes of all sets (alone, centred) and the "
+                    "softmax temperature fitted on the held-out scores to " + str(EMB) + "/<model>.protos.npz")
     ap.add_argument("--model", default="google/siglip2-so400m-patch14-384")
     a = ap.parse_args()
     E = np.load(EMB / (a.model.replace("/", "__") + ".npz"))
@@ -77,6 +97,8 @@ def main() -> None:
                 filled[te] = (nz(X[te], m) @ P.T - ref.mean(0)) / (ref.std(0) + 1e-9)
                 zp = filled[te].copy(); zp[:, np.setdiff1d(np.arange(len(L)), j)] = -np.inf; zonly[te] = zp
     scores["ridge"] = ridge
+    if a.write:
+        write_protos(a, E, alone, t, special, proto["alone"], tw, ~np.isin(cat, list(BASIC)), unseen)
     scores["proto-alone"], scores["proto-ctx"] = proto["alone"], proto["ctx"]
     scores["proto-ctx+look"] = filled; scores["proto-ctx z"] = zonly
     cand_sp = ~np.isin(cat, list(BASIC))

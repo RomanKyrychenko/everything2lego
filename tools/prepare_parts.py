@@ -87,11 +87,12 @@ def samesh(mesh: Path, cache: Path, seed_from: Path | None = None) -> tuple[Path
 
 
 def labeller() -> str:
-    """'_<hash>' of semantic_labels' default model, render setting and fitted thresholds: labels made by another are
-    not reused."""
+    """'_<hash>' of semantic_labels' default model, render setting, fitted thresholds and part prototypes: labels made
+    by another are not reused."""
     import hashlib
-    from semantic_labels import THRESHOLDS, parser, setting
+    from semantic_labels import THRESHOLDS, parser, protos_file, setting
     key = setting(parser().parse_args(["-", "--out", "-"])) + (THRESHOLDS.read_text() if THRESHOLDS.exists() else "")
+    key += hashlib.sha1(protos_file().read_bytes()).hexdigest() if protos_file().exists() else ""
     return "_" + hashlib.sha1(key.encode()).hexdigest()[:8]
 
 

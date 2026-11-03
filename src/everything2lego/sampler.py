@@ -353,6 +353,8 @@ class Target:
     cell_cat: Optional[np.ndarray] = None  # (H, X, Z) int8: index into `categories` of the cell's semantic label, -1 none
     categories: tuple = ()             # Rebrickable part categories cell_cat indexes (semantic_labels.py); native only
     cell_area: Optional[np.ndarray] = None  # (H, X, Z) int32: the feature (one window) a labelled cell is in; None: connected runs
+    area_aff: Optional[np.ndarray] = None   # (n_area, n_parts) how much each part is what the area shows; None: by category
+    aff_parts: tuple = ()                   # the LDraw names area_aff's columns are
     cell_part: Optional[np.ndarray] = None  # (H, X, Z) int16: mesh part id (part_labels.py), -1 none: per-part mirror / echo; native only
 
     def __post_init__(self):

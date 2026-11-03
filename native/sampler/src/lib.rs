@@ -271,6 +271,9 @@ pub struct Problem {
     // with one label; energy -= w_sem * sum over areas of min(cells covered by parts of its category, cap), cap = the
     // area's size or its category's smallest part's cells if fewer: one part fills it, a second earns nothing
     pub cell_area: *const i32,
+    // per semantic area how much each option's part is what it shows (n_area * n_opt, in [0, 1]; null = by category,
+    // above): an option earns aff * its cells in the area, any category, the area's cap is its best part's cells
+    pub area_aff: *const f32,
 }
 
 /// Error map layers: shape, colour, support (unsupported, bare side connectors, exposed studs), surface direction,
@@ -448,6 +451,8 @@ struct Data {
     cell_cat: Vec<i8>,
     opt_cat: Vec<i32>,
     cell_area: Vec<i32>, // empty = per-cell bonus
+    area_aff: Vec<f32>,  // empty = by category
+    opt_aff: Vec<bool>,  // option earns somewhere (area_aff)
     area_cap: Vec<i32>,
     prot: Vec<Vec<(i32, i32, i32, u64)>>, // per option: cells (box-local) its geometry reaches past its own, with the sub-samples
     sdist: Vec<f32>,
@@ -683,6 +688,8 @@ impl Data {
             cell_cat: if p.cell_cat.is_null() || p.opt_cat.is_null() { Vec::new() } else { v(p.cell_cat, n) },
             opt_cat: if p.cell_cat.is_null() || p.opt_cat.is_null() { Vec::new() } else { v(p.opt_cat, n_opt) },
             cell_area: Vec::new(),
+            area_aff: Vec::new(),
+            opt_aff: Vec::new(),
             area_cap: Vec::new(),
             prot: if p.prot_rows.is_null() || p.prot_start.is_null() { Vec::new() } else {
                 let st = v(p.prot_start, n_opt + 1);
@@ -745,6 +752,17 @@ impl Data {
             let mut small = vec![i32::MAX; 128];                    // per category: its smallest part's cells
             for (k, &c) in d.opt_cat.iter().enumerate() { if c >= 0 { small[c as usize] = small[c as usize].min(d.opts[k].cells.len() as i32); } }
             d.area_cap = size.iter().zip(&cat).map(|(&s, &c)| s.min(small[c.max(0) as usize])).collect();
+            if !p.area_aff.is_null() {
+                let no = d.opts.len();
+                d.area_aff = v(p.area_aff, size.len() * no);
+                d.opt_aff = (0..no).map(|k| (0..size.len()).any(|a| d.area_aff[a * no + k] > 0.0)).collect();
+                for a in 0..size.len() {                         // one part of the best match fills it
+                    let row = &d.area_aff[a * no..(a + 1) * no];
+                    if let Some(k) = (0..no).max_by(|&i, &j| row[i].total_cmp(&row[j])) {
+                        if row[k] > 0.0 { d.area_cap[a] = size[a].min(d.opts[k].cells.len() as i32); }
+                    }
+                }
+            }
         }
         let n_motif = p.n_motif.max(0) as usize;
         if p.p_motif > 0.0 && n_motif > 0 && !p.motif_rows.is_null() {
@@ -916,27 +934,31 @@ impl Data {
         self.opts[k].cells.iter().filter(|&&(y, x, z, _, _)| self.cell_cat[self.idx(oy + y, ox + x, oz + z)] == c).count() as f64
     }
 
-    /// Labelled cells option k placed at (oy, ox, oz) covers in each semantic area: (area, cells).
-    fn sem_area_hits(&self, k: usize, oy: i32, ox: i32, oz: i32) -> Vec<(usize, i32)> {
-        let mut v: Vec<(usize, i32)> = Vec::new();
-        if self.w_sem == 0.0 || self.opt_cat[k] < 0 { return v; }
+    /// Labelled cells option k placed at (oy, ox, oz) covers in each semantic area, each weighted by how much its
+    /// part is what the area shows (area_aff; by category: 1 or 0): (area, weighted cells).
+    fn sem_area_hits(&self, k: usize, oy: i32, ox: i32, oz: i32) -> Vec<(usize, f64)> {
+        let mut v: Vec<(usize, f64)> = Vec::new();
+        let aff = !self.area_aff.is_empty();
+        if self.w_sem == 0.0 || if aff { !self.opt_aff[k] } else { self.opt_cat[k] < 0 } { return v; }
         let c = self.opt_cat[k] as i8;
         for &(y, x, z, _, _) in &self.opts[k].cells {
             let i = self.idx(oy + y, ox + x, oz + z);
-            if self.cell_cat[i] != c || self.cell_area[i] < 0 { continue; }
+            if self.cell_area[i] < 0 || (!aff && self.cell_cat[i] != c) { continue; }
             let a = self.cell_area[i] as usize;
-            match v.iter_mut().find(|e| e.0 == a) { Some(e) => e.1 += 1, None => v.push((a, 1)) }
+            let w = if aff { self.area_aff[a * self.opts.len() + k] as f64 } else { 1.0 };
+            if w <= 0.0 { continue; }
+            match v.iter_mut().find(|e| e.0 == a) { Some(e) => e.1 += w, None => v.push((a, w)) }
         }
         v
     }
 
     /// Semantic bonus (in cells) option k at (oy, ox, oz) adds to parts covering m[a] cells of each area (missing = 0):
     /// its labelled cells, or in area mode the cells up to each area's cap.
-    fn sem_gain(&self, m: &[i32], k: usize, oy: i32, ox: i32, oz: i32) -> f64 {
+    fn sem_gain(&self, m: &[f64], k: usize, oy: i32, ox: i32, oz: i32) -> f64 {
         if self.cell_area.is_empty() { return self.sem_hits(k, oy, ox, oz); }
         self.sem_area_hits(k, oy, ox, oz).iter().map(|&(a, n)| {
-            let (m, cap) = (m.get(a).copied().unwrap_or(0), self.area_cap[a]);
-            ((m + n).min(cap) - m.min(cap)) as f64
+            let (m, cap) = (m.get(a).copied().unwrap_or(0.0), self.area_cap[a] as f64);
+            (m + n).min(cap) - m.min(cap)
         }).sum()
     }
 
@@ -1332,7 +1354,7 @@ struct State<'a> {
     dirp: f64,          // surface direction cost of all live parts
     sdp: f64,           // surface distance cost of all live parts
     semp: f64,          // semantic hits of all live parts (w_sem)
-    area_m: Vec<i32>,   // per semantic area: its cells covered by live parts of its category
+    area_m: Vec<f64>,   // per semantic area: its (weighted) cells covered by live parts that earn there
     n_bare_top: f64,
     lock_hits: u64,      // adds and removes that touched a locked cell (a move doing so is undone)
     mark: Vec<u32>,
@@ -1402,7 +1424,7 @@ impl<'a> State<'a> {
             dirp: 0.0,
             sdp: 0.0,
             semp: 0.0,
-            area_m: vec![0; d.area_cap.len()],
+            area_m: vec![0.0; d.area_cap.len()],
             n_bare_top: 0.0,
             lock_hits: 0,
             mark: Vec::new(),
@@ -4331,5 +4353,5 @@ pub unsafe extern "C" fn e2l_sample(p: *const Problem) -> i32 {
 /// The layout version: Python checks it before calling.
 #[no_mangle]
 pub extern "C" fn e2l_abi() -> i32 {
-    24
+    25
 }

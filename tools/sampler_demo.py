@@ -274,6 +274,7 @@ def main() -> None:
     ap.add_argument("--snap-pitches", default="all", choices=["all", "roof"], help="pitch set for --snap-geometry: all slope row pitches, or roof = without 39.6 (studless cheese caps only; target_snap.PRESETS)")
     ap.add_argument("--semantic", default=None, help="npz from tools/semantic_labels.py (same --studs): per-cell part category (window, door, wheel, fence, plant)")
     ap.add_argument("--semantic-weight", type=float, default=16.0, help="with --semantic: energy bonus per cell a part fills whose label is its Rebrickable category, per labelled area up to one part (--semantic-mode area), and the filler proposes such parts there (watermill, 2 seeds: 9-10 window parts, visible windows; shape 0.864 -> 0.873 %%); 0 = off")
+    ap.add_argument("--part-affinity", action=argparse.BooleanOptionalAction, default=True, help="with labels that carry it: an area's bonus per part by how much that part is what the area shows (its prototype from real sets), any category, instead of by the area's category")
     ap.add_argument("--semantic-mode", choices=("area", "cell"), default="area", help="area: the bonus per labelled area (6-connected run of one label) saturates once one part fills it; cell: per labelled cell any part fills")
     ap.add_argument("--parts", default=None, help="npz from tools/part_labels.py (same --studs): per-cell mesh part; mirror planes are found per part and mirror / echo map cells only within their part")
     ap.add_argument("--prepare-parts", action=argparse.BooleanOptionalAction, default=True, help="on by default (watermill, 2 seeds: one roof colour, colour patches/100 7.7 -> 5.5, visible windows); skipped with a warning when SAMesh's venv is missing; run (or read from its cache) tools/prepare_parts.py for this mesh at --studs (and --snap-geometry): SAMesh parts and CLIP labels, then as --parts P --colour-by-part --semantic L; an explicit --parts / --semantic wins")
@@ -311,6 +312,8 @@ def main() -> None:
         target.cell_cat, target.categories = d["cell_cat"].astype(np.int8), tuple(str(c) for c in d["categories"])
         if "cell_area" in d:                             # one area per feature (semantic_labels); older files: connected runs
             target.cell_area = d["cell_area"].astype(np.int32)
+        if "area_aff" in d and a.part_affinity:          # each part by its own embedding (semantic_labels.area_affinity)
+            target.area_aff, target.aff_parts = d["area_aff"].astype(np.float32), tuple(str(p) for p in d["aff_parts"])
     if a.parts:
         cp = np.load(a.parts)["cell_part"]
         if cp.shape != target.want.shape:

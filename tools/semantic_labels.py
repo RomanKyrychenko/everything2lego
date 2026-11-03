@@ -489,8 +489,49 @@ def classify(a, alone_all: bool = False, pick=None) -> dict:
     for r in regs:
         if r["keep"] and not r.get("whole") and r["part"] in whole:
             r["keep"], r["note"] = False, "inside a part kept whole"
+    probs([r for r in regs if r["keep"] and "emb_alone" not in r], alone=True)   # what part it is: area_affinity
     return dict(t=t, mesh=mesh, T=T, regs=regs, cats=cats, cell_part=cell_part,
                 part_rank=part_rank if flab is not None else {}, P=P, fcol=fcol, fn=fn, ctx=ctx)
+
+
+def protos_file() -> Path:
+    return Path("/Volumes/PRO-G40/lego_data/analysis/part_embed") / (MODEL.replace("/", "__") + ".protos.npz")
+
+
+def area_affinity(regs: list, area_of: dict, n_area: int, cats: list, area_cat: np.ndarray) -> tuple:
+    """Per semantic area, how much each special vocabulary part is what it shows: (n_area, n_parts) weights in [0, 1]
+    (1 = its best match) and the parts' LDraw names; (None, None) without prototypes (part_match_bench.py --write).
+    The area's embedding (its kept regions seen alone, area-weighted) against each part's prototype -- the mean of
+    that part's regions in real sets -- by a softmax at the fitted temperature; a part no set held shares the
+    unseen share q evenly with the other such parts of the area's category."""
+    f = protos_file()
+    if not f.exists() or not n_area:
+        return None, None
+    from everything2lego.sampler import vocabulary
+    sys.path.insert(0, str(ROOT / "tools")); from part_match_bench import BASIC, nz
+    D = np.load(f)
+    cat_of = {}
+    for v in vocabulary():
+        cat_of.setdefault(v.part.ldraw, v.category)
+    parts = sorted(p for p, c in cat_of.items() if c not in BASIC)
+    have = {p: i for i, p in enumerate(D["ldraw"])}
+    e = np.zeros((n_area, D["proto"].shape[1]))
+    for r in regs:
+        if r["keep"] and id(r) in area_of and "emb_alone" in r:
+            e[area_of[id(r)]] += r["area"] * r["emb_alone"].astype(np.float64)
+    ok = np.linalg.norm(e, axis=1) > 0
+    s = nz(e, D["mean"]) @ D["proto"].astype(np.float64).T          # (n_area, n_protos)
+    cols = [have[p] for p in parts if p in have]
+    seen = np.array([p in have for p in parts])
+    x = s[:, cols] / float(D["T"]); x = np.exp(x - x.max(1, keepdims=True)); x /= x.sum(1, keepdims=True)
+    P = np.zeros((n_area, len(parts)))
+    P[:, seen] = (1 - float(D["q"])) * x
+    for a in range(n_area):                              # parts no set held: by the area's category
+        u = ~seen & np.array([cat_of[p] == cats[area_cat[a]] for p in parts])
+        if u.any():
+            P[a, u] = float(D["q"]) / u.sum()
+    P[~ok] = 0.0
+    return P / np.maximum(P.max(1, keepdims=True), 1e-12), np.array(parts)
 
 
 def main() -> None:
@@ -511,6 +552,7 @@ def main() -> None:
     show = t.want & t.visible
     cell_cat = np.full((H, X, Z), -1, np.int8)
     cell_area = np.full((H, X, Z), -1, np.int32)         # which feature: the sampler's semantic areas
+    area_of = {}                                         # kept region -> its area
     for r in sorted((r for r in regs if r["keep"]), key=lambda r: r["area"]):
         c = cats.index(dict((n, c) for n, _, c in CLASSES)[r["cls"]])
         if r.get("whole") and r["cls"] not in EMBEDDED:
@@ -518,6 +560,7 @@ def main() -> None:
             k = instance(cell_area, cell_cat, full, c)
             box = full & (cell_cat < 0)
             cell_cat[box], cell_area[box] = c, k
+            area_of[id(r)] = k
             r["cells"] = int(box.sum())
             continue
         sub = trimesh.Trimesh(mesh.vertices, mesh.faces[r["faces"]], process=False)
@@ -534,10 +577,21 @@ def main() -> None:
         k = instance(cell_area, cell_cat, box, c)
         box &= cell_cat < 0
         cell_cat[box], cell_area[box] = c, k
+        area_of[id(r)] = k
         r["cells"], r["box"] = int(box.sum()), [int(v) for v in hi - lo]
     table = [{k: (round(v, 3) if isinstance(v, float) else v) for k, v in r.items() if k not in ("faces", "normal", "prob", "prob_alone", "emb", "emb_alone")}
              for r in regs]
-    np.savez_compressed(a.out, cell_cat=cell_cat, cell_area=cell_area, categories=np.array(cats), regions=json.dumps(table))
+    n_area = int(cell_area.max()) + 1
+    area_cat = np.zeros(n_area, int)
+    for i in range(n_area):
+        area_cat[i] = cell_cat[cell_area == i][0] if (cell_area == i).any() else 0
+    aff, aff_parts = area_affinity(regs, area_of, n_area, cats, area_cat)
+    extra = {} if aff is None else dict(area_aff=aff.astype(np.float16), aff_parts=aff_parts)
+    np.savez_compressed(a.out, cell_cat=cell_cat, cell_area=cell_area, categories=np.array(cats), regions=json.dumps(table), **extra)
+    if aff is not None:
+        for i in range(n_area):
+            top = np.argsort(-aff[i])[:3]
+            print(f"  area {i:2d} {cats[area_cat[i]]:18s} " + ", ".join(f"{aff_parts[j]} {aff[i, j]:.2f}" for j in top))
     for r in sorted((r for r in regs if r["keep"]), key=lambda r: (r["cls"], -r["area"])):
         print(f"  region {r['id']:>4} {'part' if r.get('whole') else 'in'} {r['part']:>4}  {r['area']:6.1f} stud^2  {r['cls']:>7}"
               f" p {r['p']:.2f} margin {r['margin']:.2f} alone {r['alone']:.2f}  -> {r.get('cells', 0)} cells"

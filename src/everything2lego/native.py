@@ -29,7 +29,7 @@ from typing import Optional
 
 import numpy as np
 
-ABI = 24
+ABI = 25
 INFO_LEN = 20
 ERR_LAYERS = ("shape", "colour", "support", "direction", "statistics")   # lib.rs N_ERR
 PATHS4_BUCKETS = 8
@@ -129,6 +129,7 @@ class Problem(C.Structure):
         ("w_sem", C.c_double), ("cell_cat", _P(C.c_int8)), ("opt_cat", _P(C.c_int32)),   # semantic labels (semantic_labels.py)
         ("cell_part", _P(C.c_int16)),                                   # mesh part per cell (part_labels.py); null = off
         ("cell_area", _P(C.c_int32)),                                   # semantic area per cell; null = per-cell bonus
+        ("area_aff", _P(C.c_float)),                                    # per area x option: its part is what it shows
     ]
 
 
@@ -667,6 +668,15 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
             area = getattr(target, "cell_area", None)
             area = semantic_areas(target.cell_cat) if area is None else area
             p.cell_area = _ptr(arr(area.reshape(-1), np.int32), C.c_int32)
+            aff = getattr(target, "area_aff", None)
+            if aff is not None and getattr(target, "cell_area", None) is not None:   # areas numbered as labelled
+                col = {n: i for i, n in enumerate(target.aff_parts)}
+                n_area = int(area.max()) + 1
+                A = np.zeros((n_area, len(opts)), np.float32)
+                for k, (v, _) in enumerate(opts):
+                    if v.part.ldraw in col:
+                        A[:, k] = aff[:n_area, col[v.part.ldraw]]
+                p.area_aff = _ptr(arr(A.reshape(-1), np.float32), C.c_float)
     if getattr(target, "cell_part", None) is not None:
         p.cell_part = _ptr(arr(target.cell_part.reshape(-1), np.int16), C.c_int16)
     if getattr(target, "lock", None) is not None:
