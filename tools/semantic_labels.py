@@ -283,37 +283,68 @@ def load_hf(name: str):
     return AutoModel.from_pretrained(name).eval().to(dev), AutoProcessor.from_pretrained(name)
 
 
-def clip_probs(images: list) -> np.ndarray:
-    """(n_images, n_classes) softmax over CLASSES (prompt ensemble)."""
+def embed_texts(texts: list[str]) -> np.ndarray:
+    """(n, d) unit text embeddings of MODEL."""
     import torch
-    txt = [t.format(p) for _, p, _ in CLASSES for t in TEMPLATES]
-    if MODEL != CLIP_ID:
-        model, proc = load_hf(MODEL)
-        with torch.no_grad():
+    with torch.no_grad():
+        if MODEL != CLIP_ID:
+            model, proc = load_hf(MODEL)
             pad = dict(padding="max_length", max_length=64) if "siglip" in MODEL.lower() else dict(padding=True)
-            te = model.get_text_features(**proc(text=txt, return_tensors="pt", **pad).to(model.device))
-            te = getattr(te, "pooler_output", te)        # transformers 5: an output object
-            te = te / te.norm(dim=-1, keepdim=True)
-            te = te.reshape(len(CLASSES), len(TEMPLATES), -1).mean(1); te = te / te.norm(dim=-1, keepdim=True)
             out = []
+            for b in range(0, len(texts), 64):
+                te = model.get_text_features(**proc(text=texts[b:b + 64], return_tensors="pt", **pad).to(model.device))
+                out.append(getattr(te, "pooler_output", te).cpu())   # transformers 5: an output object
+            te = torch.cat(out)
+        else:
+            model, proc = load_clip()
+            te = model.text_projection(model.text_model(**proc(text=texts, return_tensors="pt", padding=True)).pooler_output)
+    return (te / te.norm(dim=-1, keepdim=True)).numpy()
+
+
+def embed_images(images: list) -> np.ndarray:
+    """(n, d) unit image embeddings of MODEL."""
+    import torch
+    if not images:
+        return np.zeros((0, len(embed_texts(["x"])[0])), np.float32)
+    out = []
+    with torch.no_grad():
+        if MODEL != CLIP_ID:
+            model, proc = load_hf(MODEL)
             for b in range(0, len(images), 16):
                 ie = model.get_image_features(**proc(images=images[b:b + 16], return_tensors="pt").to(model.device))
-                ie = getattr(ie, "pooler_output", ie)
-                ie = ie / ie.norm(dim=-1, keepdim=True)
-                out.append((model.logit_scale.exp() * ie @ te.T).softmax(-1).cpu().numpy())
-        return np.concatenate(out) if out else np.zeros((0, len(CLASSES)))
-    model, proc = load_clip()
+                out.append(getattr(ie, "pooler_output", ie).cpu())
+        else:
+            model, proc = load_clip()
+            for b in range(0, len(images), 32):
+                out.append(model.visual_projection(model.vision_model(**proc(images=images[b:b + 32], return_tensors="pt")).pooler_output))
+    ie = torch.cat(out)
+    return (ie / ie.norm(dim=-1, keepdim=True)).numpy()
+
+
+def logit_scale() -> float:
+    import torch
+    model = load_hf(MODEL)[0] if MODEL != CLIP_ID else load_clip()[0]
     with torch.no_grad():
-        te = model.text_projection(model.text_model(**proc(text=txt, return_tensors="pt", padding=True)).pooler_output)
-        te = te / te.norm(dim=-1, keepdim=True)
-        te = te.reshape(len(CLASSES), len(TEMPLATES), -1).mean(1)
-        te = te / te.norm(dim=-1, keepdim=True)
-        out = []
-        for b in range(0, len(images), 32):
-            ie = model.visual_projection(model.vision_model(**proc(images=images[b:b + 32], return_tensors="pt")).pooler_output)
-            ie = ie / ie.norm(dim=-1, keepdim=True)
-            out.append((model.logit_scale.exp() * ie @ te.T).softmax(-1).numpy())
-    return np.concatenate(out) if out else np.zeros((0, len(CLASSES)))
+        return float(model.logit_scale.exp())
+
+
+@lru_cache(maxsize=4)
+def _class_text(model: str) -> np.ndarray:
+    te = embed_texts([t.format(p) for _, p, _ in CLASSES for t in TEMPLATES])
+    te = te.reshape(len(CLASSES), len(TEMPLATES), -1).mean(1)
+    return te / np.linalg.norm(te, axis=1, keepdims=True)
+
+
+def class_probs(ie: np.ndarray) -> np.ndarray:
+    """(n, n_classes) softmax over CLASSES (prompt ensemble) of unit image embeddings."""
+    z = logit_scale() * ie @ _class_text(MODEL).T
+    z = np.exp(z - z.max(1, keepdims=True))
+    return z / z.sum(1, keepdims=True)
+
+
+def clip_probs(images: list) -> np.ndarray:
+    """(n_images, n_classes) softmax over CLASSES (prompt ensemble)."""
+    return class_probs(embed_images(images)) if images else np.zeros((0, len(CLASSES)))
 
 
 def parser() -> argparse.ArgumentParser:
@@ -386,11 +417,17 @@ def classify(a, alone_all: bool = False, pick=None) -> dict:
             r["normal"] = v[:, -1] * (1 if v[:, -1] @ nm >= 0 else -1)
     # a region inside a part is seen with its part as surroundings; a whole part with everything around it
     ctx = lambda r: None if flab is None or r.get("whole") else flab == r["part"]
-    def probs(rs, alone=False):                          # the mean over the views
+    def probs(rs, alone=False):                          # the mean over the views; each region keeps its mean embedding
         vs = VIEWS[:a.views]
-        p = clip_probs([render(P, mesh.faces, fcol, fn, r["faces"], r["normal"], view=v, dim=a.context_dim, alone=alone,
-                               context=None if alone else ctx(r)) for r in rs for v in vs])
-        return p.reshape(len(rs), len(vs), -1).mean(1) if len(rs) else p
+        e = embed_images([render(P, mesh.faces, fcol, fn, r["faces"], r["normal"], view=v, dim=a.context_dim, alone=alone,
+                                 context=None if alone else ctx(r)) for r in rs for v in vs])
+        if not len(rs):
+            return np.zeros((0, len(CLASSES)))
+        e = e.reshape(len(rs), len(vs), -1)
+        m = e.mean(1); m /= np.linalg.norm(m, axis=1, keepdims=True)
+        for r, x in zip(rs, m):
+            r["emb_alone" if alone else "emb"] = x.astype(np.float16)
+        return class_probs(e.reshape(len(rs) * len(vs), -1)).reshape(len(rs), len(vs), -1).mean(1)
     prob = probs(regs)
     present = {v.category for v in vocabulary()}
     cats = sorted({c for _, _, c in CLASSES if c in present})
@@ -498,7 +535,7 @@ def main() -> None:
         box &= cell_cat < 0
         cell_cat[box], cell_area[box] = c, k
         r["cells"], r["box"] = int(box.sum()), [int(v) for v in hi - lo]
-    table = [{k: (round(v, 3) if isinstance(v, float) else v) for k, v in r.items() if k not in ("faces", "normal", "prob", "prob_alone")}
+    table = [{k: (round(v, 3) if isinstance(v, float) else v) for k, v in r.items() if k not in ("faces", "normal", "prob", "prob_alone", "emb", "emb_alone")}
              for r in regs]
     np.savez_compressed(a.out, cell_cat=cell_cat, cell_area=cell_area, categories=np.array(cats), regions=json.dumps(table))
     for r in sorted((r for r in regs if r["keep"]), key=lambda r: (r["cls"], -r["area"])):

@@ -92,7 +92,8 @@ def face_truth(src, dst) -> tuple[np.ndarray, np.ndarray]:
 def run_set(f: Path, studs: int, neg: int, extra: list[str]) -> dict:
     """Every region touching a true feature is scored, and `neg` of the rest at random; weight = 1 / its sampling
     rate, so precision and AP are those of all regions.  inst (n, KINDS): the part instance holding most of the
-    region's area of that kind (-1 none)."""
+    region's area of that kind (-1 none); part / part_share: the LDraw part (any) holding most of its area, and that
+    share; emb / emb_alone: its image embeddings (views averaged), for matching it to parts (part_embed.py)."""
     from ldr_to_mesh import build_mesh
     src = build_mesh(f)
     got = {}
@@ -112,7 +113,13 @@ def run_set(f: Path, studs: int, neg: int, extra: list[str]) -> dict:
                 if m.any():
                     u, ui = np.unique(fi[g[m]], return_inverse=True)
                     inst[n, k] = u[np.bincount(ui, fa[g[m]]).argmax()]
-        got.update(frac=frac[idx], weight=w[idx], inst=inst)
+        names = np.asarray(src.metadata["face_part"]); sinst = np.asarray(src.metadata["face_inst"])
+        first = {int(q): names[np.flatnonzero(sinst == q)[0]] for q in np.unique(sinst)}
+        part, share = [], []                             # the part (any part) holding most of each region's area
+        for i in idx:
+            g = regs[i]["faces"]; u, ui = np.unique(fi[g], return_inverse=True); ar = np.bincount(ui, fa[g])
+            part.append(first[int(u[ar.argmax()])]); share.append(ar.max() / ar.sum())
+        got.update(frac=frac[idx], weight=w[idx], inst=inst, part=np.array(part), part_share=np.array(share))
         return [regs[i] for i in idx]
     with tempfile.NamedTemporaryFile(suffix=".glb", delete=False) as tmp:
         src.export(tmp.name)
@@ -122,6 +129,7 @@ def run_set(f: Path, studs: int, neg: int, extra: list[str]) -> dict:
         Path(tmp.name).unlink()
     regs = c["regs"]
     return dict(prob=np.array([r["prob"] for r in regs]), alone=np.array([r["prob_alone"] for r in regs]),
+                emb=np.array([r["emb"] for r in regs]), emb_alone=np.array([r["emb_alone"] for r in regs]),
                 keep=np.array([r["keep"] for r in regs]), cls=np.array([r["cls"] for r in regs]),
                 area=np.array([r["area"] for r in regs]), faces=len(c["mesh"].faces), **got)
 
