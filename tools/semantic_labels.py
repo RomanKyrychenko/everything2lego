@@ -18,6 +18,11 @@ paints it or barely models it, for the sampler's --semantic.
     CLIP against semantic classes (window, door, wheel, fence, ladder, plants:
     their Rebrickable category in the part vocabulary) and plain ones (wall,
     roof, stone, ground, grass, water, waterfall, wood, chimney: nothing special);
+  - kept, when tools/clip_thresholds.json holds thresholds for this model and render setting (--clip, --views,
+    --context-dim; fitted by tools/clip_bench.py on real building sets, two-fold checked), when a category's score
+    (its summed probability over --views views, in context; or that times seen alone, whichever held out better)
+    reaches its threshold -- the default: SigLIP 2, 3 views, in context, windows and doors only (fences fitted no
+    threshold right more often than wrong).  Otherwise (the old hand-set rule):
   - kept when the best class is semantic, p >= --p-min (0.75), it leads the
     runner-up by >= --margin (0.2), and drawn ALONE (no surroundings) the region
     is still that Rebrickable category first with p >= --p-alone (0.3), summed over
@@ -161,15 +166,25 @@ def stud_space(p: np.ndarray, T: np.ndarray) -> np.ndarray:
     return g * np.array([1.0, PLATE, 1.0])
 
 
+def _basis(f: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    up = np.array([0.0, 1.0, 0.0]) if abs(f[1]) < 0.9 else np.array([0.0, 0.0, -1.0])
+    r = np.cross(up, f); r /= np.linalg.norm(r)
+    return r, np.cross(f, r)
+
+
 def render(P: np.ndarray, faces: np.ndarray, fcol: np.ndarray, fn: np.ndarray, region: np.ndarray, normal: np.ndarray,
-           size: int = 224, ctx: float = 1.3, outline: bool = False, alone: bool = False, context: np.ndarray | None = None):
-    """The region seen along -normal (orthographic, stud-space vertices P), framed with `ctx` times its extent of
-    surroundings, the surroundings dimmed; faces painted far to near.  `alone`: the region by itself, nothing around it;
-    `context` (F,) bool: only these faces as surroundings (its mesh part: no wheel or eave in front of a window)."""
+           size: int = 224, ctx: float = 1.3, outline: bool = False, alone: bool = False, context: np.ndarray | None = None,
+           view: tuple = (0.0, 0.0), dim: float = 0.4):
+    """The region seen along -normal turned by `view` (yaw, pitch degrees) (orthographic, stud-space vertices P), framed
+    with `ctx` times its extent of surroundings, the surroundings at `dim` brightness; faces painted far to near.
+    `alone`: the region by itself, nothing around it; `context` (F,) bool: only these faces as surroundings (its mesh
+    part: no wheel or eave in front of a window)."""
     from PIL import Image, ImageDraw
     f = -np.asarray(normal, float)
-    up = np.array([0.0, 1.0, 0.0]) if abs(f[1]) < 0.9 else np.array([0.0, 0.0, -1.0])
-    r = np.cross(up, f); r /= np.linalg.norm(r); u = np.cross(f, r)
+    r, u = _basis(f)
+    ya, pa = np.radians(view)
+    f = np.cos(ya) * f + np.sin(ya) * r; r, u = _basis(f)
+    f = np.cos(pa) * f + np.sin(pa) * u; r, u = _basis(f)
     q = P @ np.stack([r, u, f], 1)                       # (V, 3): right, up, depth
     qr = q[faces[region]].reshape(-1, 3)
     c = (qr.min(0) + qr.max(0)) / 2
@@ -185,7 +200,7 @@ def render(P: np.ndarray, faces: np.ndarray, fcol: np.ndarray, fn: np.ndarray, r
     elif context is not None:
         sel &= context | inreg
     for i in np.flatnonzero(sel)[np.argsort(-cen[sel, 2])]:           # far first (depth along f, larger is farther)
-        k = (0.75 + 0.25 * abs(fn[i] @ light)) * (1.0 if inreg[i] else 0.4)
+        k = (0.75 + 0.25 * abs(fn[i] @ light)) * (1.0 if inreg[i] else dim)
         xy = [(size / 2 + (q[v, 0] - c[0]) * s, size / 2 - (q[v, 1] - c[1]) * s) for v in faces[i]]
         dr.polygon(xy, fill=tuple(int(min(255, x * k)) for x in fcol[i]))
     if outline:
@@ -241,6 +256,8 @@ def load_clip():
 
 
 MODEL = CLIP_ID                                  # --clip: any transformers CLIP / SigLIP checkpoint instead
+# the default, chosen on tools/clip_bench.py (8 real building sets): SigLIP 2, 3 views, in-context score, fitted threshold
+DEFAULT_MODEL = "google/siglip2-so400m-patch14-384"
 
 
 @lru_cache(maxsize=2)
@@ -300,8 +317,19 @@ def parser() -> argparse.ArgumentParser:
                     help="SAMesh face2label.json and segmented.glb: mesh parts as candidates (each whole, and the colour regions inside each)")
     ap.add_argument("--snap-geometry", action="store_true", help="label the snapped target (as sampler_demo --snap-geometry)")
     ap.add_argument("--snap-pitches", default="all", choices=["all", "roof"])
-    ap.add_argument("--clip", default=CLIP_ID, help="image-text model (transformers id; default the cached ViT-B/32)")
+    ap.add_argument("--clip", default=DEFAULT_MODEL, help="image-text model (transformers id; the old default: " + CLIP_ID + ")")
+    ap.add_argument("--views", type=int, default=3, choices=[1, 3, 5], help="views per region, probabilities averaged: "
+                    "straight on; and turned +-25 deg sideways; and +-20 deg up / down")
+    ap.add_argument("--context-dim", type=float, default=0.4, help="brightness of the surroundings in a region's render")
     return ap
+
+
+VIEWS = [(0.0, 0.0), (25.0, 0.0), (-25.0, 0.0), (0.0, 20.0), (0.0, -20.0)]
+THRESHOLDS = ROOT / "tools" / "clip_thresholds.json"     # fitted by clip_bench.py --fit, per model and render setting
+
+
+def setting(a) -> str:
+    return f"{a.clip}|views{a.views}|dim{a.context_dim:g}"
 
 
 def classify(a, alone_all: bool = False, pick=None) -> dict:
@@ -340,12 +368,17 @@ def classify(a, alone_all: bool = False, pick=None) -> dict:
     print(f"{len(regs)} candidate regions ({len(mesh.faces)} faces)", flush=True)
     for r in regs:                                       # the way it faces, area-weighted, in stud space
         nm = (fn[r["faces"]] * fa[r["faces"], None]).sum(0); r["normal"] = nm / (np.linalg.norm(nm) + 1e-12)
-        if r.get("whole"):                               # a closed part (a wheel's two faces cancel): its main facing axis
+        if r.get("whole") or np.linalg.norm(nm) < 0.3 * fa[r["faces"]].sum():   # closed (a wheel's faces cancel): main axis
             w, v = np.linalg.eigh((fn[r["faces"]] * fa[r["faces"], None]).T @ fn[r["faces"]])
             r["normal"] = v[:, -1] * (1 if v[:, -1] @ nm >= 0 else -1)
     # a region inside a part is seen with its part as surroundings; a whole part with everything around it
     ctx = lambda r: None if flab is None or r.get("whole") else flab == r["part"]
-    prob = clip_probs([render(P, mesh.faces, fcol, fn, r["faces"], r["normal"], context=ctx(r)) for r in regs])
+    def probs(rs, alone=False):                          # the mean over the views
+        vs = VIEWS[:a.views]
+        p = clip_probs([render(P, mesh.faces, fcol, fn, r["faces"], r["normal"], view=v, dim=a.context_dim, alone=alone,
+                               context=None if alone else ctx(r)) for r in rs for v in vs])
+        return p.reshape(len(rs), len(vs), -1).mean(1) if len(rs) else p
+    prob = probs(regs)
     present = {v.category for v in vocabulary()}
     cats = sorted({c for _, _, c in CLASSES if c in present})
     sem = np.array([c in cats for _, _, c in CLASSES])
@@ -357,17 +390,42 @@ def classify(a, alone_all: bool = False, pick=None) -> dict:
     # the region itself must be the feature, not a sliver beside it: seen alone, it is still most likely that class
     for r, p in zip(regs, prob):
         r["prob"] = p
-    cand = [r for r in regs if r["keep"] or alone_all]
-    alone = clip_probs([render(P, mesh.faces, fcol, fn, r["faces"], r["normal"], alone=True) for r in cand])
-    # by category, not class: a pane alone reads "a door" as often as "a window" -- both are Windows and Doors
     ccat = np.array([c for _, _, c in CLASSES], dtype=object)
+    fitted = json.loads(THRESHOLDS.read_text()).get(setting(a)) if THRESHOLDS.exists() else None
+    if fitted:                                           # a category's score = P(it | in context) [* P(it | alone)] >= its fitted threshold
+        score, fitted = fitted["score"], fitted["thresholds"]
+        hand = {c for c, v in fitted.items() if v is None}   # too few in the benchmark to fit: the hand rule below
+        fitted = {c: v for c, v in fitted.items() if v is not None}
+        for r in regs:
+            r["hand"] = bool(r["keep"] and ccat[r["k"]] in hand)
+            r["keep"] = r["hand"]
+        need = score == "ctx*alone"                      # only the product (and the hand rule) needs the region seen alone
+        cand = [r for r in regs if alone_all or r["hand"]
+                or any(r["prob"][ccat == c].sum() >= fitted.get(c, np.inf) for c in cats)]
+        seen = [r for r in cand if need or alone_all or r["hand"]]
+        g = dict(zip(map(id, seen), probs(seen, alone=True)))
+        alone = [g.get(id(r), np.zeros(len(ccat))) for r in cand]
+    else:
+        cand = [r for r in regs if r["keep"] or alone_all]
+        alone = probs(cand, alone=True)
+    # by category, not class: a pane alone reads "a door" as often as "a window" -- both are Windows and Doors
     for r, g in zip(cand, alone):
         r["prob_alone"] = g
-        if not r["keep"]:
+        if fitted is not None and not r.get("hand"):
+            sc = {c: float(r["prob"][ccat == c].sum() * (g[ccat == c].sum() if score == "ctx*alone" else 1.0))
+                  for c in cats if c in fitted}
+            c = max(sc, key=sc.get) if sc else None
+            if c is None or sc[c] < fitted[c]:
+                continue
+            k = int(np.flatnonzero(ccat == c)[np.argmax(r["prob"][ccat == c])])
+            r.update(keep=True, k=k, cls=CLASSES[k][0], alone=float(g[ccat == c].sum()) if need else 0.0,
+                     alone_cls=CLASSES[int(g.argmax())][0] if need else "")
+        elif not r["keep"]:
             continue
-        same = ccat == ccat[r["k"]]
-        r["alone"], r["alone_cls"] = float(g[same].sum()), CLASSES[int(g.argmax())][0]
-        r["keep"] = bool(same[g.argmax()] and r["alone"] >= a.p_alone)
+        else:
+            same = ccat == ccat[r["k"]]
+            r["alone"], r["alone_cls"] = float(g[same].sum()), CLASSES[int(g.argmax())][0]
+            r["keep"] = bool(same[g.argmax()] and r["alone"] >= a.p_alone)
         if r["cls"] in EMBEDDED:                         # a feature a tenth of the smallest such part's face is a sill or shutter
             h, w = EMBEDDED[r["cls"]]
             r["keep"] &= r["area"] >= h * PLATE * w / 10

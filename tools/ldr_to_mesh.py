@@ -70,20 +70,20 @@ def _rgb() -> dict:
 
 def build_mesh(ldr: Path):
     """The build as one coloured trimesh, in LDU with +y UP (LDraw's -y), ground at 0, centred on x / z;
-    metadata["face_part"]: each face's LDraw part name."""
+    metadata["face_part"]: each face's LDraw part name; "face_inst": its part's index in the build."""
     import trimesh
     from ldraw_read import flatten
-    rgb = _rgb(); V, C, N = [], [], []
-    for p in flatten(ldr):
+    rgb = _rgb(); V, C, N, I = [], [], [], []
+    for i, p in enumerate(flatten(ldr)):
         v, c = _part(p.name)
         if not len(v): continue
-        V.append(v @ p.M[:3, :3].T + p.M[:3, 3]); C.append(np.where(c == 16, p.colour, c)); N += [p.name] * len(v)
+        V.append(v @ p.M[:3, :3].T + p.M[:3, 3]); C.append(np.where(c == 16, p.colour, c)); N += [p.name] * len(v); I += [i] * len(v)
     V = np.concatenate(V) * np.array([1, -1, 1]); C = np.concatenate(C)
     V = V[:, [0, 2, 1]]                                                          # y flip mirrors: swap two vertices to keep faces outward
     V -= np.array([(V[..., 0].min() + V[..., 0].max()) / 2, V[..., 1].min(), (V[..., 2].min() + V[..., 2].max()) / 2])
     m = trimesh.Trimesh(vertices=V.reshape(-1, 3), faces=np.arange(len(V) * 3).reshape(-1, 3), process=False)
     m.visual.face_colors = np.array([(*rgb.get(int(c), (160, 160, 160)), 255) for c in C], np.uint8)
-    m.metadata["face_part"] = N                                                  # the part each face came from
+    m.metadata["face_part"], m.metadata["face_inst"] = N, np.array(I)           # the part each face came from, and which one
     return m
 
 

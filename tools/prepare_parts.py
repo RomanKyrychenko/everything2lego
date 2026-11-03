@@ -7,7 +7,8 @@ Cached under DIR (default /Volumes/PRO-G40/lego_data/analysis/parts_cache/<sha1 
     samesh/face2label.json, samesh/segmented.glb   SAMesh (tools/samesh_run.py in SAMesh's own venv, CPU, ~13 min on
                                                    the watermill), once per mesh, whatever --studs
     parts_<N>[_snap-<pitches>].npz                 tools/part_labels.py at --studs N (its target, snapped or not)
-    labels_<N>[_snap-<pitches>].npz                tools/semantic_labels.py --samesh, same target
+    labels_<N>[_snap-<pitches>]_<labeller>.npz     tools/semantic_labels.py --samesh, same target (labeller: model,
+                                                   render setting and thresholds, hashed)
 Each file is written to a temporary name and renamed, so a cached file is a finished one; a re-run is instant.
 sampler_demo --prepare-parts calls prepare() for its mesh and --studs.
 """
@@ -85,6 +86,15 @@ def samesh(mesh: Path, cache: Path, seed_from: Path | None = None) -> tuple[Path
     return f2l, seg
 
 
+def labeller() -> str:
+    """'_<hash>' of semantic_labels' default model, render setting and fitted thresholds: labels made by another are
+    not reused."""
+    import hashlib
+    from semantic_labels import THRESHOLDS, parser, setting
+    key = setting(parser().parse_args(["-", "--out", "-"])) + (THRESHOLDS.read_text() if THRESHOLDS.exists() else "")
+    return "_" + hashlib.sha1(key.encode()).hexdigest()[:8]
+
+
 def prepare(mesh, studs: int, cache=None, snap_pitches: str | None = None, samesh_from=None) -> tuple[Path, Path]:
     """(parts.npz, labels.npz) for the sampler's target of `mesh` at `studs` (snapped with these pitches, or not)."""
     mesh = Path(mesh).resolve()
@@ -96,7 +106,7 @@ def prepare(mesh, studs: int, cache=None, snap_pitches: str | None = None, sames
     out = []
     for name, script, args in (("parts", "part_labels.py", [str(f2l), str(seg)]),
                                ("labels", "semantic_labels.py", ["--samesh", str(f2l), str(seg)])):
-        p = cache / f"{name}_{tag}.npz"
+        p = cache / f"{name}_{tag}{labeller() if name == 'labels' else ''}.npz"
         if not p.exists():
             tmp = cache / f"{name}_{tag}.tmp{os.getpid()}.npz"
             _run([sys.executable, str(TOOLS / script), str(mesh), *args, "--studs", str(studs), *snap, "--out", str(tmp)],
