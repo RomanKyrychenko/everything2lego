@@ -67,7 +67,7 @@ def main() -> None:
     E = np.load(EMB / (a.model.replace("/", "__") + ".npz"))
     idx = {n: i for i, n in enumerate(E["ldraw"])}
     look, text, cat = E["look"].astype(np.float32), E["text"].astype(np.float32), E["category"]
-    R = [dict(np.load(f, allow_pickle=True)) for f in sorted(a.bench.glob("*.npz"))]
+    R = [dict(np.load(f, allow_pickle=True)) for f in sorted(a.bench.glob("[!.]*.npz"))]   # not macOS ._ files
     R = [r for r in R if "emb" in r]
     emb = np.concatenate([r["emb"] for r in R]).astype(np.float32)
     alone = np.concatenate([r["emb_alone"] for r in R]).astype(np.float32)
