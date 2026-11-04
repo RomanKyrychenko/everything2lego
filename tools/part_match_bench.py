@@ -36,16 +36,22 @@ def write_protos(a, E, alone, t, special, held, tw, cand, unseen) -> None:
     part (or a twin) the most likelihood; q = the share of special regions whose part no other set held."""
     m = alone.mean(0); A = nz(alone, m); j = np.unique(t)
     P = nz(np.stack([A[t == p].mean(0) for p in j]), 0)
+    ref = A @ P.T                                       # each part on its own scale: a common part's prototype is
+    mu, sd = ref.mean(0), ref.std(0) + 1e-9             # near everything (hub) -- its score standardised
     sel = special & ~unseen
-    s = np.where(cand & np.isfinite(held[sel]), held[sel], -np.inf); hit = tw[t[sel]] & np.isfinite(s)
+    hz = held.copy(); hz[:, j] = (held[:, j] - mu) / sd
+    s = np.where(cand & np.isfinite(hz[sel]), hz[sel], -np.inf); hit = tw[t[sel]] & np.isfinite(s)
     def ll(T):
         x = s / T; mx = x.max(1, keepdims=True)
         lse = lambda y: mx[:, 0] + np.log(np.exp(y - mx).sum(1))
         return (lse(np.where(hit, x, -np.inf)) - lse(x)).mean()
-    Ts = np.geomspace(0.003, 0.3, 41); T = float(Ts[np.argmax([ll(T) for T in Ts])])
+    Ts = np.geomspace(0.03, 30, 61); T = float(Ts[np.argmax([ll(T) for T in Ts])])
     q = float(unseen[special].mean())
     f = EMB / (a.model.replace("/", "__") + ".protos.npz")
-    np.savez_compressed(f, ldraw=E["ldraw"][j], proto=P.astype(np.float16), mean=m.astype(np.float32), T=T, q=q)
+    np.savez_compressed(f, ldraw=E["ldraw"][j], proto=P.astype(np.float16), mean=m.astype(np.float32), T=T, q=q,
+                        mu=mu.astype(np.float32), sd=sd.astype(np.float32))
+    raw = np.where(cand & np.isfinite(held[sel]), held[sel], -np.inf)
+    print(f"   held-out top1, special seen regions: raw {tw[t[sel], raw.argmax(1)].mean():.3f}, standardised {tw[t[sel], s.argmax(1)].mean():.3f}")
     print(f"-> {f}: {len(j)} parts, T {T:.4f} (held-out log-lik {ll(T):.3f}), unseen share {q:.3f}")
 
 

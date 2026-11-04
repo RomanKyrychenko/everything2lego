@@ -494,17 +494,17 @@ def classify(a, alone_all: bool = False, pick=None) -> dict:
                 part_rank=part_rank if flab is not None else {}, P=P, fcol=fcol, fn=fn, ctx=ctx)
 
 
-def protos_file() -> Path:
-    return Path("/Volumes/PRO-G40/lego_data/analysis/part_embed") / (MODEL.replace("/", "__") + ".protos.npz")
+def protos_file(model: str) -> Path:
+    return Path("/Volumes/PRO-G40/lego_data/analysis/part_embed") / (model.replace("/", "__") + ".protos.npz")
 
 
 def area_affinity(regs: list, area_of: dict, n_area: int, cats: list, area_cat: np.ndarray) -> tuple:
-    """Per semantic area, how much each special vocabulary part is what it shows: (n_area, n_parts) weights in [0, 1]
+    """Per semantic area, how much each special vocabulary part of the area's category is what it shows: (n_area, n_parts) weights in [0, 1]
     (1 = its best match) and the parts' LDraw names; (None, None) without prototypes (part_match_bench.py --write).
     The area's embedding (its kept regions seen alone, area-weighted) against each part's prototype -- the mean of
     that part's regions in real sets -- by a softmax at the fitted temperature; a part no set held shares the
     unseen share q evenly with the other such parts of the area's category."""
-    f = protos_file()
+    f = protos_file(MODEL)
     if not f.exists() or not n_area:
         return None, None
     from everything2lego.sampler import vocabulary
@@ -531,6 +531,9 @@ def area_affinity(regs: list, area_of: dict, n_area: int, cats: list, area_cat: 
         if u.any():
             P[a, u] = float(D["q"]) / u.sum()
     P[~ok] = 0.0
+    # gated by the area's category (measured on its own, clip_bench): across categories the prototypes, made from
+    # LEGO sets drawn, do not carry to a scanned / generated mesh (the watermill's windows read as wheels and fences)
+    P *= np.array([[cat_of[p] == cats[c] for p in parts] for c in area_cat])
     return P / np.maximum(P.max(1, keepdims=True), 1e-12), np.array(parts)
 
 
