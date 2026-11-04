@@ -89,11 +89,12 @@ def face_truth(src, dst) -> tuple[np.ndarray, np.ndarray]:
     return kind[best[1]], np.asarray(src.metadata["face_inst"])[best[1]]
 
 
-def run_set(f: Path, studs: int, neg: int, extra: list[str]) -> dict:
+def run_set(f: Path, studs: int, neg: int, extra: list[str], gen: Path | None = None) -> dict:
     """Every region touching a true feature is scored, and `neg` of the rest at random; weight = 1 / its sampling
     rate, so precision and AP are those of all regions.  inst (n, KINDS): the part instance holding most of the
     region's area of that kind (-1 none); part / part_share: the LDraw part (any) holding most of its area, and that
-    share; emb / emb_alone: its image embeddings (views averaged), for matching it to parts (part_embed.py)."""
+    share; emb / emb_alone: its image embeddings (views averaged), for matching it to parts (part_embed.py).
+    gen: a generated mesh of the set (gen_bench_meshes.py) labelled instead of the set's own geometry."""
     from ldr_to_mesh import build_mesh
     src = build_mesh(f)
     got = {}
@@ -124,7 +125,8 @@ def run_set(f: Path, studs: int, neg: int, extra: list[str]) -> dict:
     with tempfile.NamedTemporaryFile(suffix=".glb", delete=False) as tmp:
         src.export(tmp.name)
     try:
-        c = classify(parser().parse_args([tmp.name, "--studs", str(studs), "--out", "-", *extra]), alone_all=True, pick=pick)
+        c = classify(parser().parse_args([str(gen or tmp.name), "--studs", str(studs), "--out", "-", *extra]),
+                     alone_all=True, pick=pick)
     finally:
         Path(tmp.name).unlink()
     regs = c["regs"]
@@ -226,6 +228,8 @@ def main() -> None:
     from semantic_labels import THRESHOLDS, setting
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", type=Path, required=True); ap.add_argument("--n", type=int, default=20)
+    ap.add_argument("--gen", type=Path, default=None, help="label each set's generated mesh <gen>/<set>.glb "
+                    "(gen_bench_meshes.py) instead of its own geometry; sets without one are skipped")
     ap.add_argument("--skip", type=int, default=0, help="start after this many sets (a second worker, same --out)")
     ap.add_argument("--studs", type=int, default=32)
     ap.add_argument("--clip", default=DEFAULT_MODEL, help="image-text model, as semantic_labels.py --clip")
@@ -245,6 +249,8 @@ def main() -> None:
             break
         cache = a.out / f"{f.stem}.npz"
         claim = cache.with_suffix(".claim")             # workers sharing --out split the sets
+        if a.gen and not (a.gen / f"{f.stem}.glb").exists():
+            continue
         if not cache.exists():
             try:
                 claim.touch(exist_ok=False)
@@ -252,7 +258,7 @@ def main() -> None:
                 continue
             print(f"== {f.name}", flush=True)
             try:
-                r = run_set(f, a.studs, a.neg, extra)
+                r = run_set(f, a.studs, a.neg, extra, a.gen / f"{f.stem}.glb" if a.gen else None)
             except Exception as e:                       # noqa: BLE001
                 print(f"   skipped: {e}", flush=True); continue
             np.savez_compressed(cache, **r); claim.unlink()
