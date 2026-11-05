@@ -382,3 +382,20 @@ def test_catalog_keeps_only_plain_geometry_from_imports():
     from everything2lego.templates.base import part_by_ldraw
     assert part_by_ldraw("4733.dat") is not None and not part_by_ldraw("4733.dat").plain
     assert len(full_catalog()) > len(cat)
+
+
+def test_fit_photo_view_finds_the_camera():
+    """An L-shaped block drawn from 20 deg above, 30 round: the silhouette fit finds that view, not the front."""
+    import trimesh
+    from PIL import Image, ImageDraw
+    from everything2lego.voxelize import fit_photo_view, photo_pixels
+    m = trimesh.util.concatenate([trimesh.creation.box((2.0, 1.0, 1.0)),
+                                  trimesh.creation.box((1.0, 2.0, 1.0), trimesh.transformations.translation_matrix((0.5, 1.5, 0)))])
+    m = m.subdivide().subdivide().subdivide()
+    img = np.full((256, 256, 3), 255, np.uint8)
+    px, py, _ = photo_pixels(m.vertices, img, view=(20, 30))
+    pic = Image.fromarray(img); dr = ImageDraw.Draw(pic)
+    for f in m.faces:
+        dr.polygon([(float(px[v]), float(py[v])) for v in f], fill=(90, 40, 20))
+    (lat, lon), iou, iou0 = fit_photo_view(m.vertices, np.asarray(pic).min(-1) < 200)
+    assert abs(lat - 20) <= 8 and abs(lon - 30) <= 8 and iou > iou0 + 0.1      # coarse: 128 px silhouettes

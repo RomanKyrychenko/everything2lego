@@ -223,6 +223,30 @@ def render(P: np.ndarray, faces: np.ndarray, fcol: np.ndarray, fn: np.ndarray, r
     return img
 
 
+def photo_crop(img: np.ndarray, uv: np.ndarray, faces: np.ndarray, region: np.ndarray, size: int = 224,
+               ctx: float = 1.3, alone: bool = False, dim: float = 0.4):
+    """The region as the source photo shows it: its faces' pixels (uv (V, 2), vertices in the photo) framed square with
+    `ctx` times its extent, the surroundings at `dim` brightness (white with `alone`).  shortcut: occlusion ignored (a
+    region behind a nearer one shows the nearer one's pixels); a depth test would need the photo's camera depth."""
+    from PIL import Image, ImageDraw
+    t = uv[faces[region]].astype(float)                  # (n, 3, 2)
+    c = (t.reshape(-1, 2).min(0) + t.reshape(-1, 2).max(0)) / 2
+    half = max(np.ptp(t[..., 0]), np.ptp(t[..., 1]), 4.0) * ctx / 2
+    x0, y0 = int(np.floor(c[0] - half)), int(np.floor(c[1] - half)); n = int(np.ceil(2 * half))
+    pad = np.full((n, n, 3), 255, np.uint8)
+    h, w = img.shape[:2]
+    ax, ay, bx, by = max(0, x0), max(0, y0), min(w, x0 + n), min(h, y0 + n)
+    if ax < bx and ay < by:
+        pad[ay - y0:by - y0, ax - x0:bx - x0] = img[ay:by, ax:bx]
+    mask = Image.new("L", (n, n), 0); dr = ImageDraw.Draw(mask)
+    for tri in t:
+        dr.polygon([(x - x0, y - y0) for x, y in tri], fill=255)
+    m = np.asarray(mask) > 0
+    out = pad.astype(np.float32)
+    out[~m] = 255.0 if alone else out[~m] * dim
+    return Image.fromarray(out.astype(np.uint8)).resize((size, size), Image.BICUBIC)
+
+
 @lru_cache(maxsize=1)
 def load_clip():
     """(CLIPModel, CLIPProcessor) from the local cache.  The cache holds only open_clip's weights of CLIP_ID (no
@@ -368,6 +392,7 @@ def parser() -> argparse.ArgumentParser:
     return ap
 
 
+PHOTO_FACING = 0.3                                       # a region this square to the camera is seen in the photo
 VIEWS = [(0.0, 0.0), (25.0, 0.0), (-25.0, 0.0), (0.0, 20.0), (0.0, -20.0)]
 THRESHOLDS = ROOT / "tools" / "clip_thresholds.json"     # fitted by clip_bench.py --fit, per model and render setting
 
@@ -376,10 +401,12 @@ def setting(a) -> str:
     return f"{a.clip}|views{a.views}|dim{a.context_dim:g}"
 
 
-def classify(a, alone_all: bool = False, pick=None) -> dict:
+def classify(a, alone_all: bool = False, pick=None, photo=None) -> dict:
     """Candidate regions of a.mesh, each with its CLIP probabilities ("prob"; "prob_alone" for the candidates seen
     alone, every region with `alone_all`) and the keep rule applied.  -> the target, mesh, frame and regions.
-    `pick(mesh, regs) -> regs`: only these are scored (clip_bench.py)."""
+    `pick(mesh, regs) -> regs`: only these are scored (clip_bench.py).  `photo` (img, uv (V, 2), facing (F,)): the
+    picture the mesh was made from, its vertices' pixels and each face's cosine to the camera (in the mesh's vertex
+    and face order); a region facing it (area-weighted cosine >= PHOTO_FACING) is seen in the photo, not rendered."""
     global MODEL
     MODEL = a.clip
     from everything2lego.sampler import vocabulary
@@ -417,17 +444,28 @@ def classify(a, alone_all: bool = False, pick=None) -> dict:
             r["normal"] = v[:, -1] * (1 if v[:, -1] @ nm >= 0 else -1)
     # a region inside a part is seen with its part as surroundings; a whole part with everything around it
     ctx = lambda r: None if flab is None or r.get("whole") else flab == r["part"]
+    if photo is not None:
+        assert len(photo[1]) == len(mesh.vertices) and len(photo[2]) == len(mesh.faces), "photo is not of this mesh"
+        for r in regs:
+            g = r["faces"]; r["photo"] = bool((photo[2][g] * fa[g]).sum() >= PHOTO_FACING * fa[g].sum())
+
     def probs(rs, alone=False):                          # the mean over the views; each region keeps its mean embedding
         vs = VIEWS[:a.views]
-        e = embed_images([render(P, mesh.faces, fcol, fn, r["faces"], r["normal"], view=v, dim=a.context_dim, alone=alone,
-                                 context=None if alone else ctx(r)) for r in rs for v in vs])
         if not len(rs):
             return np.zeros((0, len(CLASSES)))
-        e = e.reshape(len(rs), len(vs), -1)
-        m = e.mean(1); m /= np.linalg.norm(m, axis=1, keepdims=True)
+        imgs, own = [], []
+        for i, r in enumerate(rs):
+            if r.get("photo"):                           # one view: the photo's
+                imgs.append(photo_crop(photo[0], photo[1], mesh.faces, r["faces"], dim=a.context_dim, alone=alone)); own.append(i)
+            else:
+                imgs += [render(P, mesh.faces, fcol, fn, r["faces"], r["normal"], view=v, dim=a.context_dim, alone=alone,
+                                context=None if alone else ctx(r)) for v in vs]; own += [i] * len(vs)
+        e = embed_images(imgs); own = np.array(own); cnt = np.bincount(own, minlength=len(rs))[:, None]
+        m = np.zeros((len(rs), e.shape[1])); np.add.at(m, own, e); m /= np.linalg.norm(m, axis=1, keepdims=True)
         for r, x in zip(rs, m):
             r["emb_alone" if alone else "emb"] = x.astype(np.float16)
-        return class_probs(e.reshape(len(rs) * len(vs), -1)).reshape(len(rs), len(vs), -1).mean(1)
+        pr = np.zeros((len(rs), len(CLASSES))); np.add.at(pr, own, class_probs(e))
+        return pr / cnt
     prob = probs(regs)
     present = {v.category for v in vocabulary()}
     cats = sorted({c for _, _, c in CLASSES if c in present})

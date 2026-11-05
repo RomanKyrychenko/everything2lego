@@ -89,12 +89,34 @@ def face_truth(src, dst) -> tuple[np.ndarray, np.ndarray]:
     return kind[best[1]], np.asarray(src.metadata["face_inst"])[best[1]]
 
 
-def run_set(f: Path, studs: int, neg: int, extra: list[str], gen: Path | None = None) -> dict:
+def photo_of(gen: Path) -> tuple:
+    """The picture gen_bench_meshes made `gen` from (<gen>.png), its vertices' pixels and its faces' cosine to the
+    camera, in the vertex and face order MeshTarget gives the mesh (load, process) -- as project_photo_colors placed
+    the picture on it."""
+    from PIL import Image
+    from everything2lego.voxelize import _crop_to_subject, background_rgb, fit_photo_view, load_mesh, photo_pixels
+    m = load_mesh(gen); m.process(validate=True)
+    full = np.asarray(Image.open(gen.with_suffix(".png")).convert("RGB")); img = _crop_to_subject(full)
+    subj = np.abs(img.astype(np.int16) - background_rgb(full)).sum(-1) > 30
+    view, iou, iou0 = fit_photo_view(m.vertices, subj)
+    view = view if iou >= iou0 + 0.02 else None          # as project_photo_colors decides
+    px, py, vd = photo_pixels(m.vertices, img, view=view)
+    fc = (np.asarray(m.face_normals) @ vd).clip(0)
+    # seen = facing the camera and nearest along its ray: a depth buffer of face centres, 4 px cells
+    z = m.triangles_center @ vd; cx, cy = px[m.faces].mean(1).astype(int) // 4, py[m.faces].mean(1).astype(int) // 4
+    zb = np.full((cy.max() + 1, cx.max() + 1), -np.inf); np.maximum.at(zb, (cy, cx), np.where(fc > 0, z, -np.inf))
+    fc[z < zb[cy, cx] - 0.02 * np.ptp(z)] = 0
+    fc[~subj[py[m.faces].mean(1).astype(int), px[m.faces].mean(1).astype(int)]] = 0   # off the photo's subject: the fit's error
+    return img, np.stack([px, py], 1), fc
+
+
+def run_set(f: Path, studs: int, neg: int, extra: list[str], gen: Path | None = None, photo: bool = False) -> dict:
     """Every region touching a true feature is scored, and `neg` of the rest at random; weight = 1 / its sampling
     rate, so precision and AP are those of all regions.  inst (n, KINDS): the part instance holding most of the
     region's area of that kind (-1 none); part / part_share: the LDraw part (any) holding most of its area, and that
     share; emb / emb_alone: its image embeddings (views averaged), for matching it to parts (part_embed.py).
-    gen: a generated mesh of the set (gen_bench_meshes.py) labelled instead of the set's own geometry."""
+    gen: a generated mesh of the set (gen_bench_meshes.py) labelled instead of the set's own geometry; `photo`: its
+    regions facing the camera seen in the picture it was made from (semantic_labels.classify photo=)."""
     from ldr_to_mesh import build_mesh
     src = build_mesh(f)
     got = {}
@@ -126,14 +148,15 @@ def run_set(f: Path, studs: int, neg: int, extra: list[str], gen: Path | None = 
         src.export(tmp.name)
     try:
         c = classify(parser().parse_args([str(gen or tmp.name), "--studs", str(studs), "--out", "-", *extra]),
-                     alone_all=True, pick=pick)
+                     alone_all=True, pick=pick, photo=photo_of(gen) if photo else None)
     finally:
         Path(tmp.name).unlink()
     regs = c["regs"]
     return dict(prob=np.array([r["prob"] for r in regs]), alone=np.array([r["prob_alone"] for r in regs]),
                 emb=np.array([r["emb"] for r in regs]), emb_alone=np.array([r["emb_alone"] for r in regs]),
                 keep=np.array([r["keep"] for r in regs]), cls=np.array([r["cls"] for r in regs]),
-                area=np.array([r["area"] for r in regs]), faces=len(c["mesh"].faces), **got)
+                area=np.array([r["area"] for r in regs]), photo=np.array([r.get("photo", False) for r in regs]),
+                faces=len(c["mesh"].faces), **got)
 
 
 CCAT = np.array([c or "" for _, _, c in CLASSES]); CNAME = np.array([n for n, _, _ in CLASSES])
@@ -230,6 +253,8 @@ def main() -> None:
     ap.add_argument("--out", type=Path, required=True); ap.add_argument("--n", type=int, default=20)
     ap.add_argument("--gen", type=Path, default=None, help="label each set's generated mesh <gen>/<set>.glb "
                     "(gen_bench_meshes.py) instead of its own geometry; sets without one are skipped")
+    ap.add_argument("--photo", action="store_true", help="with --gen: regions facing the camera seen in the picture "
+                    "the mesh was made from, not rendered from the mesh")
     ap.add_argument("--skip", type=int, default=0, help="start after this many sets (a second worker, same --out)")
     ap.add_argument("--studs", type=int, default=32)
     ap.add_argument("--clip", default=DEFAULT_MODEL, help="image-text model, as semantic_labels.py --clip")
@@ -258,7 +283,7 @@ def main() -> None:
                 continue
             print(f"== {f.name}", flush=True)
             try:
-                r = run_set(f, a.studs, a.neg, extra, a.gen / f"{f.stem}.glb" if a.gen else None)
+                r = run_set(f, a.studs, a.neg, extra, a.gen / f"{f.stem}.glb" if a.gen else None, a.photo)
             except Exception as e:                       # noqa: BLE001
                 print(f"   skipped: {e}", flush=True); continue
             np.savez_compressed(cache, **r); claim.unlink()
