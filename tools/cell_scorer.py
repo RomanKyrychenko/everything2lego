@@ -135,6 +135,8 @@ def main() -> None:
     ap.add_argument("bench", type=Path); ap.add_argument("--cells", type=int, default=300)
     ap.add_argument("--folds", type=int, default=5)
     ap.add_argument("--only", default="", help="comma list of features to use (default all)")
+    ap.add_argument("--random", action="store_true", help="score parts at random: the chance level of this metric")
+    ap.add_argument("--save", type=Path, default=None, help="also fit on every set and write the model (priors, weights) here, for cell_labels.py")
     a = ap.parse_args()
     t0 = time.time()
     P = parts_table(); rng = np.random.default_rng(0)
@@ -150,7 +152,9 @@ def main() -> None:
     print(f"{len(sets)} sets, {sum(len(d['true']) for _, d, _ in sets)} cells, {len(P['ld'])} parts; load {time.time() - t0:.0f} s")
     use = [FEATS.index(x) for x in a.only.split(",")] if a.only else list(range(len(FEATS)))
     m, nb = len(P["ld"]), HB * FB
-    fold = np.arange(len(sets)) % a.folds
+    fam = [n.split("_")[0].split("-")[0] for n, _, _ in sets]          # a model's cars / variants: one fold
+    ids = {f: i for i, f in enumerate(dict.fromkeys(fam))}
+    fold = np.array([ids[f] % a.folds for f in fam])
     ranks, cats, seen_all, W = [], [], [], []
     for k in range(a.folds):
         tr = [s for s, q in zip(sets, fold) if q != k]; te = [s for s, q in zip(sets, fold) if q == k]
@@ -162,6 +166,8 @@ def main() -> None:
         w = fit(Ftr, [d["true"] for _, d, _ in tr]); W.append(w)
         for _, d, ev in te:
             s = features(d, ev, P, prior_p, prior_c)[..., use] @ w
+            if a.random:
+                s = rng.random(s.shape)
             order = np.argsort(-s, 1)
             hit = P["twin"][d["true"][:, None], order]               # (n, m): rank positions holding a substitute
             ranks.append(np.argmax(hit, 1)); cats.append(P["cat"][d["true"]]); seen_all.append(d["seen"])
@@ -174,6 +180,14 @@ def main() -> None:
                       ("special unseen", sp & ~sn)):
         q = r[sel]
         print(f"{name:16s} {sel.sum():6d} " + " ".join(f"{(q < k).mean():6.3f}" for k in (1, 5, 20, 50)))
+    if a.save:                                                      # the model from all sets, for building
+        cp = np.ones((nb, m)); cc = np.ones((nb, P["cats"].max() + 1))
+        for _, d, _ in sets:
+            np.add.at(cp, (d["band"], d["true"]), 1); np.add.at(cc, (d["band"], P["cats"][d["true"]]), 1)
+        prior_p = np.log(cp / cp.sum(1, keepdims=True)); prior_c = np.log(cc / cc.sum(1, keepdims=True))
+        w = fit([features(d, ev, P, prior_p, prior_c)[..., use] for _, d, ev in sets], [d["true"] for _, d, _ in sets])
+        np.savez_compressed(a.save, prior_p=prior_p, prior_c=prior_c, w=w, use=np.array(use), ld=P["ld"])
+        print(f"model -> {a.save}: " + ", ".join(f"{FEATS[i]} {x:+.2f}" for i, x in zip(use, w)))
     print(f"total {time.time() - t0:.0f} s")
 
 
