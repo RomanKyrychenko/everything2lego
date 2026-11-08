@@ -362,10 +362,18 @@ def fit(Fs: list, ts: list, iters: int = 200, twin: np.ndarray | None = None) ->
     return minimize(f, np.zeros(F.shape[-1]), jac=True, method="L-BFGS-B", options={"maxiter": iters}).x
 
 
-def cell_probs(d: dict, P: dict, T: dict, w1, use, w) -> np.ndarray:
+def cell_probs(d: dict, P: dict, T: dict, w1, use, w, regs: dict | None = None) -> np.ndarray:
     """(n, m) P(part) of every surface cell of d (surface_rows) as a build sees it: no picture, the features without
-    it plus ctx (w1 not None / non-empty)."""
+    it plus ctx (w1 not None / non-empty), and with `regs` (region_evidence --mesh: cells, member, emb, seen) the
+    spot features from its regions."""
     n, D = len(d["cells"]), P["look"].shape[1]
+    row = np.zeros((0,), int)
+    if regs is not None:                                 # each region pair as (row of d, region)
+        lut = np.full(d["cells"].max(0) + 2, -1); lut[tuple(d["cells"].T)] = np.arange(n)
+        rc = regs["cells"]; ok = (rc < lut.shape).all(1)
+        rrow = np.full(len(rc), -1); rrow[ok] = lut[tuple(rc[ok].T)]
+        m_ = regs["member"]; m_ = m_[(rrow[m_[:, 0]] >= 0) & regs["seen"][m_[:, 1]]]
+        row, rid = rrow[m_[:, 0]], m_[:, 1]
     ctx = context(dict(d, sel=np.arange(n)), P, T, w1) if w1 is not None and len(w1) else None
     ev = dict(names=np.array([]), name_emb=np.zeros((0, D)))
     p = np.empty((n, len(P["ld"])), np.float32)
@@ -373,6 +381,10 @@ def cell_probs(d: dict, P: dict, T: dict, w1, use, w) -> np.ndarray:
         rows = np.arange(s0, min(n, s0 + 500)); k = len(rows)
         q = dict(d, sel=rows, true=np.zeros(k, int), band=d["band_all"][rows], colour=d["colour_all"][rows],
                  tile=np.zeros((k, D), np.float32), seen=np.zeros(k, bool), pairs=np.zeros((0, 2), int))
+        if len(row):
+            inc = (row >= s0) & (row < s0 + k)
+            u, inv = np.unique(rid[inc], return_inverse=True)
+            q.update(pairs=np.stack([row[inc] - s0, inv.ravel()], 1), reg=unit(regs["emb"][u].astype(np.float32)))
         z = features(q, ev, P, *T["band"], T, ctx=None if ctx is None else ctx[rows])[..., use] @ w
         z = np.exp(z - z.max(1, keepdims=True)); p[rows] = z / z.sum(1, keepdims=True)
     return p

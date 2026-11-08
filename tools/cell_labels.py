@@ -27,6 +27,7 @@ def main() -> None:
     ap.add_argument("mesh"); ap.add_argument("--model", type=Path, required=True); ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--studs", type=int, default=32); ap.add_argument("--shell", type=int, default=3)
     ap.add_argument("--area-max", type=int, default=30); ap.add_argument("--top", type=int, default=30)
+    ap.add_argument("--regions", type=Path, default=None, help="region_evidence.py --mesh output for this mesh: the spot features from its rendered regions")
     ap.add_argument("--lift", type=float, default=1.0, help="area score = mean P(part) / (its mean over the target) ** lift")
     a = ap.parse_args()
     from cell_scorer import cell_probs, extent, parts_table, recess, surface_rows
@@ -45,7 +46,7 @@ def main() -> None:
     T = M["T"].item()
     d = surface_rows(r, P, geo=(recess(r["want"], r["normal"]), extent(r)))
     n = len(d["cells"])
-    p = cell_probs(d, P, T, M["w1"], M["use"], M["w"])
+    p = cell_probs(d, P, T, M["w1"], M["use"], M["w"], dict(np.load(a.regions)) if a.regions else None)
     lut = np.full((H, X, Z), -1); lut[tuple(d["cells"].T)] = np.arange(n)
     p = p[lut[tuple(cells.T)]]                               # regions' cells are surface cells with a normal
     areas = partition(cells, cands, a.area_max); taken = np.zeros(len(cells), bool)

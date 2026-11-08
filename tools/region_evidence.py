@@ -8,6 +8,10 @@ Writes <bench>/<stem>.regions.npz: cells (n, 3) wanted cells (y, x, z), member (
 emb (k, d) float16 (zero where unseen), seen (k,), secs.
 
     tools/timed.sh region-evidence .venv-arm/bin/python tools/region_evidence.py /Volumes/PRO-G40/lego_data/analysis/cell_bench
+
+--mesh M --out F: one mesh with no photo (a build's target): every region on cells rendered from the mesh as the
+labeller renders it (semantic_labels.render, 3 views, surroundings at 0.4) -- cell_labels --regions F.  The scorer's
+weights were fitted on photo crops; renders are its stand-in where no photo exists.
 """
 from __future__ import annotations
 
@@ -46,15 +50,44 @@ def membership(mesh, T: np.ndarray, want: np.ndarray, regs: list, half: float = 
     return cells, np.stack([C.row[keep], C.col[keep]], 1)
 
 
+def render_evidence(path: str, studs: int = 32, shell: int = 3) -> dict:
+    """cells, member, emb (every region on cells, embedded from its renders), seen (all True) for the mesh at `path`."""
+    import semantic_labels as S
+    from sampler_demo import target_from_mesh
+    L = S.parser().parse_args(["-", "--out", "-"])
+    t = target_from_mesh(path, studs, shell=shell)
+    mesh, T = t.mesh_target.mesh, t.mesh_target.mesh_to_voxel.astype(np.float64)
+    regs = S.regions(mesh, T, L.k, L.min_area, L.max_area)
+    cells, member = membership(mesh, T, t.want, regs)
+    used = np.unique(member[:, 1])
+    P, fcol = S.stud_space(mesh.vertices, T), S.face_colours(mesh)
+    tri = P[mesh.faces]; fn = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    fa = np.linalg.norm(fn, axis=1); fn /= fa[:, None] + 1e-12
+    imgs = []
+    for k in used:                                       # as semantic_labels.classify renders a region (no SAMesh context)
+        g = regs[k]["faces"]; nm = (fn[g] * fa[g, None]).sum(0); nm /= np.linalg.norm(nm) + 1e-12
+        imgs += [S.render(P, mesh.faces, fcol, fn, g, nm, view=v, dim=L.context_dim) for v in S.VIEWS[:L.views]]
+    e = S.embed_images(imgs).reshape(len(used), L.views, -1).mean(1)
+    emb = np.zeros((len(regs), e.shape[1]), np.float16); emb[used] = e / np.linalg.norm(e, axis=1, keepdims=True)
+    seen = np.zeros(len(regs), bool); seen[used] = True
+    return dict(cells=cells, member=member, emb=emb, seen=seen)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("bench", type=Path); ap.add_argument("--gen", type=Path, default=GEN)
+    ap.add_argument("bench", type=Path, nargs="?"); ap.add_argument("--gen", type=Path, default=GEN)
+    ap.add_argument("--mesh", default=None); ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--clip", default="google/siglip2-so400m-patch14-384"); ap.add_argument("--only", default="")
     a = ap.parse_args()
     import semantic_labels as S
+    S.MODEL = a.clip
+    if a.mesh:
+        t0 = time.time(); r = render_evidence(a.mesh)
+        np.savez_compressed(a.out, **r, secs=time.time() - t0)
+        print(f"{a.mesh}: {r['seen'].sum()} regions rendered, {len(r['member'])} cell-region pairs, {time.time() - t0:.0f} s")
+        return
     from clip_bench import photo_of
     from sampler_demo import target_from_mesh
-    S.MODEL = a.clip
     L = S.parser().parse_args(["-", "--out", "-"])           # the labeller's region settings
     for f in sorted(a.bench.glob("[!.]*.gen.npz")):
         stem = f.name.split(".")[0]; out = a.bench / f"{stem}.regions.npz"
