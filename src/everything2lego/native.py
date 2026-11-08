@@ -498,7 +498,7 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
             pvals[a].append(o.pix[a])
             pstart[a].append(pstart[a][-1] + len(o.pix[a]))
     snap = snap_table(vocab, n_col)
-    cap = int(target.want.sum()) + 16
+    cap = int(target.want.size)                  # parts never overlap: at most one per grid cell (support parts sit outside `want`)
     out = {k: np.zeros(cap, np.int32) for k in ("opt", "colour", "y", "x", "z")}
     out_n = np.zeros(1, np.int32)
     info = np.zeros(INFO_LEN)

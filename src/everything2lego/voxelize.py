@@ -83,7 +83,7 @@ def outline_yaw(mesh: trimesh.Trimesh, *, samples: int = 40000, max_degrees: flo
     textured facade whose normals scatter still has a square plan.
     Returns the angle to turn the mesh by (so that applying it squares
     the plan); 0 when no heading is clearly better."""
-    pts, _ = trimesh.sample.sample_surface(mesh, samples)
+    pts, _ = trimesh.sample.sample_surface(mesh, samples, seed=0)   # seeded: every stage must turn the mesh the same way
     pts = np.asarray(pts)
     y = pts[:, 1]
     lo, hi = np.percentile(y, 20), np.percentile(y, 70)   # walls, not roof or ground

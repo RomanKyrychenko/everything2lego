@@ -6,9 +6,10 @@ curves, rounds, wedges, ...) that LEGO makes now, with
              its own frame), and where in it: `bits`, 4x4x4 samples per
              cell as a 64-bit mask (shapes.pack); and where its box
              centre is from its origin
-  studs      the cells with a stud on top / a hole underneath (BrickNet's connector labels where it has the
-             part: the shadow library's snaps miss collared studs and narrow tops and invent holes under
-             rounded bottoms -- tools/connector_audit.py), and its
+  studs      the cells with a stud on top / a hole underneath, from BrickNet's connector labels (the shadow
+             library's snaps miss collared studs and narrow tops and invent holes under rounded bottoms --
+             tools/connector_audit.py); parts BrickNet lacks are left out (no verified connectors, collider
+             for the checker, and some no LDraw geometry), and its
              side connectors (studs, holes, pins, axles, bars, clips): kind,
              face, place along the face (half studs), height (half plates)
   companion  parts written with it: a wheel's tyre (its name), or a frame's fillers (fillers.py: JSON
@@ -104,16 +105,17 @@ def main() -> None:
     kinds = {pn: {k: {"sets": int(n), "set_share": round(float(ss), 4), "lift": round(float(l), 3)}
                   for k, n, ss, l in zip(g.kind, g.n_sets, g.set_share, g.lift)}
              for pn, g in pk.groupby("part_num")}
-    out = []
+    out, dropped = [], []
     for r in sh.itertuples(index=False):
         if not colours.get(r.part_num):
             continue
         tok = token(r.category, r.name, r.w_studs or 0, r.d_studs or 0, r.h_plates or 0)
         st = r.ldraw.lower().removesuffix(".dat")
         lab = labels.get(aliases.get(st, st) + ".dat")
+        if lab is None:          # no verified connectors (and 37 of these have no LDraw geometry at all: invisible holes)
+            dropped.append(r.ldraw); continue
         size, origin = [int(r.w), int(r.d), int(r.h)], [r.origin_x, r.origin_y, r.origin_z]
-        top, bottom = (bricknet_grid(size, origin, lab)[:2] if lab is not None
-                       else (json.loads(r.studs_top), json.loads(r.holes_bottom)))
+        top, bottom = bricknet_grid(size, origin, lab)[:2]
         out.append({"ldraw": r.ldraw, "part_num": r.part_num, "name": r.name, "category": r.category,
                     "token": tok, "size": size, "origin": origin, "fill": round(float(r.fill), 3),
                     "occ": json.loads(r.occ), "bits": json.loads(r.bits), "studs_top": top,
@@ -130,7 +132,7 @@ def main() -> None:
     OUT.write_text(json.dumps({"source": "tools/partsdb/vocabulary.py", "min_sets": MIN_SETS,
                                "parts": vocab}, separators=(",", ":")))
     cats = pd.Series([p["category"] for p in vocab]).value_counts()
-    print(f"vocabulary: {len(vocab)} parts -> {OUT} ({OUT.stat().st_size // 1024} KB)")
+    print(f"vocabulary: {len(vocab)} parts -> {OUT} ({OUT.stat().st_size // 1024} KB); {len(dropped)} not in BrickNet left out")
     print(cats.to_string())
 
 
