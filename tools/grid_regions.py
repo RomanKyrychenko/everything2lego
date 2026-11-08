@@ -91,6 +91,15 @@ def regions(r: dict, w_normal: float = 2.0, w_curv: float = 2.0, min_cells: int 
     return cells, out
 
 
+def partition(cells: np.ndarray, cands: list, area_max: int = 30) -> list:
+    """Non-overlapping areas from the candidates: up to `area_max` cells, largest first, none sharing a cell."""
+    taken = np.zeros(len(cells), bool); areas = []
+    for c in sorted((c for c in cands if len(c) <= area_max), key=len, reverse=True):
+        if not taken[c].any():
+            taken[c] = True; areas.append(c)
+    return areas
+
+
 def best_iou(cells: np.ndarray, cands: list, inst: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Per true instance (on the surface cells): its cell count and the best IoU of any candidate."""
     u, ci = np.unique(inst, return_inverse=True)

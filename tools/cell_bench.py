@@ -2,12 +2,15 @@
 them, --studs) with the part that truly fills each one -- no rendering, no embedding, seconds per set.
 
 Per set (clip_bench.sets, those with a generated mesh in --gen) and per source ("gen": its Hunyuan3D-2 mesh, gen_bench_meshes.py;
-"ldraw": its own geometry): sampler_demo.target_from_mesh builds the target; its mesh's faces take the set's parts
+"ldraw": its own geometry; "ldeg": its geometry degraded as an image-to-3D mesh is, degrade()): sampler_demo.target_from_mesh builds the target; its mesh's faces take the set's parts
 (clip_bench.face_truth: nearest face of the set's mesh, aligned); surface samples go to the nearest wanted cell (as
 semantic_labels hands regions to cells), and each cell takes the part instance holding most of its samples.
 
 Writes <out>/<set>.<source>.npz: want, visible, colour, bits, normal (H, X, Z, 3; surface_dir.target_normals),
 inst (H, X, Z) int32 (-1 no sample), share (its share of the cell's samples), inst_part (instance -> LDraw name), secs.
+
+--extra N: also N more building sets of the same size that have no generated mesh (other models than the benchmark's),
+source ldeg only: training data for cell_scorer --extra.
 
     tools/timed.sh cell-bench .venv-arm/bin/python tools/cell_bench.py --out /Volumes/PRO-G40/lego_data/analysis/cell_bench
 """
@@ -25,6 +28,26 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tools"), str(ROOT / "tools" / "set_study")]
 GEN = Path("/Volumes/PRO-G40/lego_data/analysis/clip_bench/gen")
 SAMPLES_PER_STUD2 = 16
+
+
+def degrade(src, cells: int = 128, smooth: int = 10, blur: int = 3):
+    """`src` (build_mesh) as an image-to-3D mesh looks: one closed surface (voxels `cells` across, filled, marching
+    cubes), Taubin-smoothed -- no studs, rounded edges -- with each vertex the nearest face's colour, blurred over
+    `blur` rings."""
+    import scipy.sparse as sp
+    import trimesh
+    from scipy.spatial import cKDTree
+    ext = src.bounds[1] - src.bounds[0]
+    vox = src.voxelized(max(ext[0], ext[2]) / cells).fill()
+    m = vox.marching_cubes; m.apply_transform(vox.transform)
+    trimesh.smoothing.filter_taubin(m, iterations=smooth)
+    col = src.visual.face_colors[cKDTree(src.triangles_center).query(m.vertices)[1]].astype(float)
+    A = trimesh.graph.edges_to_coo(m.edges_unique, data=np.ones(len(m.edges_unique))); A = (A + A.T).tocsr()
+    A = sp.diags(1 / np.maximum(np.asarray(A.sum(1)).ravel(), 1)) @ A
+    for _ in range(blur):
+        col = 0.5 * col + 0.5 * (A @ col)
+    m.visual.vertex_colors = col.astype(np.uint8)
+    return m
 
 
 def cell_truth(src, path: str, studs: int, shell: int, photo: bool = False) -> dict:
@@ -78,33 +101,44 @@ def main() -> None:
     ap.add_argument("--n", type=int, default=40); ap.add_argument("--studs", type=int, default=32)
     ap.add_argument("--shell", type=int, default=3)
     ap.add_argument("--sources", default="gen,ldraw")
+    ap.add_argument("--extra", type=int, default=0, help="N more sets without a generated mesh, source ldeg only")
     a = ap.parse_args()
     a.out.mkdir(parents=True, exist_ok=True)
     done = 0
+    bench = {g.stem.split("_")[0].split("-")[0] for g in a.gen.glob("*.glb")}       # benchmark families: never extra
     for f in sets(150, 700):
-        if done >= a.n:
+        if done >= (a.extra or a.n):
             break
-        if not (a.gen / f"{f.stem}.glb").exists():
+        if a.extra:
+            if (a.gen / f"{f.stem}.glb").exists() or f.stem.split("_")[0].split("-")[0] in bench:
+                continue
+        elif not (a.gen / f"{f.stem}.glb").exists():
             continue
         done += 1
-        todo = [s for s in a.sources.split(",") if not (a.out / f"{f.stem}.{s}.npz").exists()]
+        todo = [s for s in (["ldeg"] if a.extra else a.sources.split(",")) if not (a.out / f"{f.stem}.{s}.npz").exists()]
         if not todo:
             continue
-        src = build_mesh(f)
+        try:
+            src = build_mesh(f)
+        except Exception as e:                               # noqa: BLE001
+            print(f"{f.stem}: {e}", flush=True); continue
         names = np.asarray(src.metadata["face_part"]); sinst = np.asarray(src.metadata["face_inst"])
         inst_part = {int(q): str(names[np.flatnonzero(sinst == q)[0]]) for q in np.unique(sinst)}
         part_arr = np.array([inst_part.get(q, "") for q in range(max(inst_part) + 1)])
         for s in todo:
             t0 = time.time()
-            if s == "gen":
-                r = cell_truth(src, str(a.gen / f"{f.stem}.glb"), a.studs, a.shell, photo=True)
-            else:
-                with tempfile.NamedTemporaryFile(suffix=".glb", delete=False) as tmp:
-                    src.export(tmp.name)
-                try:
-                    r = cell_truth(src, tmp.name, a.studs, a.shell)
-                finally:
-                    Path(tmp.name).unlink()
+            try:
+                if s == "gen":
+                    r = cell_truth(src, str(a.gen / f"{f.stem}.glb"), a.studs, a.shell, photo=True)
+                else:
+                    with tempfile.NamedTemporaryFile(suffix=".glb", delete=False) as tmp:
+                        (degrade(src) if s == "ldeg" else src).export(tmp.name)
+                    try:
+                        r = cell_truth(src, tmp.name, a.studs, a.shell)
+                    finally:
+                        Path(tmp.name).unlink()
+            except Exception as e:                           # noqa: BLE001  one bad model must not end a long run
+                print(f"{f.stem} {s}: {e}", flush=True); continue
             secs = time.time() - t0
             np.savez_compressed(a.out / f"{f.stem}.{s}.npz", inst_part=part_arr, secs=secs, **r)
             print(f"{f.stem} {s}: {int(r['want'].sum())} cells, {int((r['inst'] >= 0).sum())} with a part, {secs:.1f} s", flush=True)

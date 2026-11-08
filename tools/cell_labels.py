@@ -2,7 +2,8 @@
 the target's surface cells grouped into areas (colour-only grid regions, grid_regions.py, up to --area-max cells,
 largest first, non-overlapping), and per area a weight for every part -- the mean of its cells' probabilities over
 all parts (plain ones included, so a special part earns only as much as it beats a plain brick there), its --top
-parts kept, scaled so the best is 1.  No rendering: the target, its normals, and real-set priors.
+parts kept, scaled so the best is 1.  No rendering: the target, its normals and geometry (recess, extent, the
+neighbours' parts), and real-set priors.
 
     tools/timed.sh cell-labels .venv-arm/bin/python tools/cell_labels.py examples/pixellabs-watermill-3425.glb \
         --model /Volumes/PRO-G40/lego_data/analysis/cell_bench/model.npz --out labels_cells.npz
@@ -26,8 +27,8 @@ def main() -> None:
     ap.add_argument("--studs", type=int, default=32); ap.add_argument("--shell", type=int, default=3)
     ap.add_argument("--area-max", type=int, default=30); ap.add_argument("--top", type=int, default=30)
     a = ap.parse_args()
-    from cell_scorer import FB, HB, features, parts_table
-    from grid_regions import regions
+    from cell_scorer import context, extent, features, parts_table, recess, surface_rows
+    from grid_regions import partition, regions
     from sampler_demo import target_from_mesh
     from everything2lego.surface_dir import target_normals
     t0 = time.time()
@@ -39,18 +40,24 @@ def main() -> None:
     M = np.load(a.model, allow_pickle=True)
     P = parts_table()
     assert (M["ld"] == P["ld"]).all(), "model built on another part table"
-    nrm = r["normal"][tuple(cells.T)]
-    hb = np.minimum((cells[:, 0] / max(1, H - 1) * HB).astype(int), HB - 1)
-    d = dict(true=np.zeros(len(cells), int), band=hb * FB + np.digitize(nrm[:, 0], [-0.8, -0.3, 0.3, 0.8]),
-             colour=t.colour[tuple(cells.T)], tile=np.zeros((len(cells), P["look"].shape[1]), np.float32),
-             seen=np.zeros(len(cells), bool))                # no picture: appearance terms are 0
-    ev = dict(names=np.array([]), name_emb=np.zeros((0, P["look"].shape[1])))
-    s = features(d, ev, P, M["prior_p"], M["prior_c"])[..., M["use"]] @ M["w"]
-    p = np.exp(s - s.max(1, keepdims=True)); p /= p.sum(1, keepdims=True)
-    taken = np.zeros(len(cells), bool); areas = []
-    for c in sorted((c for c in cands if len(c) <= a.area_max), key=len, reverse=True):
-        if not taken[c].any():
-            taken[c] = True; areas.append(c)
+    T = M["T"].item(); w1 = M["w1"]
+    d = surface_rows(r, P, geo=(recess(r["want"], r["normal"]), extent(r)))
+    n, D = len(d["cells"]), P["look"].shape[1]
+    d["sel"] = np.arange(n)
+    ctx = context(d, P, T, w1) if len(w1) else None
+    ev = dict(names=np.array([]), name_emb=np.zeros((0, D)))
+    p = np.empty((n, len(P["ld"])), np.float32)
+    for s0 in range(0, n, 500):                              # no picture: appearance terms are 0
+        rows = np.arange(s0, min(n, s0 + 500)); k = len(rows)
+        q = dict(d, sel=rows, true=np.zeros(k, int), band=d["band_all"][rows], colour=d["colour_all"][rows],
+                 tile=np.zeros((k, D), np.float32), seen=np.zeros(k, bool))
+        z = features(q, ev, P, *T["band"], T, ctx=None if ctx is None else ctx[rows])[..., M["use"]] @ M["w"]
+        z = np.exp(z - z.max(1, keepdims=True)); p[rows] = z / z.sum(1, keepdims=True)
+    lut = np.full((H, X, Z), -1); lut[tuple(d["cells"].T)] = np.arange(n)
+    p = p[lut[tuple(cells.T)]]                               # regions' cells are surface cells with a normal
+    areas = partition(cells, cands, a.area_max); taken = np.zeros(len(cells), bool)
+    for c in areas:
+        taken[c] = True
     cell_area = np.full((H, X, Z), -1, np.int32); cell_cat = np.full((H, X, Z), -1, np.int8)
     aff = np.zeros((len(areas), len(P["ld"])), np.float32)
     for k, c in enumerate(areas):
