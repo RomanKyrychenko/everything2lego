@@ -6,6 +6,12 @@ cells / (mean over the target) ** lift, for each --lifts.  Reports the share of 
 window/door cells, and the mean over part categories of each one's share (macro: every category counts the same,
 the criterion for choosing --lift).
 
+--fit-thresholds F: also each area's mean P(category) (summed over the category's parts) against whether most of its
+labelled cells are of that category, and per category the lowest threshold whose held-out precision is >= --precision
+(at least 5 true areas above it; else none), written as JSON.  Result (40 sets, 8717 areas, no picture): no category reaches precision 0.5 (best: bars 0.17,
+round bricks 0.09, windows/doors 0.02; area AUC windows 0.45, round 0.49, panels 0.73) -- without the picture the
+features rank parts within a cell but do not tell which areas hold a category.
+
     tools/timed.sh area-bench .venv-arm/bin/python tools/area_bench.py /Volumes/PRO-G40/lego_data/analysis/cell_bench --extra '*.ldeg.npz'
 """
 from __future__ import annotations
@@ -29,6 +35,7 @@ def main() -> None:
     ap.add_argument("bench", type=Path); ap.add_argument("--cells", type=int, default=300)
     ap.add_argument("--folds", type=int, default=5); ap.add_argument("--extra", default="")
     ap.add_argument("--lifts", default="0,0.125,0.25,0.375,0.5,0.625,0.75,0.875,1"); ap.add_argument("--area-max", type=int, default=30)
+    ap.add_argument("--fit-thresholds", type=Path, default=None); ap.add_argument("--precision", type=float, default=0.5)
     a = ap.parse_args()
     t0 = time.time()
     P = parts_table(); rng = np.random.default_rng(0)
@@ -60,6 +67,7 @@ def main() -> None:
     use = list(range(len(FEATS)))
     lifts = [float(x) for x in a.lifts.split(",")]
     rows = []                                          # (lift, k, special, window/door, hit, category) per area cell
+    nc = P["cats"].max() + 1; cs, ct = [], []           # per area: mean P(category), majority category (-1 none)
     for k in range(a.folds):
         tr = [x[:3] for x, q in zip(sets, fold) if q != k]
         tf = {family(x[0]) for x, q in zip(sets, fold) if q == k}
@@ -78,6 +86,8 @@ def main() -> None:
                 if not len(t):
                     continue
                 m = p[c].mean(0)
+                cs.append(np.bincount(P["cats"], m, nc)); cc = np.bincount(P["cats"][t], minlength=nc)
+                ct.append(cc.argmax() if cc.max() >= 0.5 * len(t) else -1)
                 sp = ~np.isin(P["cat"][t], list(BASIC)); wd = P["cat"][t] == "Windows and Doors"
                 for L in lifts:
                     order = np.argsort(-(m / base ** L))[:30]
@@ -85,6 +95,22 @@ def main() -> None:
                     for kk in (5, 30):
                         rows += [(L, kk, s_, w_, h, c_) for s_, w_, h, c_ in zip(sp, wd, hit[:, :kk].any(1), P["cats"][t])]
         print(f"fold {k}: {time.time() - t0:.0f} s", flush=True)
+    if a.fit_thresholds:
+        import json
+        cs, ct = np.array(cs), np.array(ct); names = np.unique(P["cat"]); th = {}
+        np.savez_compressed(a.fit_thresholds.with_suffix(".npz"), score=cs, true=ct, names=names)
+        for i in range(nc):
+            if names[i] in BASIC:
+                continue
+            o = np.argsort(-cs[:, i]); y = ct[o] == i
+            tp = np.cumsum(y); prec = tp / np.arange(1, len(y) + 1)
+            ok = np.flatnonzero((prec >= a.precision) & (tp >= 5))
+            th[str(names[i])] = float(cs[o[ok[-1]], i]) if len(ok) else None
+            if y.sum():
+                best = prec[np.flatnonzero(tp >= 5)].max() if (tp >= 5).any() else 0
+                print(f"  {names[i][:26]:26s} true areas {y.sum():4d} of {len(y)}  best precision {best:.2f}  threshold {th[str(names[i])]}  "
+                      f"recall {tp[ok[-1]] / y.sum() if len(ok) else 0:.2f}")
+        a.fit_thresholds.write_text(json.dumps(th, indent=1))
     R = np.array(rows, float)
     print(f"{'lift':>5s} {'k':>3s} {'all':>6s} {'special':>8s} {'win/door':>9s} {'macro':>6s}   (share of labelled area cells with a true part in the area's top k)")
     for L in lifts:
