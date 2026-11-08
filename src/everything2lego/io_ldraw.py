@@ -57,8 +57,11 @@ def placement_to_line(p: Placement, children: Iterable[SnotChild] = ()) -> str:
     matrix = " ".join(_fmt_num(v) for v in m)
     at = f"{_fmt_num(x)} {_fmt_num(y)} {_fmt_num(z)} {matrix}"
     line = f"1 {ldraw_color} {at} {p.part.ldraw}"
-    if p.part.companion:                   # a wheel's tyre: black, as tyres are
-        line += f"\n1 0 {at} {p.part.companion}"
+    for f, (dx, dy, dz), col in p.part.companion or ():   # a wheel's tyre, a frame's glass: in the part's frame
+        cx = x + m[0] * dx + m[1] * dy + m[2] * dz
+        cy = y + m[3] * dx + m[4] * dy + m[5] * dz
+        cz = z + m[6] * dx + m[7] * dy + m[8] * dz
+        line += f"\n1 {col} {_fmt_num(cx)} {_fmt_num(cy)} {_fmt_num(cz)} {matrix} {f}"
     glass = GLASS.get(p.part.ldraw)
     if glass is not None and p.glass is not None:
         # the frame's glass, clipped in with the frame's own transform

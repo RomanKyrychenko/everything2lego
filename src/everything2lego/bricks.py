@@ -32,7 +32,8 @@ class Part:
     origin: tuple[float, float, float] = (0.0, 0.0, 0.0)
                            # LDU, the part's own frame: where its footprint's centre
                            # (x, z) and its body's top (y) are from its LDraw origin
-    companion: str | None = None   # a part written with it, same place and turn (a wheel's tyre)
+    companion: tuple | None = None # parts written with it: ((ldraw, (dx, dy, dz) LDU in its frame, colour), ...)
+                                   # (a wheel's tyre; a frame's glass, a door frame's door)
     yaw: int = 0           # the quarter turn from this catalogue's convention (footprint w
                            # along x, low side at slope_dir) to how LDraw draws the part
 

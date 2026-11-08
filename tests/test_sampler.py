@@ -136,7 +136,7 @@ def test_a_wheel_on_a_holder_is_held_at_its_side():
     holder = _vp("4488.dat").orients[0]
     hx, hy, hz, dx, dz, _ = holder.sides[0]
     assert (dx, dz) == (1, 0)                          # its bar points +x
-    wheel = next(v for v in sampler.vocabulary() if v.part.companion == "3641.dat" and
+    wheel = next(v for v in sampler.vocabulary() if v.part.companion and v.part.companion[0][0] == "3641.dat" and
                  any(o.size[1] % 2 == 0 for o in v.orients))
     o = next(o for o in wheel.orients for s in o.sides
              if (s[3], s[4]) == (-1, 0) and sampler.FITS[s[5], sampler.CONNECTORS["bar:M"]])

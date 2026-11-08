@@ -277,6 +277,16 @@ def _orients(bits: np.ndarray, top: list, bottom: list, sides: list = ()) -> tup
     return tuple(out)
 
 
+def _companion(c) -> tuple | None:
+    """vocabulary.json's companion -> ((ldraw, (dx, dy, dz), colour), ...): a wheel's tyre (a name: same place, black)
+    or a frame's fillers (JSON [[ldraw, dx, dy, dz, colour], ...])."""
+    if not c:
+        return None
+    if not c.startswith("["):
+        return ((c, (0, 0, 0), 0),)
+    return tuple((f, (dx, dy, dz), col) for f, dx, dy, dz, col in json.loads(c))
+
+
 @lru_cache(maxsize=1)
 def vocabulary() -> tuple[VPart, ...]:
     """Every grid part LEGO makes now (data/vocabulary.json, from the parts
@@ -289,7 +299,7 @@ def vocabulary() -> tuple[VPart, ...]:
         bits = np.array([[[int(v) for v in row] for row in layer] for layer in r["bits"]], dtype=np.uint64)
         part = Part(ldraw=r["ldraw"], bl=r["part_num"], shape=kind_of(r["token"]),
                     footprint=(w, d), height_units=h, name=r["name"], origin=tuple(r["origin"]),
-                    companion=r.get("companion"))
+                    companion=_companion(r.get("companion")))
         full = bool((occ >= 0.999).all()) and len(r["holes_bottom"]) == w * d and not r["sides"]
         box = None
         if full and r["category"] in ("Bricks", "Plates", "Tiles"):

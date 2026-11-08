@@ -9,6 +9,8 @@ tops (400 LDU^2).  The engine charges each row by how far its sub-sample stands 
 """
 from __future__ import annotations
 
+import os
+
 import hashlib
 import pickle
 import sys
@@ -116,7 +118,7 @@ def protrusion_tables(opts) -> tuple[np.ndarray, np.ndarray]:
         rows.append(_MEM[key]); start.append(start[-1] + len(_MEM[key]))
     if new:
         CACHE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = CACHE.with_suffix(f".{id(rows)}.tmp"); tmp.write_bytes(pickle.dumps(_MEM)); tmp.replace(CACHE)
+        tmp = CACHE.with_suffix(f".{os.getpid()}.tmp"); tmp.write_bytes(pickle.dumps(_MEM)); tmp.replace(CACHE)
     return np.array(start, np.int32), (np.concatenate(rows) if rows else np.zeros((0, 3))).astype(np.int32)
 
 
@@ -142,7 +144,7 @@ def tables(opts) -> tuple[np.ndarray, np.ndarray]:
         rows.append(_MEM[key]); start.append(start[-1] + len(_MEM[key]))
     if new:
         CACHE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = CACHE.with_suffix(f".{id(rows)}.tmp"); tmp.write_bytes(pickle.dumps(_MEM)); tmp.replace(CACHE)
+        tmp = CACHE.with_suffix(f".{os.getpid()}.tmp"); tmp.write_bytes(pickle.dumps(_MEM)); tmp.replace(CACHE)
     return np.array(start, np.int32), (np.concatenate(rows) if rows else np.zeros((0, 4))).astype(np.float32)
 
 

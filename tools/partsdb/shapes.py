@@ -186,6 +186,36 @@ def shape(row, T: np.ndarray | None = None, relaxed: bool = False, parity: int =
             "occ": np.round(occ, 3).tolist(), "bits": bits.tolist(), "fill": float(occ.mean())}
 
 
+def filler_assemblies(con) -> dict[str, dict]:
+    """Each host with the filler official models put in it most (fillers.py: a frame's glass, a door frame's door,
+    a counter's drawers), at every offset that filler takes there in at least half as many models: one part, the
+    pair's shape, the host's connectors and box; the fillers written with it (`companion`, JSON
+    [[ldraw, dx, dy, dz, colour], ...], offsets in the host's LDU)."""
+    from build import DATA, _ld_to_part
+    f = DATA / "analysis" / "filler_pairs.json"
+    if not f.exists():
+        return {}
+    ldmap = _ld_to_part(con)
+    studs = {}
+    for pn, x, z in con.execute("SELECT part_num, x, z FROM connector "
+                                "WHERE (kind='stud' AND fy<-0.9) OR (kind='antistud' AND fy>0.9)"):
+        studs.setdefault(pn, []).append((x, z))
+    by_host: dict[str, list] = {}
+    for p in json.loads(f.read_text()):                 # most models first
+        by_host.setdefault(p["host"], []).append(p)
+    out = {}
+    for host, ps in by_host.items():
+        top = [p for p in ps if p["filler"] == ps[0]["filler"] and p["models"] * 2 >= ps[0]["models"]]
+        pn = ldmap.get(host, host[:-4])
+        T = np.concatenate([triangles(host)] + [triangles(p["filler"]) + np.array(p["at"], float) for p in top])
+        s = shape((pn, host, studs.get(pn)), T)
+        if s is not None:
+            s["companion"] = json.dumps([[p["filler"], *p["at"], p["colour"]] for p in top])
+            s["variant"] = "filled"
+            out[f"{pn}|filled"] = s
+    return out
+
+
 SIDE_KINDS = ("stud", "antistud", "pin", "pinhole", "axle", "axlehole", "bar", "barhole", "clip",
               "finger", "generic")
 
@@ -282,6 +312,7 @@ def main() -> None:
         got = [s for s in pool.imap_unordered(shape, rows, chunksize=4) if s]
     shapes = {s["part_num"]: s for s in got}
     shapes.update(wheel_assemblies(con))
+    shapes.update(filler_assemblies(con))
     connections(con, shapes)
     df = pd.DataFrame([{**s, "occ": json.dumps(s["occ"]), "bits": json.dumps(s["bits"]),
                         "studs_top": json.dumps(s.get("studs_top", [])),

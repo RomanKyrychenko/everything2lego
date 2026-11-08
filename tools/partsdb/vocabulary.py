@@ -9,7 +9,8 @@ curves, rounds, wedges, ...) that LEGO makes now, with
   studs      the cells with a stud on top / a hole underneath, and its
              side connectors (studs, holes, pins, axles, bars, clips): kind,
              face, place along the face (half studs), height (half plates)
-  companion  a part written with it (a wheel's tyre), or none
+  companion  parts written with it: a wheel's tyre (its name), or a frame's fillers (fillers.py: JSON
+             [[ldraw, dx, dy, dz, colour], ...]); or none
   token      its statistics token (features.py: the official models'
              neighbourhood patterns are counted in these)
   colours    the LDraw colours it came in (2+ sets since 2010), with counts

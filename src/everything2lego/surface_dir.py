@@ -12,6 +12,7 @@ The cost depends only on the part and its place, so the engine keeps it like the
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -95,7 +96,7 @@ def _faces_cached(opts) -> list[np.ndarray]:
         out.append(_FACES[k])
     if new:
         CACHE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = CACHE.with_suffix(".tmp"); tmp.write_bytes(pickle.dumps(_FACES)); tmp.replace(CACHE)   # parallel runs: whole files only
+        tmp = CACHE.with_suffix(f".{os.getpid()}.tmp"); tmp.write_bytes(pickle.dumps(_FACES)); tmp.replace(CACHE)   # parallel runs: whole files only
     return out
 
 
