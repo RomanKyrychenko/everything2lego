@@ -362,6 +362,40 @@ def fit(Fs: list, ts: list, iters: int = 200, twin: np.ndarray | None = None) ->
     return minimize(f, np.zeros(F.shape[-1]), jac=True, method="L-BFGS-B", options={"maxiter": iters}).x
 
 
+def cell_probs(d: dict, P: dict, T: dict, w1, use, w) -> np.ndarray:
+    """(n, m) P(part) of every surface cell of d (surface_rows) as a build sees it: no picture, the features without
+    it plus ctx (w1 not None / non-empty)."""
+    n, D = len(d["cells"]), P["look"].shape[1]
+    ctx = context(dict(d, sel=np.arange(n)), P, T, w1) if w1 is not None and len(w1) else None
+    ev = dict(names=np.array([]), name_emb=np.zeros((0, D)))
+    p = np.empty((n, len(P["ld"])), np.float32)
+    for s0 in range(0, n, 500):
+        rows = np.arange(s0, min(n, s0 + 500)); k = len(rows)
+        q = dict(d, sel=rows, true=np.zeros(k, int), band=d["band_all"][rows], colour=d["colour_all"][rows],
+                 tile=np.zeros((k, D), np.float32), seen=np.zeros(k, bool), pairs=np.zeros((0, 2), int))
+        z = features(q, ev, P, *T["band"], T, ctx=None if ctx is None else ctx[rows])[..., use] @ w
+        z = np.exp(z - z.max(1, keepdims=True)); p[rows] = z / z.sum(1, keepdims=True)
+    return p
+
+
+def train(P: dict, tr: list, ex: list, use: list, twin) -> tuple:
+    """Count tables (training sets tr, extra sets ex as their own x_ tables), then (ctx in use) the first-pass
+    weights w1, then the weights w: (T, knn bank, w1, w)."""
+    base = [FEATS.index(x) for x in BASE]
+    T = tables([d for _, d, _ in tr], P)
+    if ex:
+        T["x"] = tables([d for _, d in ex], P)
+        T["A"] = tables([d for _, d, _ in tr] + [d for _, d in ex], P)["A"]     # adjacency: from every model
+    bank = bank_of([d for _, d, _ in tr]) if FEATS.index("knn") in use else None
+    F = [features(d, ev, P, *T["band"], T, kn=knn(d, P, bank)) for _, d, ev in tr]
+    w1 = None
+    if FEATS.index("ctx") in use:
+        w1 = fit([x[..., base] for x in F], [d["true"] for _, d, _ in tr], twin=twin)
+        for x, (_, d, _) in zip(F, tr):
+            x[..., FEATS.index("ctx")] = (cx := context(d, P, T, w1)) - cx.mean(1, keepdims=True)
+    return T, bank, w1, fit([x[..., use] for x in F], [d["true"] for _, d, _ in tr], twin=twin)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("bench", type=Path); ap.add_argument("--cells", type=int, default=300)
@@ -396,27 +430,11 @@ def main() -> None:
     print(f"{len(sets)} sets, {sum(len(d['true']) for _, d, _ in sets)} cells, {len(extra)} extra sets "
           f"({sum((d['lab'] >= 0).sum() for _, d in extra)} cells), {len(P['ld'])} parts; load {time.time() - t0:.0f} s", flush=True)
     use = [FEATS.index(x) for x in a.only.split(",")] if a.only else list(range(len(FEATS)))
-    base = [FEATS.index(x) for x in BASE]
     family = lambda n: n.split("_")[0].split("-")[0]               # a model's cars / variants: one fold
     fam = [family(n) for n, _, _ in sets]
     ids = {f: i for i, f in enumerate(dict.fromkeys(fam))}
     fold = np.array([ids[f] % a.folds for f in fam])
     twin = None if a.exact else P["twin"]
-
-    def model(tr, ex):
-        """Count tables, then (ctx in use) the first-pass weights, then the weights, from training sets tr + extra ex."""
-        T = tables([d for _, d, _ in tr], P)
-        if ex:
-            T["x"] = tables([d for _, d in ex], P)
-            T["A"] = tables([d for _, d, _ in tr] + [d for _, d in ex], P)["A"]     # adjacency: from every model
-        bank = bank_of([d for _, d, _ in tr]) if FEATS.index("knn") in use else None
-        F = [features(d, ev, P, *T["band"], T, kn=knn(d, P, bank)) for _, d, ev in tr]
-        w1 = None
-        if FEATS.index("ctx") in use:
-            w1 = fit([x[..., base] for x in F], [d["true"] for _, d, _ in tr], twin=twin)
-            for x, (_, d, _) in zip(F, tr):
-                x[..., FEATS.index("ctx")] = (cx := context(d, P, T, w1)) - cx.mean(1, keepdims=True)
-        return T, bank, w1, fit([x[..., use] for x in F], [d["true"] for _, d, _ in tr], twin=twin)
 
     def score(d, ev, T, bank, w1, w):
         return features(d, ev, P, *T["band"], T, ctx=None if w1 is None else context(d, P, T, w1), kn=knn(d, P, bank))[..., use] @ w
@@ -425,7 +443,7 @@ def main() -> None:
     for k in range(a.folds):
         tr = [s for s, q in zip(sets, fold) if q != k]; te = [s for s, q in zip(sets, fold) if q == k]
         tf = {family(n) for n, _, _ in te}
-        T, bank, w1, w = model(tr, [x for x in extra if family(x[0]) not in tf]); W.append(w)
+        T, bank, w1, w = train(P, tr, [x for x in extra if family(x[0]) not in tf], use, twin); W.append(w)
         for _, d, ev in te:
             s = score(d, ev, T, bank, w1, w)
             if a.random:
@@ -448,7 +466,7 @@ def main() -> None:
         if sel.sum() >= 40:
             print(f"  {cname[:24]:24s} {sel.sum():5d} " + " ".join(f"{(r[sel] < k).mean():6.3f}" for k in (1, 5, 20, 50)))
     if a.save:                                                      # the model from all sets, for building
-        T, bank, w1, w = model(sets, extra)
+        T, bank, w1, w = train(P, sets, extra, use, twin)
         np.savez_compressed(a.save, prior_p=T["band"][0], prior_c=T["band"][1], w=w, use=np.array(use), ld=P["ld"],
                             T=np.array(T, dtype=object), w1=w1 if w1 is not None else np.zeros(0))
         print(f"model -> {a.save}: " + ", ".join(f"{FEATS[i]} {x:+.2f}" for i, x in zip(use, w)))
