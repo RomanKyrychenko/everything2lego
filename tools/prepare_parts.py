@@ -103,7 +103,8 @@ def prepare(mesh, studs: int, cache=None, snap_pitches: str | None = None, sames
     cache = Path(cache) if cache else CACHE / mesh_sha1(mesh)
     cache.mkdir(parents=True, exist_ok=True)
     f2l, seg = samesh(mesh, cache, samesh_from)
-    tag = f"{studs}" + (f"_snap-{snap_pitches}" if snap_pitches else "")
+    # _g2: MeshTarget's true-scale, phase-searched grid (2026-11-08); files on the stretched grid don't line up
+    tag = f"{studs}" + (f"_snap-{snap_pitches}" if snap_pitches else "") + "_g2"
     snap = ["--snap-geometry", "--snap-pitches", snap_pitches] if snap_pitches else []
     out = []
     for name, script, args in (("parts", "part_labels.py", [str(f2l), str(seg)]),

@@ -174,6 +174,32 @@ def _fit_transform(mesh: trimesh.Trimesh, max_studs: int) -> np.ndarray:
     return T
 
 
+def grid_phase(mesh: trimesh.Trimesh, max_studs: int, steps: int = 4) -> np.ndarray:
+    """The sub-cell shift (x, y, z in cells, multiples of 1/steps) of the mesh against the grid that leaves the fewest
+    cells partly filled (10-90 %): walls then fall on cell faces instead of mid-cell.  Cell boundaries are at integers
+    of `_fit_transform`'s frame shifted by the result."""
+    from scipy.ndimage import binary_closing, binary_fill_holes
+    m = mesh.copy()
+    m.apply_transform(_fit_transform(mesh, max_studs))
+    m.apply_translation([-0.5 / steps] * 3)              # trimesh centres voxels on multiples of the pitch
+    v = m.voxelized(pitch=1.0 / steps)
+    surf = v.matrix
+    solid = binary_fill_holes(binary_closing(surf, iterations=1) | surf).astype(np.int32)
+    start = np.rint(v.transform[:3, 3] * steps).astype(int)   # absolute fine index of the matrix's first cell
+    best = None
+    for shift in np.ndindex(steps, steps, steps):
+        # fine cells grouped into whole cells with boundaries at absolute fine index = k*steps - shift
+        pad = [((st + sh) % steps, 0) for st, sh in zip(start, shift)]
+        g = np.pad(solid, pad)
+        g = np.pad(g, [(0, -d % steps) for d in g.shape])
+        X, Y, Z = (d // steps for d in g.shape)
+        fr = g.reshape(X, steps, Y, steps, Z, steps).sum(axis=(1, 3, 5)) / steps ** 3
+        n = int(((fr > 0.1) & (fr < 0.9)).sum())
+        if best is None or n < best[0]:
+            best = (n, shift)
+    return np.array(best[1], float) / steps
+
+
 def _face_color_lookup(mesh: trimesh.Trimesh, points: np.ndarray,
                         face_ids: np.ndarray) -> np.ndarray:
     """RGB per query point sampled directly from the face at the given index.
@@ -211,8 +237,11 @@ def voxelize(mesh: trimesh.Trimesh, max_studs: int = 32, color_samples: int = 20
              hollow: bool = False, wall_thickness: int = 2,
              keep_floor: bool = True, color_k: int = 5,
              color_mode: str = "closest_face", subvoxels: int = 1,
-             align: bool = True) -> VoxelGrid:
+             align: bool = True, offset=(0.0, 0.0, 0.0)) -> VoxelGrid:
     """Voxelize `mesh` at LEGO scale and return a colored grid.
+
+    `offset` shifts the mesh (x, y, z, in cells) against the grid before voxelising.  The grid's metadata carries
+    "mesh_to_voxel", the 4x4 map from (aligned) mesh coordinates to cell indices: floor of it is the cell a point is in.
 
     `align` first squares the mesh's walls to the x/z axes (`align_to_axes`).
 
@@ -242,12 +271,23 @@ def voxelize(mesh: trimesh.Trimesh, max_studs: int = 32, color_samples: int = 20
     if subvoxels < 1:
         raise ValueError("subvoxels must be >= 1")
     T = _fit_transform(mesh, max_studs)
+    T[:3, 3] += offset
+    # shrink 1e-4 about the centre: a face exactly on a cell face (the flat bottom, once shifted) counts in the cell
+    # inside the mesh, not as a touched empty row outside it
+    c = (np.c_[mesh.bounds, np.ones(2)] @ T.T)[:, :3].mean(axis=0)
+    T = np.diag([*(1 - 1e-4,) * 3, 1.0]) @ T
+    T[:3, 3] += c * 1e-4
     scaled = mesh.copy()
     scaled.apply_transform(T)
 
     pitch = 1.0 / subvoxels
     voxels = scaled.voxelized(pitch=pitch)
     voxels.fill()  # solid interior
+    # cell (0, 0, 0)'s low corner in the scaled frame: fine voxel 0's centre minus half a fine pitch
+    to_cells = np.eye(4)
+    to_cells[:3, :3] /= pitch * subvoxels
+    to_cells[:3, 3] = -(voxels.indices_to_points(np.zeros((1, 3)))[0] - pitch / 2) / (pitch * subvoxels)
+    mesh_to_voxel = to_cells @ T
 
     indices = voxels.sparse_indices  # (N, 3), integers in [0, dim)
     if len(indices) == 0:
@@ -305,7 +345,7 @@ def voxelize(mesh: trimesh.Trimesh, max_studs: int = 32, color_samples: int = 20
         return VoxelGrid(palette_idx=palette_idx, metadata={
             "method": "mesh", "color_mode": "closest_face",
             "max_studs": max_studs, "subvoxels": subvoxels,
-            "watertight": bool(mesh.is_watertight),
+            "watertight": bool(mesh.is_watertight), "mesh_to_voxel": mesh_to_voxel,
         })
 
     # Legacy path: random surface sampling + KDTree.
@@ -354,7 +394,8 @@ def voxelize(mesh: trimesh.Trimesh, max_studs: int = 32, color_samples: int = 20
     palette_idx[occ[:, 0], occ[:, 1], occ[:, 2]] = idx
 
     return VoxelGrid(palette_idx=palette_idx, metadata={"method": "mesh", "color_samples": color_samples,
-                                                      "max_studs": max_studs, "watertight": bool(mesh.is_watertight)})
+                                                      "max_studs": max_studs, "watertight": bool(mesh.is_watertight),
+                                                      "mesh_to_voxel": mesh_to_voxel})
 
 
 def hollow_occupancy(occupied: np.ndarray, wall_thickness: int = 2,

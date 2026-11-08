@@ -70,13 +70,13 @@ def off_colour(ldr: Path, info: dict) -> int:
     return n
 
 
-def measure(d: Path, studs: int) -> dict:
+def measure(d: Path, studs: int, kind: str = "building") -> dict:
     from ldr_to_mesh import build_mesh, compare, input_mesh
     info = json.loads((d / "info.json").read_text())
     m = build_mesh(d / "model.ldr")
     shape = compare(m, input_mesh(MESH, studs), d / "model.glb")
     return {"energy": info["energy"], "parts": info["parts"], "unsupported": info["unsupported"],
-            "shape_pct": shape["chamfer_pct"], "missing_pct": shape["missing_pct"], "extra_pct": shape["extra_pct"], **exposed(d / "model.ldr"), "off_colour": off_colour(d / "model.ldr", info)}
+            "shape_pct": shape["chamfer_pct"], "missing_pct": shape["missing_pct"], "extra_pct": shape["extra_pct"], **exposed(d / "model.ldr", kind), "off_colour": off_colour(d / "model.ldr", info)}
 
 
 def run_seed(name: str, seed: int, args: list[str]) -> Path:
@@ -106,11 +106,14 @@ def summary(rows: dict) -> dict:
 
 
 def main() -> None:
+    global MESH
     ap = argparse.ArgumentParser()
     ap.add_argument("name", nargs="?"); ap.add_argument("--seeds", type=int, default=4)
     ap.add_argument("--jobs", type=int, default=2, help="parallel runs; a 32-stud run peaks at ~5 GB"); ap.add_argument("--report", action="store_true")
     ap.add_argument("--compare", nargs="+")
+    ap.add_argument("--mesh", default=str(MESH), help="input mesh (default the watermill)")
     a, rest = ap.parse_known_args()
+    MESH = Path(a.mesh).resolve()
     rest = [r for r in rest if r != "--"]
     if a.compare:
         sums = {n: summary(table(n)) for n in a.compare}
@@ -121,12 +124,13 @@ def main() -> None:
         return
     if not a.report:
         studs = int(rest[rest.index("--studs") + 1]) if "--studs" in rest else 24
+        kind = rest[rest.index("--kind") + 1] if "--kind" in rest else "building"
         (BASE / a.name).mkdir(parents=True, exist_ok=True)
-        (BASE / a.name / "recipe.json").write_text(json.dumps(rest))
+        (BASE / a.name / "recipe.json").write_text(json.dumps(rest + ["--mesh", str(MESH)]))
         with ThreadPoolExecutor(a.jobs) as ex:
             dirs = list(ex.map(lambda s: run_seed(a.name, s, rest), range(a.seeds)))
         for d in dirs:
-            (d / "measures.json").write_text(json.dumps(measure(d, studs)))
+            (d / "measures.json").write_text(json.dumps(measure(d, studs, kind)))
     rows = table(a.name)
     for s, r in rows.items():
         print(s, "  ".join(f"{k} {v:.3f}" for k, v in r.items()))
