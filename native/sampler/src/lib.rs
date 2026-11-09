@@ -2869,6 +2869,8 @@ fn plan(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
     }
     // children of part f: (item, energy after it, its distance to the ground, root grounded with it)
     let mut cands = Vec::new();
+    // shortcut: the net's ranking per cell is kept for the whole call, from the parts around it when first asked; recompute per node if chains start to depend on it
+    let mut lpcs: std::collections::HashMap<usize, Option<Vec<f64>>> = std::collections::HashMap::new();
     let mut children = |st: &mut State, filler: &mut Filler, rng: &mut Rng, f: usize, n: usize| -> Vec<(Item, f64, u16, bool)> {
         let a = *st.item(f);
         let o = &d.opts[a.opt];
@@ -2885,9 +2887,11 @@ fn plan(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
             // the part's first cell (lowest, then least x, z): a plate's or a brick's, the cell or one before it
             for (dy, dx, dz) in (0..3).flat_map(|dy| [(dy, 0, 0), (dy, 1, 0), (dy, 0, 1), (dy, 1, 1)]) {
                 if y - dy < 0 || !inbox(y - dy, x - dx, z - dz) || st.owner[d.idx(y - dy, x - dx, z - dz)] >= 0 { continue; }
+                let lpc = lpcs.entry(d.idx(y - dy, x - dx, z - dz)).or_insert_with(||
+                    d.net.as_ref().map(|net| net.logprobs(&net_features(d, net, &st.kindgrid, y - dy, x - dx, z - dz))));
                 for force in [true, false] {
                     filler.force = force;
-                    filler.candidates(st, y - dy, x - dx, z - dz, None, 3, &mut cands);
+                    filler.candidates(st, y - dy, x - dx, z - dz, lpc.as_deref(), 3, &mut cands);
                     for &(_, k, oy, ox, oz, _) in cands.iter() {
                         let ok = &d.opts[k];
                         if out.iter().any(|c| (c.0.opt, c.0.y, c.0.x, c.0.z) == (k, oy, ox, oz))
