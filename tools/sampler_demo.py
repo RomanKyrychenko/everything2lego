@@ -266,6 +266,7 @@ def main() -> None:
     ap.add_argument("--stand", type=int, default=0, help="pad base plate by N studs (for figures or small objects)")
     ap.add_argument("--regions", default=None, help='JSON file mapping palette codes to kinds, e.g. {"0":"road_vehicle","4":"object"} — gives different sampler weights per colour region')
     ap.add_argument("--segmentation", default=None, help="npz from tools/segment_mesh.py: per-voxel region_kind (overrides --regions)")
+    ap.add_argument("--keep-ungrounded", action="store_true", help="keep the parts the build ends with no chain of connections to the ground that rest on nothing either (supports.drop_floating): by default they are dropped, since they fall off")
     ap.add_argument("--prune-unsupported", action="store_true", help="drop parts with no vertical supporter below from the final build (post-process)")
     ap.add_argument("--drop-small-clusters", type=int, default=0, help="post-process: drop connected clusters smaller than N parts (1-2 safe; larger values will drop SNOT-held structure since side connectors aren't considered as adjacency)")
     ap.add_argument("--apply-templates", default=None, help="path to a regions.npz (from classify_regions.py) — post-process: swap each part for a same-footprint one in a region-preferred shape family (roof->slope, wall->brick, ...)")
@@ -460,6 +461,14 @@ def main() -> None:
         _info["iters"] = iters
         _info["seconds"] = round(time.time() - _t, 1)
         _info["seed"] = seed
+        pe = _info.get("_part_error")
+        if not a.keep_ungrounded and w.conn > 0 and pe is not None:
+            from everything2lego.native import ERR_LAYERS
+            from everything2lego.supports import drop_floating
+            loose = pe[:, ERR_LAYERS.index("support")] >= w.conn          # ungrounded parts carry w.conn there
+            kept, n = drop_floating(list(_ps), list(loose))
+            ids = {id(k) for k in kept}; keep = np.array([id(q) in ids for q in _ps], bool)
+            _ps, _info["_part_error"], _info["dropped_floating"] = kept, pe[keep], n
         if a.prune_unsupported:
             from everything2lego.supports import prune_unsupported
             _ps, pruned = prune_unsupported(list(_ps))

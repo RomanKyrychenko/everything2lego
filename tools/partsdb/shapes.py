@@ -220,23 +220,34 @@ SIDE_KINDS = ("stud", "antistud", "pin", "pinhole", "axle", "axlehole", "bar", "
               "finger", "generic")
 
 
+VERIFIED = ("stud", "antistud", "barhole")   # side kinds BrickNet labels as points (bars, clips: segments; fingers, pins: other forms)
+
+
 def connections(con, shapes: dict[str, dict]) -> None:
     """Studs on top, holes underneath, and every connector on the sides
     (studs, holes, pins, axles, bars, clips, ...) in the cell of the face it
     opens on and that face.  An assembly takes its first part's connectors."""
     c = pd.read_sql(f"SELECT part_num, kind, gender, x, y, z, fx, fy, fz FROM connector "
                     f"WHERE kind IN ({','.join(repr(k) for k in SIDE_KINDS)})", con)
+    from vocabulary import bricknet_labels
+    labels, aliases = bricknet_labels()
     for pn, g in c.groupby("part_num"):
         for s in [v for v in shapes.values() if v["part_num"] == pn]:
-            _connect(s, g)
+            st = str(s["ldraw"]).lower().removesuffix(".dat")
+            lab = labels.get(aliases.get(st, st) + ".dat")
+            pts = None if lab is None else np.array([r[:3] for k in lab.values() for rows in k.values() for r in rows
+                                                     if all(isinstance(v, (int, float)) for v in r[:3])],
+                                                    float).reshape(-1, 3)
+            _connect(s, g, pts)
 
 
-def _connect(s: dict, g) -> None:
+def _connect(s: dict, g, pts=None) -> None:
     """Top studs and bottom holes as cells; side connectors as points on
     the box's faces: (kind:gender, face, t, hy) — t along the face in half
     studs from the box's minimum corner, hy in half plates from its bottom.
     Two parts join at their sides where their faces touch at the same point
-    with kinds that fit (sampler.FITS)."""
+    with kinds that fit (sampler.FITS); a side connector only within 4 LDU of
+    one of BrickNet's verified connectors (pts, part coordinates; None = all)."""
     top, bottom, sides, off = set(), set(), set(), 0
     occ = s["occ"]
     W, D, H = s["w"], s["d"], s["h"]
@@ -262,6 +273,9 @@ def _connect(s: dict, g) -> None:
             face, t = ("+z" if r.fz > 0 else "-z"), (r.x - s["x0"]) / 10
         else:
             continue                                         # a slanted connector
+        if pts is not None and r.kind in VERIFIED and (not len(pts) or np.min(np.linalg.norm(pts - (r.x, r.y, r.z), axis=1)) > 4):
+            off += 1                                         # no verified connector there (a headlight's hollow-stud axis)
+            continue
         hy = (H * 8 - ry) / 4                                # half plates from the bottom
         if abs(t - round(t)) > 0.2:
             off += 1                                         # between half studs: off the grid
@@ -300,6 +314,19 @@ def wheel_assemblies(con) -> dict[str, dict]:
 
 def main() -> None:
     con = sqlite3.connect(DB)
+    if "--sides-only" in sys.argv:                           # redo the connectors on the stored shapes (seconds, not hours)
+        df = pd.read_sql("SELECT * FROM part_shape", con)
+        shapes = {i: {**r, "occ": json.loads(r["occ"]), "studs_top": [], "holes_bottom": [], "sides": []}
+                  for i, r in enumerate(df.to_dict("records"))}
+        connections(con, shapes)
+        for c in ("studs_top", "holes_bottom", "sides"):
+            df[c] = [json.dumps(shapes[i].get(c, [])) for i in range(len(df))]
+        df["offgrid"] = [shapes[i].get("offgrid", 0) for i in range(len(df))]
+        df.to_sql("part_shape", con, if_exists="replace", index=False)
+        con.execute("CREATE INDEX IF NOT EXISTS ix_shape ON part_shape(part_num)")
+        con.commit()
+        print(f"part_shape: connectors redone on {len(df)} parts")
+        return
     q = f"""SELECT p.part_num, MIN(g.ldraw) FROM part p JOIN geometry g ON g.part_num = p.part_num
             WHERE p.category IN ({",".join("?" * len(CATEGORIES))}) AND p.n_sets >= ?
             AND g.ldraw IS NOT NULL GROUP BY p.part_num"""

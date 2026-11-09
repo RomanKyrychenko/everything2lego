@@ -116,3 +116,29 @@ def drop_isolated_clusters(placements: list[Placement], min_cluster: int = 2
     return kept, n - len(kept)
 
 
+
+
+def drop_floating(placements: list[Placement], loose: list[bool]) -> tuple[list[Placement], int]:
+    """Drop the loose placements (no chain of connections to the ground, the sampler's error map) that also rest on
+    nothing: grouped by contact among themselves, a group stays when one of its parts is on the ground or on a part
+    outside the group (a plate lying on a tile holds no stud, yet does not fall)."""
+    idx = [i for i, l in enumerate(loose) if l]
+    parent = {i: i for i in idx}
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    for a in idx:
+        for b in idx:
+            if a < b and _adjacent(placements[a], placements[b]):
+                parent[find(a)] = find(b)
+    rests = set()
+    for i in idx:
+        p = placements[i]
+        if p.y_plate == 0 or any(not loose[j] and q.y_plate + q.part.height_units == p.y_plate and _overlap(p, q)
+                                 for j, q in enumerate(placements)):
+            rests.add(find(i))
+    gone = {i for i in idx if find(i) not in rests}
+    return [p for i, p in enumerate(placements) if i not in gone], len(gone)

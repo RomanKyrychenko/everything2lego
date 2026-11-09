@@ -1076,6 +1076,18 @@ impl Data {
         false
     }
 
+    /// Whether a male side connector of a (stud, pin, axle, bar: CONNECTORS 0, 2, 4, 6) meets a male one of b
+    /// face to face: two studs can't share the point (a side stud into a headlight's recessed stud).
+    fn sides_clash(&self, a: &Opt, ay: i32, ax: i32, az: i32, b: &Opt, by: i32, bx: i32, bz: i32) -> bool {
+        let male = |k: i32| matches!(k, 0 | 2 | 4 | 6);
+        a.sides.iter().filter(|s| male(s.5)).any(|&(hx, hy, hz, dx, dz, _)| {
+            b.sides.iter().any(|&(gx, gy, gz, ex, ez, kb)| {
+                male(kb) && ex == -dx && ez == -dz && 2 * bx + gx == 2 * ax + hx && 2 * bz + gz == 2 * az + hz
+                    && (2 * by + gy - 2 * ay - hy).abs() <= 1
+            })
+        })
+    }
+
     /// The share of its top with more to build above but no stud there.
     fn capped(&self, o: &Opt, oy: i32, ox: i32, oz: i32) -> f64 {
         if oy + o.h >= self.h {
@@ -2156,6 +2168,11 @@ impl<'a> State<'a> {
                 }
             }
         }
+        // male side connectors face to face (symmetric in a and b, so each part's count sees the pair)
+        for &(j, dir) in &self.adj[i] {
+            let b = self.item(j);
+            if dir == LEVEL && d.sides_clash(oa, a.y, a.x, a.z, &d.opts[b.opt], b.y, b.x, b.z) { n += 1; }
+        }
         // its own studs under a part above with no hole there
         for &(dx, dz) in &oa.top {
             let (y, x, z) = (a.y + oa.h, a.x + dx, a.z + dz);
@@ -2786,6 +2803,179 @@ fn prop(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
     let added = filler.fill(st, rng, cells);
     filler.force = false;
     Some(Undo::Retile { added, removed: Vec::new() })
+}
+
+/// Plan: Monte Carlo tree search (UCB1) over short chains of parts from a part with no connection chain to the ground.
+/// A child is a part joined to the chain's last part (a stud in its hole, or side connectors); rollouts extend the chain
+/// toward grounded parts (a distance field in a box around it); a chain's value is the exact energy it saves at its best
+/// grounding prefix (each tried part added, then removed).  A support needing several parts each costing on its own
+/// (a bracket, then a column) is one move: the best chain found, which the annealer accepts or not.
+static PLAN_STATS: [std::sync::atomic::AtomicUsize; 4] = [const { std::sync::atomic::AtomicUsize::new(0) }; 4];   // calls, root has no child, nothing grounds, found
+
+fn plan(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
+    use std::sync::atomic::Ordering::Relaxed;
+    const R: i32 = 8;         // box around the part: how far a support may reach sideways
+    const DEPTH: usize = 8;   // parts in a chain
+    const ITERS: usize = 32;  // tree iterations
+    const BRANCH: usize = 3;  // children per node
+    let d = st.d;
+    if d.w_conn == 0.0 {
+        return None;
+    }
+    // loose parts with a free cell under a hole or at a side connector: where a support can join (a group's lowest)
+    let loose: Vec<usize> = st.live.iter().copied().filter(|&i| !st.grounded[i] && {
+        let a = st.item(i);
+        let o = &d.opts[a.opt];
+        a.y > 0 && o.bottom.iter().any(|&(dx, dz)| st.owner[d.idx(a.y - 1, a.x + dx, a.z + dz)] < 0)
+            || o.sides.iter().any(|sd| Data::side_cells(o, a.y, a.x, a.z, sd).iter()
+                .any(|&(y, x, z)| d.inside(y, x, z) && st.owner[d.idx(y, x, z)] < 0))
+    }).collect();
+    if loose.is_empty() {
+        return None;
+    }
+    let root = loose[rng.below(loose.len())];
+    PLAN_STATS[0].fetch_add(1, Relaxed);
+    let ri = *st.item(root);
+    let ro = &d.opts[ri.opt];
+    // steps through empty cells to a grounded part's cell or the ground layer, in the box (u16::MAX: unreached)
+    let (x0, x1) = ((ri.x - R).max(0), (ri.x + ro.w + R).min(d.x));
+    let (z0, z1) = ((ri.z - R).max(0), (ri.z + ro.d + R).min(d.z));
+    let y1 = (ri.y + ro.h).min(d.h);
+    let (bx, bz) = ((x1 - x0) as usize, (z1 - z0) as usize);
+    let bidx = |y: i32, x: i32, z: i32| (y as usize * bx + (x - x0) as usize) * bz + (z - z0) as usize;
+    let inbox = |y: i32, x: i32, z: i32| y >= 0 && y < y1 && x >= x0 && x < x1 && z >= z0 && z < z1;
+    let mut dist = vec![u16::MAX; y1 as usize * bx * bz];
+    let mut q = std::collections::VecDeque::new();
+    for y in 0..y1 {
+        for x in x0..x1 {
+            for z in z0..z1 {
+                let j = st.owner[d.idx(y, x, z)];
+                if (j < 0 && y == 0) || (j >= 0 && st.grounded[j as usize]) {
+                    dist[bidx(y, x, z)] = 0;
+                    q.push_back((y, x, z));
+                }
+            }
+        }
+    }
+    while let Some((y, x, z)) = q.pop_front() {
+        let n = dist[bidx(y, x, z)] + 1;
+        for (dy, dx, dz) in [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)] {
+            let (yy, xx, zz) = (y + dy, x + dx, z + dz);
+            if inbox(yy, xx, zz) && st.owner[d.idx(yy, xx, zz)] < 0 && dist[bidx(yy, xx, zz)] > n {
+                dist[bidx(yy, xx, zz)] = n;
+                q.push_back((yy, xx, zz));
+            }
+        }
+    }
+    // children of part f: (item, energy after it, its distance to the ground, root grounded with it)
+    let mut cands = Vec::new();
+    let mut children = |st: &mut State, filler: &mut Filler, rng: &mut Rng, f: usize, n: usize| -> Vec<(Item, f64, u16, bool)> {
+        let a = *st.item(f);
+        let o = &d.opts[a.opt];
+        let mut at: Vec<(i32, i32, i32)> = o.bottom.iter().map(|&(dx, dz)| (a.y - 1, a.x + dx, a.z + dz)).collect();
+        for sd in &o.sides {
+            at.extend(Data::side_cells(o, a.y, a.x, a.z, sd));
+        }
+        at.retain(|&(y, x, z)| inbox(y, x, z) && st.owner[d.idx(y, x, z)] < 0);
+        while at.len() > 3 {
+            at.swap_remove(rng.below(at.len()));
+        }
+        let mut out: Vec<(Item, f64, u16, bool)> = Vec::new();
+        for &(y, x, z) in &at {
+            // the part's first cell (lowest, then least x, z): a plate's or a brick's, the cell or one before it
+            for (dy, dx, dz) in (0..3).flat_map(|dy| [(dy, 0, 0), (dy, 1, 0), (dy, 0, 1), (dy, 1, 1)]) {
+                if y - dy < 0 || !inbox(y - dy, x - dx, z - dz) || st.owner[d.idx(y - dy, x - dx, z - dz)] >= 0 { continue; }
+                for force in [true, false] {
+                    filler.force = force;
+                    filler.candidates(st, y - dy, x - dx, z - dz, None, 3, &mut cands);
+                    for &(_, k, oy, ox, oz, _) in cands.iter() {
+                        let ok = &d.opts[k];
+                        if out.iter().any(|c| (c.0.opt, c.0.y, c.0.x, c.0.z) == (k, oy, ox, oz))
+                            || !ok.cells.iter().all(|&(cy, cx, cz, _, _)| inbox(oy + cy, ox + cx, oz + cz)) {
+                            continue;
+                        }
+                        let colour = d.colour_for(ok, oy, ox, oz, &mut filler.colour_counts);
+                        let it = Item { opt: k, colour, y: oy, x: ox, z: oz };
+                        let i = st.add(it);
+                        if st.links(i).contains(&f) {
+                            let dd = ok.cells.iter().map(|&(cy, cx, cz, _, _)| dist[bidx(oy + cy, ox + cx, oz + cz)]).min().unwrap_or(u16::MAX);
+                            out.push((it, st.energy(), dd, st.grounded[root]));
+                        }
+                        st.remove(i);
+                    }
+                }
+            }
+        }
+        filler.force = false;
+        out.sort_by(|p, q| (!p.3, p.2).cmp(&(!q.3, q.2)).then(p.1.partial_cmp(&q.1).unwrap()));
+        out.truncate(n);
+        out
+    };
+    struct Node { item: Option<Item>, kids: Vec<usize>, open: bool, n: f64, w: f64 }
+    let mut tree = vec![Node { item: None, kids: Vec::new(), open: false, n: 0.0, w: 0.0 }];
+    let e0 = st.energy();
+    let mut best: Option<(f64, Vec<Item>)> = None;
+    for _ in 0..ITERS {
+        let (mut path, mut added, mut node) = (vec![0usize], Vec::new(), 0usize);
+        let mut last = root;
+        // selection: UCB1 down the opened nodes
+        while tree[node].open && !tree[node].kids.is_empty() {
+            let ln = tree[node].n.max(1.0).ln();
+            node = *tree[node].kids.iter().max_by(|&&p, &&q| {
+                let u = |c: usize| if tree[c].n == 0.0 { f64::INFINITY } else { tree[c].w / tree[c].n + (2.0 * ln / tree[c].n).sqrt() };
+                u(p).partial_cmp(&u(q)).unwrap()
+            }).unwrap();
+            last = st.add(tree[node].item.unwrap());
+            added.push(last);
+            path.push(node);
+        }
+        // expansion
+        if !tree[node].open && added.len() < DEPTH {
+            tree[node].open = true;
+            for (it, _, _, _) in children(st, filler, rng, last, BRANCH) {
+                tree.push(Node { item: Some(it), kids: Vec::new(), open: false, n: 0.0, w: 0.0 });
+                let c = tree.len() - 1;
+                tree[node].kids.push(c);
+            }
+            if let Some(&c) = tree[node].kids.first() {
+                last = st.add(tree[c].item.unwrap());
+                added.push(last);
+                path.push(c);
+            }
+        }
+        // rollout: one of the best few children each step, as long as the chain is loose
+        let mut value = 0.0f64;
+        loop {
+            if !added.is_empty() && st.grounded[root] {
+                let gain = (e0 - st.energy()) / d.w_conn;
+                value = value.max(gain);
+                if best.as_ref().map_or(true, |b| gain > b.0) {
+                    best = Some((gain, added.iter().map(|&i| *st.item(i)).collect()));
+                }
+                break;
+            }
+            if added.len() >= DEPTH { break; }
+            let k = children(st, filler, rng, last, 3);
+            if k.is_empty() { break; }
+            let it = k[rng.below(k.len())].0;
+            last = st.add(it);
+            added.push(last);
+        }
+        for &p in &path {
+            tree[p].n += 1.0;
+            tree[p].w += value;
+        }
+        for &i in added.iter().rev() {
+            st.remove(i);
+        }
+    }
+    if tree[0].kids.is_empty() { PLAN_STATS[1].fetch_add(1, Relaxed); }
+    let Some((gain, items)) = best else { PLAN_STATS[2].fetch_add(1, Relaxed); return None };
+    PLAN_STATS[3].fetch_add(1, Relaxed);
+    if gain <= -1.0 {
+        return None;                                            // costs more than leaving it loose
+    }
+    Some(Undo::Retile { added: items.into_iter().map(|it| st.add(it)).collect(), removed: Vec::new() })
 }
 
 /// Remove the parts meeting a random window and re-fill its cells.
@@ -4112,7 +4302,7 @@ fn mirror(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
     Some(Undo::Retile { added, removed })
 }
 
-const MOVES: [&str; 18] = ["sideways", "masonry", "hinge", "swap", "re-top", "split", "stack", "merge", "retile", "pattern", "re-solve", "orient", "edge run", "curve fit", "echo", "mirror", "phase", "prop"];
+const MOVES: [&str; 19] = ["sideways", "masonry", "hinge", "swap", "re-top", "split", "stack", "merge", "retile", "pattern", "re-solve", "orient", "edge run", "curve fit", "echo", "mirror", "phase", "prop", "plan"];
 
 fn propose(st: &mut State, filler: &mut Filler, groups: &[Vec<usize>], boxes: &[Vec<usize>], rng: &mut Rng) -> Option<(usize, Undo)> {
     if !st.d.snot_by_opt.is_empty() && rng.f64() < 0.05 {        // only drawn when sideways building is on
@@ -4122,6 +4312,11 @@ fn propose(st: &mut State, filler: &mut Filler, groups: &[Vec<usize>], boxes: &[
     }
     if st.d.p_motif > 0.0 && rng.f64() < st.d.p_motif {
         return motif(st, filler, rng).map(|u| (9, u));
+    }
+    if rng.f64() < 0.002 {                                         // tree search: rare, each call tries many chains
+        if let Some(u) = plan(st, filler, rng) {
+            return Some((18, u));
+        }
     }
     if rng.f64() < 0.03 {
         if let Some(u) = prop(st, filler, rng) {
@@ -4279,6 +4474,8 @@ unsafe fn run(p: &Problem) -> i32 {
             history.push(e);
         }
     }
+    { use std::sync::atomic::Ordering::Relaxed; let p: Vec<usize> = PLAN_STATS.iter().map(|a| a.load(Relaxed)).collect();
+      eprintln!("plan: calls {} root without child {} nothing grounds {} found {}", p[0], p[1], p[2], p[3]); }
     eprintln!("moves (proposed / accepted):{}", (0..MOVES.len()).filter(|&m| n_prop[m] > 0)
         .map(|m| format!("  {} {} / {} ({:.1} %)", MOVES[m], n_prop[m], n_acc[m], 100.0 * n_acc[m] as f64 / n_prop[m] as f64))
         .collect::<String>());
