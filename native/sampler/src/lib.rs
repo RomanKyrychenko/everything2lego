@@ -3632,7 +3632,7 @@ fn retop_groups(d: &Data) -> Vec<Vec<usize>> {
         if d.opt_sideways.get(k).copied().unwrap_or(false) { continue; }
         by_box.entry((o.h, o.w, o.d)).or_default().push(k);
     }
-    d.opts.iter().map(|o| by_box[&(o.h, o.w, o.d)].iter().copied().filter(|&k| d.opts[k].top.len() < o.top.len()).collect()).collect()
+    d.opts.iter().map(|o| by_box.get(&(o.h, o.w, o.d)).map_or_else(Vec::new, |g| g.iter().copied().filter(|&k| d.opts[k].top.len() < o.top.len()).collect())).collect()
 }
 
 /// Whether option k's cells at (y, x, z) are all free (boxes of the same size can still differ in their cells).
@@ -4433,8 +4433,27 @@ unsafe fn run(p: &Problem) -> i32 {
     let iters = p.iters.max(0);
     let (mut n_prop, mut n_acc) = ([0i64; MOVES.len()], [0i64; MOVES.len()]);
     let watch_move = std::env::var("E2L_WATCH_MOVE").ok().and_then(|n| MOVES.iter().position(|&m| m == n));
+    // early stopping (E2L_STALL=f, 0 / unset: off): past 30 % of the run, once a twentieth of it lowers the energy by less
+    // than f of itself, the rest of the cooling is squeezed into one more twentieth, from the temperature reached to t_final
+    let stall = std::env::var("E2L_STALL").ok().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+    let win = (iters / 20).max(1);
+    let (mut end, mut quench, mut e_mark) = (iters, None::<(i64, f64)>, e);
     for it in 0..iters {
-        let t = t_start * (t_final / t_start).powf(it as f64 / (iters - 1).max(1) as f64);
+        if it >= end {
+            eprintln!("early stop: quench from {} of {} iterations, done at {}", quench.map_or(0, |q| q.0), iters, end);
+            break;
+        }
+        let t = match quench {
+            None => t_start * (t_final / t_start).powf(it as f64 / (iters - 1).max(1) as f64),
+            Some((q0, tq)) => tq * (t_final / tq).powf((it - q0) as f64 / (end - q0 - 1).max(1) as f64),
+        };
+        if stall > 0.0 && quench.is_none() && it > 0 && it % win == 0 {
+            if it >= iters * 3 / 10 && e_mark - e < stall * e.abs() {
+                quench = Some((it, t));
+                end = (it + win).min(iters);
+            }
+            e_mark = e;
+        }
         if p.w_big_end >= 0.0 {
             filler.w_big = d.w_big + (p.w_big_end - d.w_big) * it as f64 / (iters - 1).max(1) as f64;
         }
