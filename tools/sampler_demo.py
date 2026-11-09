@@ -40,10 +40,21 @@ MOVE_SHARES = {"resolve", "orient", "guide", "motif", "echo", "mirror", "big", "
                "snot_boost", "snot_bonus", "fid_cap", "part"}     # not energy terms: kept as they are
 
 
-def mesh_bits(t: MeshTarget, shape) -> np.ndarray:
+def min_thickness(solid: np.ndarray) -> np.ndarray:
+    """`solid` (SUB samples per cell) with every part thinner than one cell (a sail, mast, rail) thickened to one cell,
+    as a slicer enforces a minimum wall: such a part half-fills no cell, so the builder leaves it out. A cube opening
+    finds what is under 3/4 cell thick; samples within half a cell of the thick core are surface steps, not parts."""
+    from scipy.ndimage import binary_dilation, binary_opening
+    core = binary_opening(solid, np.ones((3, 3, 3), bool))
+    thin = solid & ~binary_dilation(core, np.ones((5, 5, 5), bool))
+    return solid | binary_dilation(thin, np.ones((3, 3, 3), bool))   # >= 3 samples thick: some cell >= 1/2 full; ends grow 1/4 cell, under 1/2
+
+
+def mesh_bits(t: MeshTarget, shape, thicken: bool = True) -> np.ndarray:
     """Each grid cell's shape: the mesh voxelised SUB times finer in grid
-    units (studs, plates, studs), closed and filled solid, each cell's
-    SUB^3 samples as a 64-bit mask (sampler.pack's bit order)."""
+    units (studs, plates, studs), closed and filled solid (thin parts
+    thickened to a cell: min_thickness), each cell's SUB^3 samples as a
+    64-bit mask (sampler.pack's bit order)."""
     from scipy.ndimage import binary_closing, binary_fill_holes
     m = t.mesh.copy()
     m.apply_transform(t.mesh_to_voxel)                   # mesh -> grid units (x stud, y plate, z stud)
@@ -52,6 +63,8 @@ def mesh_bits(t: MeshTarget, shape) -> np.ndarray:
     v = m.voxelized(pitch=1.0 / SUB)
     surf = v.matrix
     solid = binary_fill_holes(binary_closing(surf, iterations=1) | surf)
+    if thicken:
+        solid = min_thickness(solid)
     idx = np.argwhere(solid)
     c = (v.transform @ np.c_[idx, np.ones(len(idx))].T).T[:, :3] + half   # sample centres, grid units
     cell = np.floor(c).astype(int)
