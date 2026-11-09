@@ -78,8 +78,24 @@ def snap_rgb_to_palette(rgb: np.ndarray) -> np.ndarray:
     pal = _palette_lab()
     # (N, 1, 3) - (1, P, 3) -> (N, P) squared distance
     d = ((lab[:, None, :] - pal[None, :, :]) ** 2).sum(axis=-1)
-    idx = np.argmin(d, axis=1)
+    # most probable, not nearest: a texture's shading (sigma) turns white lavender (Pisa) unless rare colours must fit better
+    idx = np.argmin(d / (2 * SNAP_SIGMA ** 2) - _palette_logprior()[None, :], axis=1)
     return idx.reshape(orig_shape)
+
+
+SNAP_SIGMA = 10.0      # Lab noise of a mesh texture's colour around its true one (shading, baked light)
+
+
+@lru_cache(maxsize=1)
+def _palette_logprior() -> np.ndarray:
+    """ln of each palette colour's share of real sets' part colourings (vocabulary.json counts, at least 1)."""
+    raw = json.loads(files("everything2lego.data").joinpath("vocabulary.json").read_text())["parts"]
+    n = {}
+    for p in raw:
+        for k, c in p["colours"].items():
+            n[int(k)] = n.get(int(k), 0) + c
+    cnt = np.array([max(n.get(c.code, 0), 1) for c in palette()], dtype=np.float64)
+    return np.log(cnt / cnt.sum())
 
 
 @lru_cache(maxsize=1)
