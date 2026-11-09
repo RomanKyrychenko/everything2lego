@@ -280,7 +280,7 @@ pub struct Problem {
 /// statistics (each part's share of the global terms by the chain rule, State::stat_blame).
 const N_ERR: usize = 5;
 
-const INFO_LEN: usize = 20;
+const INFO_LEN: usize = 21;
 const PATHS4_BUCKETS: usize = 8;
 const NSAMP: f64 = 64.0;
 
@@ -2314,7 +2314,8 @@ impl<'a> State<'a> {
             let mut e = [0f64; N_ERR];
             e[1] = d.w_col * d.colour_cost(o, it.y, it.x, it.z, it.colour);
             e[2] = d.w_sup * self.unsup[i] as u8 as f64 + d.w_side * d.bare_sides(o, it.y, it.x, it.z) as f64
-                + d.w_bare_top * self.bare_top[i];
+                + d.w_bare_top * self.bare_top[i]
+                + if d.w_conn != 0.0 && !self.grounded[i] { d.w_conn } else { 0.0 };
             e[3] = d.w_dir * d.dir_cost(it.opt, it.y, it.x, it.z);
             e[4] = self.stat_blame(i).max(0.0);
             let m = o.cells.len() as f64;
@@ -2415,7 +2416,7 @@ impl Ord for OrdF64 {
     fn cmp(&self, o: &Self) -> std::cmp::Ordering { self.partial_cmp(o).unwrap() }
 }
 
-fn rank_cell(d: &Data, y: i32, x: i32, z: i32) -> Ranked {
+fn rank_cell(d: &Data, y: i32, x: i32, z: i32, support: bool) -> Ranked {
     let mut v: Vec<(u32, f64, u32)> = Vec::new();
     let mut counts = vec![0u32; d.n_col.max(1)];
     'opt: for (k, o) in d.opts.iter().enumerate() {
@@ -2423,11 +2424,15 @@ fn rank_cell(d: &Data, y: i32, x: i32, z: i32) -> Ranked {
         if oy < 0 || ox < 0 || oz < 0 || oy + o.h > d.h || ox + o.w > d.x || oz + o.d > d.z {
             continue;
         }
+        let n = (o.w * o.d) as usize;
+        if support && (o.top.len() != n || o.bottom.len() != n || o.cells.len() != n * o.h as usize) {
+            continue;                               // a support is plain bricks and plates: studs and holes on every cell
+        }
         let mut wrong = 0f64;
         for &(cy, cx, cz, bits, occ) in &o.cells {
             let t = d.tbits[d.idx(oy + cy, ox + cx, oz + cz)];
-            if occ >= 0.5 && t == 0 {
-                continue 'opt; // solid where the object is not
+            if occ >= 0.5 && t == 0 && !support {
+                continue 'opt; // solid where the object is not (a support may be)
             }
             wrong += miss((bits ^ t).count_ones());
         }
@@ -2481,6 +2486,8 @@ struct Filler {
     colour_counts: Vec<u32>,
     w_big: f64,                  // the current bigger-first weight (falls over the run with w_big_end)
     ranked: Vec<Option<Ranked>>, // per cell, filled on all cores up front for the wanted cells, lazily elsewhere
+    force: bool,                 // every cell gets a part where one fits (a prop's column: not wanted, still needed)
+    ranked_support: Vec<Option<Ranked>>, // as `ranked`, solid parts allowed where the object is not (force), lazily
 }
 
 impl Filler {
@@ -2504,7 +2511,7 @@ impl Filler {
                                     for &(cc, e) in &buf {
                                         floor[cc] = floor[cc].min(e);
                                     }
-                                    (c, rank_cell(d, y, x, z))
+                                    (c, rank_cell(d, y, x, z, false))
                                 })
                                 .collect();
                             (r, floor)
@@ -2525,7 +2532,8 @@ impl Filler {
                     *a = a.min(b);
                 }
             }
-            return Filler { floor, colour_counts: vec![0; d.n_col.max(1)], w_big: d.w_big, ranked };
+            return Filler { floor, colour_counts: vec![0; d.n_col.max(1)], w_big: d.w_big, ranked, force: false,
+                             ranked_support: (0..(d.h * d.x * d.z) as usize).map(|_| None).collect() };
         }
     }
 
@@ -2589,7 +2597,9 @@ impl Filler {
     fn candidates(&mut self, st: &State, y: i32, x: i32, z: i32, lpc: Option<&[f64]>, n: usize,
                   out: &mut Vec<(f64, usize, i32, i32, i32, f64)>) {
         let d = st.d;
-        let r = self.ranked[d.idx(y, x, z)].get_or_insert_with(|| rank_cell(d, y, x, z));
+        let force = self.force;
+        let cache = if force { &mut self.ranked_support } else { &mut self.ranked };
+        let r = cache[d.idx(y, x, z)].get_or_insert_with(|| rank_cell(d, y, x, z, force));
         let end = |g: usize| if g + 1 < r.groups.len() { r.groups[g + 1].1 as usize } else { r.entries.len() };
         let lift = |g: usize| lpc.map_or(0.0, |lp| d.style * lp[r.groups[g].0 as usize]);
         // max-heap over groups by their best remaining entry: (score, group, position)
@@ -2675,7 +2685,7 @@ impl Filler {
             let best_stat = scored.iter().map(|s| s.0).fold(f64::NEG_INFINITY, f64::max);
             let mut scores: Vec<f64> = scored.iter().map(|s| s.0 + s.1).collect();
             let f = d.fill[d.idx(y, x, z)];
-            let skip = f < 0.5; // a barely-wanted cell may stay empty
+            let skip = f < 0.5 && !self.force; // a barely-wanted cell may stay empty
             if skip {
                 scores.push(best_stat - d.w_cov * f * f);       // its shape error left empty (miss)
             }
@@ -2739,6 +2749,43 @@ fn undo(st: &mut State, u: Undo) {
             st.add(a);
         }
     }
+}
+
+/// Prop: a part not joined to the ground (or unsupported) gets a column under one of its bottom cells -- the empty cells
+/// down to the next part or the ground, filled though not wanted -- as a slicer adds supports: a floating part costs
+/// w_conn, a column cell a few shape units.  The energy decides, as for any move.
+fn prop(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
+    let d = st.d;
+    let loose: Vec<usize> = st.live.iter().copied()
+        .filter(|&i| (d.w_conn != 0.0 && !st.grounded[i]) || st.unsup[i]).collect();
+    if loose.is_empty() {
+        return None;
+    }
+    let it = *st.item(loose[rng.below(loose.len())]);
+    let feet = &d.opts[it.opt].bottom;                // its holes: where a column's top stud joins it
+    if feet.is_empty() {
+        return None;
+    }
+    let (dx, dz) = feet[rng.below(feet.len())];
+    let (x, z) = (it.x + dx, it.z + dz);
+    let mut cells = Vec::new();
+    let mut y = it.y - 1;
+    while y >= 0 && st.owner[d.idx(y, x, z)] < 0 && cells.len() < 48 {   // shortcut: straight down only, add tree supports if columns land badly
+        cells.push((y, x, z));
+        y -= 1;
+    }
+    let base = y < 0 || st.owner[d.idx(y, x, z)] >= 0 && {   // on the ground, or on a stud of a grounded part
+        let j = st.owner[d.idx(y, x, z)] as usize;
+        let b = st.item(j);
+        (d.w_conn == 0.0 || st.grounded[j]) && b.y + d.opts[b.opt].h == y + 1 && d.opts[b.opt].has_top(x - b.x, z - b.z)
+    };
+    if cells.is_empty() || !base {
+        return None;
+    }
+    filler.force = true;
+    let added = filler.fill(st, rng, cells);
+    filler.force = false;
+    Some(Undo::Retile { added, removed: Vec::new() })
 }
 
 /// Remove the parts meeting a random window and re-fill its cells.
@@ -4065,7 +4112,7 @@ fn mirror(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
     Some(Undo::Retile { added, removed })
 }
 
-const MOVES: [&str; 17] = ["sideways", "masonry", "hinge", "swap", "re-top", "split", "stack", "merge", "retile", "pattern", "re-solve", "orient", "edge run", "curve fit", "echo", "mirror", "phase"];
+const MOVES: [&str; 18] = ["sideways", "masonry", "hinge", "swap", "re-top", "split", "stack", "merge", "retile", "pattern", "re-solve", "orient", "edge run", "curve fit", "echo", "mirror", "phase", "prop"];
 
 fn propose(st: &mut State, filler: &mut Filler, groups: &[Vec<usize>], boxes: &[Vec<usize>], rng: &mut Rng) -> Option<(usize, Undo)> {
     if !st.d.snot_by_opt.is_empty() && rng.f64() < 0.05 {        // only drawn when sideways building is on
@@ -4075,6 +4122,11 @@ fn propose(st: &mut State, filler: &mut Filler, groups: &[Vec<usize>], boxes: &[
     }
     if st.d.p_motif > 0.0 && rng.f64() < st.d.p_motif {
         return motif(st, filler, rng).map(|u| (9, u));
+    }
+    if rng.f64() < 0.03 {
+        if let Some(u) = prop(st, filler, rng) {
+            return Some((17, u));
+        }
     }
     let r = rng.f64();
     let (m, u) = if r < 0.02 { (1, masonry_shift(st, rng)) }
@@ -4325,6 +4377,7 @@ unsafe fn run(p: &Problem) -> i32 {
             -st.kl3.s_plogc + st.kl3.tot_pref * st.kl3.n.ln()
         } else { 0.0 },
         st.size_kl() / (st.live.len().max(1) as f64),                  // size-class KL to real sets
+        st.n_ungr as f64,
     ];
     for (k, v) in info.iter().enumerate().take(INFO_LEN) {
         *p.info.add(k) = *v;

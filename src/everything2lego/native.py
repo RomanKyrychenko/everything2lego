@@ -30,7 +30,7 @@ from typing import Optional
 import numpy as np
 
 ABI = 25
-INFO_LEN = 20
+INFO_LEN = 21
 ERR_LAYERS = ("shape", "colour", "support", "direction", "statistics")   # lib.rs N_ERR
 PATHS4_BUCKETS = 8
 
@@ -692,9 +692,9 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
     keys = ("energy", "accepted", "t_start", "kl", "local_per_pair", "fidelity", "bad_cells",
             "unsupported", "bare_side_connectors", "parts", "pairs", "energy_recomputed",
             "kl_paths", "outline", "content_loss", "style_loss",
-            "kl_paths4", "entropy_paths4", "revkl_paths4", "size_kl")
+            "kl_paths4", "entropy_paths4", "revkl_paths4", "size_kl", "ungrounded")
     inf = {k: float(v) for k, v in zip(keys, info)}
-    for k in ("bad_cells", "unsupported", "bare_side_connectors", "parts"):
+    for k in ("bad_cells", "unsupported", "bare_side_connectors", "parts", "ungrounded"):
         inf[k] = int(inf[k])
     inf["_err_cell"] = err_cell.reshape(H, X, Z, len(ERR_LAYERS))               # "_": kept out of info.json
     inf["_err_item"] = err_item[:n * len(ERR_LAYERS)].reshape(n, len(ERR_LAYERS))
