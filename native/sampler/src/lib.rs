@@ -285,6 +285,13 @@ pub struct Problem {
     // w_mlm * its regret there (the best class's log P minus its own), a pseudo-likelihood term in the energy
     pub mlm_cb: Option<unsafe extern "C" fn(i32, *const i32, i32, *const i32, *mut f32)>,
     pub w_mlm: f64,
+    // infill model (tools/learn/infill_model.py student): flat weights (export order), sizes [d, layers, heads, n_ctx,
+    // n_lab, n_tok, win], per option its label (-1: none); p_infill = share of moves that refill a window with it
+    pub inf_w: *const f32,
+    pub inf_n: i32,
+    pub inf_dims: *const i32,
+    pub opt_label: *const i32,
+    pub p_infill: f64,
 }
 
 /// Error map layers: shape, colour, support (unsupported, bare side connectors, exposed studs), surface direction,
@@ -429,6 +436,9 @@ struct Data {
     n_conn: usize,
     fits: Vec<u8>,
     net: Option<Net>,
+    inf: Option<Infill>,
+    opt_label: Vec<i32>,
+    p_infill: f64,
     top_k: usize,
     hinge_a: Vec<usize>,
     hinge_b: Vec<usize>,
@@ -666,6 +676,9 @@ impl Data {
             n_conn: p.n_conn as usize,
             fits: v(p.fits, (p.n_conn * p.n_conn) as usize),
             net: if p.use_net != 0 { Some(Net::from(p, n_opt)) } else { None },
+            inf: if p.inf_w.is_null() || p.use_net == 0 { None } else { Some(Infill::from(p)) },
+            opt_label: if p.opt_label.is_null() { Vec::new() } else { v(p.opt_label, n_opt) },
+            p_infill: if p.inf_w.is_null() || p.use_net == 0 { 0.0 } else { p.p_infill },
             top_k: p.top_k.max(1) as usize,
             hinge_a: Vec::new(),
             hinge_b: Vec::new(),
@@ -1226,6 +1239,176 @@ impl Net {
         let lse = m + z.iter().map(|&v| (v as f64 - m).exp()).sum::<f64>().ln();
         z.iter().map(|&v| v as f64 - lse).collect()
     }
+}
+
+/// The infill model (tools/learn/infill_model.py): a pre-norm transformer over [target, target shape, neighbours].
+struct Infill {
+    d: usize, layers: usize, heads: usize, n_ctx: usize, n_lab: usize, n_tok: usize, win: usize,
+    w: Vec<f32>,
+    off: Vec<usize>, // start of each tensor in w, export order
+}
+
+impl Infill {
+    unsafe fn from(p: &Problem) -> Infill {
+        let dm = v(p.inf_dims, 7);
+        let (d, layers, heads, n_ctx, n_lab, n_tok, win) = (dm[0] as usize, dm[1] as usize, dm[2] as usize, dm[3] as usize, dm[4] as usize, dm[5] as usize, dm[6] as usize);
+        let mut sizes = vec![(n_lab + 2) * d, (n_tok + 1) * d, d * 6, d, d * win * 8, d, 3 * d];
+        for _ in 0..layers {
+            sizes.extend_from_slice(&[d, d, 3 * d * d, 3 * d, d * d, d, d, d, 2 * d * d, 2 * d, 2 * d * d, d]);
+        }
+        sizes.extend_from_slice(&[d, d, (n_lab + 1) * d, n_lab + 1]);
+        let mut off = Vec::with_capacity(sizes.len());
+        let mut acc = 0;
+        for s in &sizes { off.push(acc); acc += s; }
+        assert_eq!(acc, p.inf_n as usize, "infill weights: sizes do not match");
+        Infill { d, layers, heads, n_ctx, n_lab, n_tok, win, w: v(p.inf_w, acc), off }
+    }
+
+    fn t(&self, k: usize) -> &[f32] {
+        let end = if k + 1 < self.off.len() { self.off[k + 1] } else { self.w.len() };
+        &self.w[self.off[k]..end]
+    }
+
+    /// y = W x + b, W (out, in) row-major as torch.nn.Linear.
+    fn linear(w: &[f32], b: &[f32], x: &[f32], out: &mut [f32]) {
+        let n = x.len();
+        for (o, (row, bo)) in out.iter_mut().zip(w.chunks_exact(n).zip(b)) {
+            *o = bo + row.iter().zip(x).map(|(a, b)| a * b).sum::<f32>();
+        }
+    }
+
+    fn norm(x: &[f32], g: &[f32], b: &[f32], out: &mut [f32]) {
+        let n = x.len() as f32;
+        let m = x.iter().sum::<f32>() / n;
+        let var = x.iter().map(|v| (v - m) * (v - m)).sum::<f32>() / n;
+        let r = 1.0 / (var + 1e-5).sqrt();
+        for i in 0..x.len() { out[i] = (x[i] - m) * r * g[i] + b[i]; }
+    }
+
+    /// The target's final vector (before the head): ctx rows [label, class, dy, dx, dz, h, w, d], shape WIN*8 fills.
+    fn encode(&self, ctx: &[[i32; 8]], shape: &[f32]) -> Vec<f32> {
+        let d = self.d;
+        let n = 2 + ctx.len();
+        let mut x = vec![0f32; n * d];
+        let kind = self.t(6);
+        let lab = self.t(0);
+        for j in 0..d { x[j] = lab[(self.n_lab + 1) * d + j] + kind[j]; }
+        let mut tmp = vec![0f32; d];
+        Infill::linear(self.t(4), self.t(5), shape, &mut tmp);
+        for j in 0..d { x[d + j] = tmp[j] + kind[d + j]; }
+        let tok = self.t(1);
+        for (r, c) in ctx.iter().enumerate() {
+            let g = [c[2] as f32 / 6.0, c[3] as f32 / 4.0, c[4] as f32 / 4.0, c[5] as f32 / 8.0, c[6] as f32 / 8.0, c[7] as f32 / 8.0];
+            Infill::linear(self.t(2), self.t(3), &g, &mut tmp);
+            let (l, k) = (c[0].max(0) as usize, c[1].max(0) as usize);
+            let row = &mut x[(2 + r) * d..(3 + r) * d];
+            for j in 0..d { row[j] = tmp[j] + lab[l * d + j] + tok[k * d + j] + kind[2 * d + j]; }
+        }
+        let (h, hd) = (self.heads, d / self.heads);
+        let scale = 1.0 / (hd as f32).sqrt();
+        let (mut a, mut qkv, mut att, mut o, mut f1) = (vec![0f32; d], vec![0f32; n * 3 * d], vec![0f32; n * d], vec![0f32; d], vec![0f32; 2 * d]);
+        for l in 0..self.layers {
+            let b = 7 + 12 * l;
+            let last = l + 1 == self.layers;                 // only the target's row is needed after the last layer
+            for r in 0..n {
+                Infill::norm(&x[r * d..(r + 1) * d], self.t(b), self.t(b + 1), &mut a);
+                Infill::linear(self.t(b + 2), self.t(b + 3), &a, &mut qkv[r * 3 * d..(r + 1) * 3 * d]);
+            }
+            let rows = if last { 1 } else { n };
+            let mut sc = vec![0f32; n];
+            for r in 0..rows {
+                for hh in 0..h {
+                    let q = &qkv[r * 3 * d + hh * hd..r * 3 * d + (hh + 1) * hd];
+                    let mut m = f32::NEG_INFINITY;
+                    for k in 0..n {
+                        let kv = &qkv[k * 3 * d + d + hh * hd..k * 3 * d + d + (hh + 1) * hd];
+                        sc[k] = q.iter().zip(kv).map(|(a, b)| a * b).sum::<f32>() * scale;
+                        m = m.max(sc[k]);
+                    }
+                    let mut tot = 0f32;
+                    for k in 0..n { sc[k] = (sc[k] - m).exp(); tot += sc[k]; }
+                    let out = &mut att[r * d + hh * hd..r * d + (hh + 1) * hd];
+                    out.iter_mut().for_each(|v| *v = 0.0);
+                    for k in 0..n {
+                        let vv = &qkv[k * 3 * d + 2 * d + hh * hd..k * 3 * d + 2 * d + (hh + 1) * hd];
+                        let w = sc[k] / tot;
+                        for j in 0..hd { out[j] += w * vv[j]; }
+                    }
+                }
+            }
+            for r in 0..rows {
+                Infill::linear(self.t(b + 4), self.t(b + 5), &att[r * d..(r + 1) * d], &mut o);
+                for j in 0..d { x[r * d + j] += o[j]; }
+                Infill::norm(&x[r * d..(r + 1) * d], self.t(b + 6), self.t(b + 7), &mut a);
+                Infill::linear(self.t(b + 8), self.t(b + 9), &a, &mut f1);
+                f1.iter_mut().for_each(|v| *v = v.max(0.0));
+                Infill::linear(self.t(b + 10), self.t(b + 11), &f1, &mut o);
+                for j in 0..d { x[r * d + j] += o[j]; }
+            }
+        }
+        let k = 7 + 12 * self.layers;
+        let mut h0 = vec![0f32; d];
+        Infill::norm(&x[..d], self.t(k), self.t(k + 1), &mut h0);
+        h0
+    }
+
+    /// The head's logit for label `l` (other: n_lab) given the target's final vector.
+    fn logit(&self, h0: &[f32], l: usize) -> f32 {
+        let k = 9 + 12 * self.layers;
+        let w = &self.t(k)[l * self.d..(l + 1) * self.d];
+        self.t(k + 1)[l] + w.iter().zip(h0).map(|(a, b)| a * b).sum::<f32>()
+    }
+}
+
+/// The infill model's inputs at cell (y, x, z): the nearest n_ctx parts around it (origin within 6 plates / 4 studs,
+/// not covering the cell) and the target's octant fills in the window, as tools/learn/infill_model.py builds them.
+fn infill_inputs(d: &Data, st: &State, inf: &Infill, y: i32, x: i32, z: i32) -> (Vec<[i32; 8]>, Vec<f32>) {
+    let net = d.net.as_ref().unwrap();
+    let mut near: Vec<(i32, usize)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for yy in (y - 6).max(0)..(y + 7).min(d.h) {
+        for xx in (x - 4).max(0)..(x + 5).min(d.x) {
+            for zz in (z - 4).max(0)..(z + 5).min(d.z) {
+                let j = st.owner[d.idx(yy, xx, zz)];
+                if j >= 0 && seen.insert(j) {
+                    let t = st.item(j as usize);
+                    let o = &d.opts[t.opt];
+                    let (dy, dx, dz) = (t.y - y, t.x - x, t.z - z);
+                    let cover = dy <= 0 && dx <= 0 && dz <= 0 && dy + o.h > 0 && dx + o.w > 0 && dz + o.d > 0;
+                    if dy.abs() <= 6 && dx.abs() <= 4 && dz.abs() <= 4 && !cover {
+                        near.push((dy.abs() + dx.abs() + dz.abs(), j as usize));
+                    }
+                }
+            }
+        }
+    }
+    near.sort_unstable();
+    let ctx = near.iter().take(inf.n_ctx).map(|&(_, j)| {
+        let t = st.item(j);
+        let o = &d.opts[t.opt];
+        let lab = if d.opt_label.is_empty() || d.opt_label[t.opt] < 0 { inf.n_lab as i32 } else { d.opt_label[t.opt] };
+        [lab, net.opt_out[t.opt].min(inf.n_tok as i32), t.y - y, t.x - x, t.z - z, o.h.min(32), o.w.min(32), o.d.min(32)]
+    }).collect();
+    let mut shape = vec![0f32; inf.win * 8];
+    let mut k = 0;
+    for dy in WY.0..WY.1 {
+        for dx in WX.0..WX.1 {
+            for dz in WZ.0..WZ.1 {
+                let (yy, xx, zz) = (y + dy, x + dx, z + dz);
+                if d.inside(yy, xx, zz) {
+                    let b = d.tbits[d.idx(yy, xx, zz)];
+                    for bit in 0..64 {
+                        if b >> bit & 1 == 1 {
+                            let (sy, sx, sz) = (bit / 16, (bit / 4) % 4, bit % 4);
+                            shape[k * 8 + (sy / 2) * 4 + (sx / 2) * 2 + sz / 2] += 1.0 / 8.0;
+                        }
+                    }
+                }
+                k += 1;
+            }
+        }
+    }
+    (ctx, shape)
 }
 
 /// log P(class | context) at a cell: the masked part model's, cached at the last call, else the proposal net's.
@@ -4399,12 +4582,81 @@ fn mirror(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
     Some(Undo::Retile { added, removed })
 }
 
-const MOVES: [&str; 19] = ["sideways", "masonry", "hinge", "swap", "re-top", "split", "stack", "merge", "retile", "pattern", "re-solve", "orient", "edge run", "curve fit", "echo", "mirror", "phase", "prop", "plan"];
+const MOVES: [&str; 20] = ["sideways", "masonry", "hinge", "swap", "re-top", "split", "stack", "merge", "retile", "pattern", "re-solve", "orient", "edge run", "curve fit", "echo", "mirror", "phase", "prop", "plan", "infill"];
+
+/// Infill: clear a window (error-guided) and refill it part by part with the infill model -- each free wanted cell in
+/// fill order asks the model, given the parts around it now (those just placed included), which option goes there;
+/// the filler's geometric candidates are drawn in proportion to exp(style * logit + fit).  The energy decides.
+fn infill(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
+    let d = st.d;
+    let inf = d.inf.as_ref()?;
+    if d.want_cells.is_empty() {
+        return None;
+    }
+    let c = st.pick_cell(rng);
+    let (cy, cx, cz) = (c / (d.x * d.z), (c / d.z) % d.x, c % d.z);
+    let hy = if rng.f64() < 0.5 { 1 } else { 3 };                     // retile's window: from the cell up, its supports kept
+    let (hx, hz) = (1 + rng.below(3) as i32, 1 + rng.below(3) as i32);
+    let (removed, mut cells) = clear_window(st, (cy, (cy + hy).min(d.h)), ((cx - hx + 1).max(0), (cx + hx).min(d.x)),
+                                            ((cz - hz + 1).max(0), (cz + hz).min(d.z)));
+    cells.retain(|&(y, x, z)| d.want[d.idx(y, x, z)]);
+    cells.sort_unstable();
+    cells.dedup();
+    let mut added = Vec::new();
+    let mut cands = Vec::new();
+    if std::env::var("E2L_INF_FILLER").is_ok() {                     // diagnostics: the same window, the filler's refill
+        added = filler.fill(st, rng, cells.clone());
+        return Some(Undo::Retile { added, removed });
+    }
+    for (y, x, z) in cells {
+        if st.owner[d.idx(y, x, z)] >= 0 {
+            continue;
+        }
+        filler.candidates(st, y, x, z, None, 16, &mut cands);
+        if cands.is_empty() {
+            continue;
+        }
+        let (ctx, shape) = infill_inputs(d, st, inf, y, x, z);
+        let h0 = inf.encode(&ctx, &shape);
+        // diagnostics: E2L_INF_DUMP=1 prints one call's inputs and logits for a parity check against torch
+        static DUMPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if std::env::var("E2L_INF_DUMP").is_ok() && ctx.len() >= 5 && !DUMPED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            let ls: Vec<usize> = (0..inf.n_lab + 1).step_by(97).collect();
+            eprintln!("INFDUMP {:?} | {:?} | {:?} | {:?}", ctx, shape, ls, ls.iter().map(|&l| inf.logit(&h0, l)).collect::<Vec<_>>());
+            eprintln!("INFSCALE style {} w_sup {} w_cov {}", d.style, d.w_sup, d.w_cov);
+        }
+        // as Filler::fill, with the model's logit in place of the statistics score
+        let mut scored: Vec<(f64, f64, usize, i32, i32, i32, i32)> = Vec::with_capacity(cands.len());
+        for &(_, k, oy, ox, oz, resid) in &cands {
+            let (_, fit, colour) = filler.score(st, None, k, oy, ox, oz, resid);
+            let l = if d.opt_label[k] >= 0 { d.opt_label[k] as usize } else { inf.n_lab };
+            scored.push((d.style * inf.logit(&h0, l) as f64, fit, k, oy, ox, oz, colour));
+        }
+        let best_stat = scored.iter().map(|s| s.0).fold(f64::NEG_INFINITY, f64::max);
+        let mut sc: Vec<f64> = scored.iter().map(|s| s.0 + s.1).collect();
+        let f = d.fill[d.idx(y, x, z)];
+        if f < 0.5 {                                                   // a barely-wanted cell may stay empty
+            sc.push(best_stat - d.w_cov * f * f);
+        }
+        let m = sc.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let ws: Vec<f64> = sc.iter().map(|s| (s - m).exp()).collect();
+        let mut r = rng.f64() * ws.iter().sum::<f64>();
+        let pick = ws.iter().position(|&w| { r -= w; r < 0.0 }).unwrap_or(ws.len() - 1);
+        if pick < scored.len() {
+            let (_, _, k, oy, ox, oz, colour) = scored[pick];
+            added.push(st.add(Item { opt: k, colour, y: oy, x: ox, z: oz }));
+        }
+    }
+    if added.is_empty() && removed.is_empty() {
+        return None;
+    }
+    Some(Undo::Retile { added, removed })
+}
 
 /// The moves gradient-guided proposals choose among: those the fixed mix draws at all.
 fn gg_arms(d: &Data) -> Vec<usize> {
     let mut a = vec![1, 2, 3, 4, 5, 6, 7, 8];
-    for (p, m) in [(d.p_resolve, 10), (d.p_orient, 11), (d.p_echo, 14), (d.p_mirror, 15), (d.p_phase, 16)] {
+    for (p, m) in [(d.p_resolve, 10), (d.p_orient, 11), (d.p_echo, 14), (d.p_mirror, 15), (d.p_phase, 16), (d.p_infill, 19)] {
         if p > 0.0 { a.push(m); }
     }
     a
@@ -4429,6 +4681,11 @@ fn propose(st: &mut State, filler: &mut Filler, groups: &[Vec<usize>], boxes: &[
             return Some((17, u));
         }
     }
+    if st.d.p_infill > 0.0 && rng.f64() < st.d.p_infill {
+        if let Some(u) = infill(st, filler, rng) {
+            return Some((19, u));
+        }
+    }
     let r = rng.f64();
     st.gg_arm = None;
     if st.d.gg && !st.guide_cum.is_empty() && rng.f64() < st.d.p_guide {
@@ -4450,7 +4707,8 @@ fn propose(st: &mut State, filler: &mut Filler, groups: &[Vec<usize>], boxes: &[
             4 => retop(st, groups, rng).map(|u| (4, u)), 5 => split(st, rng).map(|u| (5, u)), 6 => stack(st, rng).map(|u| (6, u)),
             7 => merge(st, rng).map(|u| (7, u)), 10 => resolve(st, filler, rng), 11 => orient(st, filler, boxes, rng).map(|u| (11, u)),
             14 => echo(st, filler, rng).map(|u| (14, u)), 15 => mirror(st, filler, rng).map(|u| (15, u)),
-            16 => phase(st, filler, rng).map(|u| (16, u)), _ => retile(st, filler, rng).map(|u| (8, u)),
+            16 => phase(st, filler, rng).map(|u| (16, u)), 19 => infill(st, filler, rng).map(|u| (19, u)),
+            _ => retile(st, filler, rng).map(|u| (8, u)),
         };
         st.focus.set(-1);
         return u;
@@ -4805,5 +5063,5 @@ pub unsafe extern "C" fn e2l_sample(p: *const Problem) -> i32 {
 /// The layout version: Python checks it before calling.
 #[no_mangle]
 pub extern "C" fn e2l_abi() -> i32 {
-    28
+    29
 }

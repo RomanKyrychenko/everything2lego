@@ -231,6 +231,7 @@ def main() -> None:
     ap.add_argument("--flat-mix", action=argparse.BooleanOptionalAction, default=False, help="with --roof-mix: the other tops (flat roofs, ledges, the ground) get real sets' part mix and patterns there too. Off: real sets leave more studs bare there (35 %% tiles) than our builds already do (60 %%), so it adds exposed studs")
     ap.add_argument("--mlm", action="store_true", help="with --guide: the filler ranks parts with the masked part model (tools/learn/mlm_parts.py), refreshed 4 times per run, instead of the proposal net")
     ap.add_argument("--mlm-weight", type=float, default=0.0, help="with --mlm: each part's regret under the masked part model (best class's log P at its first cell minus its own) in the energy, times the style weight; 0 = off")
+    ap.add_argument("--infill-share", type=float, default=0.0, help="share of moves that clear a window and refill it part by part with the infill model (tools/learn/infill_model.py); 0 = off")
     ap.add_argument("--v14-share", type=float, default=0.25, help="with --guide: share of the guide's weight given to the V14 judge's per-part blame (tools/learn/v14_blame.py; 4 judge calls per run; off when the model file is missing); 0 = off")
     ap.add_argument("--guide", type=float, default=0.0, help="share of moves that pick their place in proportion to the local error (shape, colour, support / exposed studs, direction, atypical neighbours); 0 = uniform. The final error map is written either way (error.npz, render_error.png)")
     ap.add_argument("--resolve-share", type=float, default=0.0, help="share of moves that clear a window and cover it by the best of a bounded exact search (a slope run where the surface slants); taken from retile's share")
@@ -380,7 +381,7 @@ def main() -> None:
     def _once(seed: int):
         _t = time.time()
         w = Weights.learned(target.kind) if a.learned_weights else Weights()
-        w.style = a.style; w.size = a.size_weight; w.sideways = a.sideways_weight; w.p_sideways = a.sideways_share; w.surface = a.surface_fit; w.big, w.big_end = (float(a.prefer_big.split(':')[0]), float(a.prefer_big.split(':')[1]) if ':' in a.prefer_big else -1.0); w.motif = a.pattern_share; w.surface_mix = a.surface_mix; w.roof_mix = a.roof_mix; w.guide = a.guide; w.resolve = a.resolve_share; w.orient = a.orient_share; w.flat_mix = a.flat_mix; w.stack = a.stack_weight; w.bare_top = a.bare_top_weight; w.direction = a.direction_weight; w.v14 = a.v14_share; w.mlm = a.mlm; w.mlm_weight = a.mlm_weight
+        w.style = a.style; w.size = a.size_weight; w.sideways = a.sideways_weight; w.p_sideways = a.sideways_share; w.surface = a.surface_fit; w.big, w.big_end = (float(a.prefer_big.split(':')[0]), float(a.prefer_big.split(':')[1]) if ':' in a.prefer_big else -1.0); w.motif = a.pattern_share; w.surface_mix = a.surface_mix; w.roof_mix = a.roof_mix; w.guide = a.guide; w.resolve = a.resolve_share; w.orient = a.orient_share; w.flat_mix = a.flat_mix; w.stack = a.stack_weight; w.bare_top = a.bare_top_weight; w.direction = a.direction_weight; w.v14 = a.v14_share; w.mlm = a.mlm; w.mlm_weight = a.mlm_weight; w.infill = a.infill_share
         if a.sup_weight > 0: w.sup = a.sup_weight
         if a.shape_weight is not None: w.cov = a.shape_weight
         w.col_max = a.colour_max

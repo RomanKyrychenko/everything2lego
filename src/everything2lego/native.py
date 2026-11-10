@@ -30,7 +30,7 @@ from typing import Optional
 
 import numpy as np
 
-ABI = 28
+ABI = 29
 INFO_LEN = 21
 ERR_LAYERS = ("shape", "colour", "support", "direction", "statistics")   # lib.rs N_ERR
 PATHS4_BUCKETS = 8
@@ -38,6 +38,7 @@ PATHS4_BUCKETS = 8
 _P = C.POINTER
 
 
+INFILL_NPZ = Path("/Volumes/PRO-G40/lego_data/analysis/infill_model/student.npz")   # tools/learn/infill_model.py export
 V14_MODEL = Path("/Volumes/PRO-G40/lego_data/analysis/vis_classifiers/v14_model.pt")   # on the external disk
 V14_CB = C.CFUNCTYPE(None, C.c_int32, *[C.POINTER(C.c_int32)] * 5, C.POINTER(C.c_double))
 
@@ -188,6 +189,8 @@ class Problem(C.Structure):
         ("v14_share", C.c_double), ("v14_every", C.c_int32), ("v14_cb", V14_CB),   # learned realism in the guide (v14_blame.py)
         ("mlm_cb", MLM_CB),                                             # masked part model ranks the filler's parts (mlm_parts.py)
         ("w_mlm", C.c_double),                                          # and each part's regret under it in the energy (x style)
+        ("inf_w", _P(C.c_float)), ("inf_n", C.c_int32), ("inf_dims", _P(C.c_int32)),   # infill model (infill_model.py student)
+        ("opt_label", _P(C.c_int32)), ("p_infill", C.c_double),
     ]
 
 
@@ -575,6 +578,13 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
     if getattr(weights, "mlm", False) and getattr(weights, "guide", 0.0) > 0 and net:   # same 4 calls per run as V14
         cb = mlm_callback(np.asarray(target.fill, np.float64)); keep.append(cb)
         size_fields.update(mlm_cb=cb, w_mlm=getattr(weights, "mlm_weight", 0.0), v14_every=max(1, iters // max(1000, iters // 400) // 4))
+    if getattr(weights, "infill", 0.0) > 0 and net and INFILL_NPZ.exists():   # infill move: refill windows with the model
+        z = np.load(INFILL_NPZ)
+        lid = {str(t): i for i, t in enumerate(z["labels"])}
+        w_, dims_ = arr(z["w"], np.float32), arr(z["dims"], np.int32)
+        lab_ = arr([lid.get(f"{v.part.ldraw}|{o.rot}", -1) for v, o in opts], np.int32)
+        size_fields.update(inf_w=_ptr(w_, C.c_float), inf_n=int(w_.size), inf_dims=_ptr(dims_, C.c_int32),
+                           opt_label=_ptr(lab_, C.c_int32), p_infill=weights.infill)
     size_fields.update(p_guide=getattr(weights, "guide", 0.0), guide_every=max(1000, iters // 400),
                        err_cell=_ptr(err_cell, C.c_double), err_item=_ptr(err_item, C.c_double),
                        p_resolve=getattr(weights, "resolve", 0.0), p_orient=getattr(weights, "orient", 0.0))
