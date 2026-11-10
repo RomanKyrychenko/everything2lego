@@ -435,6 +435,7 @@ struct Data {
     w_big: f64,
     p_motif: f64,
     p_guide: f64,
+    gg: bool,            // E2L_GG=1: guided proposals choose the move by the cell's error layer (propose)
     p_resolve: f64,
     p_orient: f64,
     p_echo: f64,
@@ -673,6 +674,7 @@ impl Data {
             w_big: p.w_big,
             p_motif: 0.0,
             p_guide: p.p_guide,
+            gg: std::env::var("E2L_GG").map_or(false, |v| v == "1"),
             p_resolve: p.p_resolve,
             p_orient: p.p_orient,
             p_echo: p.p_echo,
@@ -1373,7 +1375,13 @@ struct State<'a> {
     gen: u32,
     guide_cells: Vec<u32>, // cells with local error, and their cumulative error (error-guided moves)
     guide_cum: Vec<f64>,
+    guide_layer: Vec<u8>,  // each guide cell's largest error: GG_LAYERS (shape + direction above floor, colour, support, statistics)
+    focus: std::cell::Cell<i32>, // a cell the next pick_cell / pick_item must use (gradient-guided move choice), -1: none
+    gg: Vec<[f64; 2]>,     // per (error layer, move): energy removed and seconds spent, decayed at each guide refresh
+    gg_arm: Option<(usize, usize)>, // the (layer, move) the last proposal was drawn for
 }
+
+const GG_LAYERS: usize = 4;
 
 const UP: u8 = 0;
 const DOWN: u8 = 1;
@@ -1443,6 +1451,10 @@ impl<'a> State<'a> {
             gen: 0,
             guide_cells: Vec::new(),
             guide_cum: Vec::new(),
+            guide_layer: Vec::new(),
+            focus: std::cell::Cell::new(-1),
+            gg: vec![[0.0, 0.0]; GG_LAYERS * MOVES.len()],
+            gg_arm: None,
         }
     }
 
@@ -2357,6 +2369,11 @@ impl<'a> State<'a> {
         let d = self.d;
         self.guide_cells.clear();
         self.guide_cum.clear();
+        self.guide_layer.clear();
+        for g in self.gg.iter_mut() {
+            g[0] *= 0.5;                                    // forget slowly: what pays changes as the build cools
+            g[1] *= 0.5;
+        }
         let mut acc = 0f64;
         for c in 0..d.tbits.len() {
             if (!d.want[c] && self.owner[c] < 0) || (!d.lock.is_empty() && d.lock[c]) {
@@ -2369,6 +2386,8 @@ impl<'a> State<'a> {
                 acc += e;
                 self.guide_cells.push(c as u32);
                 self.guide_cum.push(acc);
+                let l = [head, r[1], r[2], r[4]];
+                self.guide_layer.push((0..GG_LAYERS).max_by(|&a, &b| l[a].total_cmp(&l[b])).unwrap() as u8);
             }
         }
     }
@@ -2378,6 +2397,10 @@ impl<'a> State<'a> {
     /// search, like retile's own; the energy still decides every move.)
     fn pick_cell(&self, rng: &mut Rng) -> i32 {
         let d = self.d;
+        let f = self.focus.replace(-1);
+        if f >= 0 {
+            return f;
+        }
         if !self.guide_cum.is_empty() && rng.f64() < d.p_guide {
             let r = rng.f64() * self.guide_cum.last().unwrap();
             return self.guide_cells[self.guide_cum.partition_point(|&w| w <= r).min(self.guide_cum.len() - 1)] as i32;
@@ -2387,6 +2410,10 @@ impl<'a> State<'a> {
 
     /// A live part for a move: the owner of an error-guided cell (p_guide), else uniform.
     fn pick_item(&self, rng: &mut Rng) -> usize {
+        let f = self.focus.replace(-1);
+        if f >= 0 && self.owner[f as usize] >= 0 {
+            return self.owner[f as usize] as usize;
+        }
         if !self.guide_cum.is_empty() && rng.f64() < self.d.p_guide {
             let r = rng.f64() * self.guide_cum.last().unwrap();
             let c = self.guide_cells[self.guide_cum.partition_point(|&w| w <= r).min(self.guide_cum.len() - 1)];
@@ -4308,6 +4335,15 @@ fn mirror(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
 
 const MOVES: [&str; 19] = ["sideways", "masonry", "hinge", "swap", "re-top", "split", "stack", "merge", "retile", "pattern", "re-solve", "orient", "edge run", "curve fit", "echo", "mirror", "phase", "prop", "plan"];
 
+/// The moves gradient-guided proposals choose among: those the fixed mix draws at all.
+fn gg_arms(d: &Data) -> Vec<usize> {
+    let mut a = vec![1, 2, 3, 4, 5, 6, 7, 8];
+    for (p, m) in [(d.p_resolve, 10), (d.p_orient, 11), (d.p_echo, 14), (d.p_mirror, 15), (d.p_phase, 16)] {
+        if p > 0.0 { a.push(m); }
+    }
+    a
+}
+
 fn propose(st: &mut State, filler: &mut Filler, groups: &[Vec<usize>], boxes: &[Vec<usize>], rng: &mut Rng) -> Option<(usize, Undo)> {
     if !st.d.snot_by_opt.is_empty() && rng.f64() < 0.05 {        // only drawn when sideways building is on
         if let Some(u) = snot_face(st, rng) {
@@ -4328,6 +4364,31 @@ fn propose(st: &mut State, filler: &mut Filler, groups: &[Vec<usize>], boxes: &[
         }
     }
     let r = rng.f64();
+    st.gg_arm = None;
+    if st.d.gg && !st.guide_cum.is_empty() && rng.f64() < st.d.p_guide {
+        // gradient-guided: the cell from the error map (the gradient's size), the move from what that error layer
+        // is (its direction): each move's energy removed per second at cells of that layer so far, a tenth uniform
+        let k = st.guide_cum.partition_point(|&w| w <= rng.f64() * st.guide_cum.last().unwrap()).min(st.guide_cum.len() - 1);
+        let l = st.guide_layer[k] as usize;
+        let arms = gg_arms(st.d);
+        let rate = |m: usize| { let g = st.gg[l * MOVES.len() + m]; (g[0] + 1.0) / (g[1] + 1e-3) };
+        let m = if rng.f64() < 0.1 { arms[rng.below(arms.len())] } else {
+            let tot: f64 = arms.iter().map(|&m| rate(m)).sum();
+            let mut x = rng.f64() * tot;
+            *arms.iter().find(|&&m| { x -= rate(m); x <= 0.0 }).unwrap_or(arms.last().unwrap())
+        };
+        st.focus.set(st.guide_cells[k] as i32);
+        st.gg_arm = Some((l, m));
+        let u = match m {
+            1 => masonry_shift(st, rng).map(|u| (1, u)), 2 => hinge_swap(st, rng).map(|u| (2, u)), 3 => swap(st, rng).map(|u| (3, u)),
+            4 => retop(st, groups, rng).map(|u| (4, u)), 5 => split(st, rng).map(|u| (5, u)), 6 => stack(st, rng).map(|u| (6, u)),
+            7 => merge(st, rng).map(|u| (7, u)), 10 => resolve(st, filler, rng), 11 => orient(st, filler, boxes, rng).map(|u| (11, u)),
+            14 => echo(st, filler, rng).map(|u| (14, u)), 15 => mirror(st, filler, rng).map(|u| (15, u)),
+            16 => phase(st, filler, rng).map(|u| (16, u)), _ => retile(st, filler, rng).map(|u| (8, u)),
+        };
+        st.focus.set(-1);
+        return u;
+    }
     let (m, u) = if r < 0.02 { (1, masonry_shift(st, rng)) }
     else if r < 0.05 { (2, hinge_swap(st, rng)) }
     else if r < 0.12 { (3, swap(st, rng)) }
@@ -4463,14 +4524,21 @@ unsafe fn run(p: &Problem) -> i32 {
         let before = if d.opt_watch.is_empty() { [0f64; 8] } else { terms(&st) };
         let hits = st.lock_hits;
         let fid_before = st.fid;
+        let (t0, e0) = (std::time::Instant::now(), e);
+        let gg_note = |st: &mut State, e: f64| if let Some((l, m)) = st.gg_arm.take() {
+            let g = &mut st.gg[l * MOVES.len() + m];
+            g[0] += (e0 - e).max(0.0);
+            g[1] += t0.elapsed().as_secs_f64();
+        };
         let (m, u) = match propose(&mut st, &mut filler, &groups, &boxes, &mut rng) {
             Some(u) => u,
-            None => continue,
+            None => { gg_note(&mut st, e); continue }
         };
-        if st.lock_hits != hits { undo(&mut st, u); continue; }
+        if st.lock_hits != hits { undo(&mut st, u); gg_note(&mut st, e); continue; }
         n_prop[m] += 1;
         if d.fid_cap > 0.0 && st.fid > d.fid_cap && st.fid > fid_before {
             undo(&mut st, u);                                          // past the shape budget: not an option
+            gg_note(&mut st, e);
             continue;
         }
         // diagnostics: E2L_WATCH_MOVE=<move name> watches that move, else moves adding a watched option
@@ -4493,6 +4561,7 @@ unsafe fn run(p: &Problem) -> i32 {
         } else {
             undo(&mut st, u);
         }
+        gg_note(&mut st, e);
         if p.log_every > 0 && (it + 1) % p.log_every == 0 {
             history.push(e);
         }
@@ -4502,6 +4571,13 @@ unsafe fn run(p: &Problem) -> i32 {
     eprintln!("moves (proposed / accepted):{}", (0..MOVES.len()).filter(|&m| n_prop[m] > 0)
         .map(|m| format!("  {} {} / {} ({:.1} %)", MOVES[m], n_prop[m], n_acc[m], 100.0 * n_acc[m] as f64 / n_prop[m] as f64))
         .collect::<String>());
+    if d.gg {
+        for (l, name) in ["shape", "colour", "support", "statistics"].iter().enumerate() {
+            let mut r: Vec<(f64, usize)> = gg_arms(&d).into_iter().map(|m| { let g = st.gg[l * MOVES.len() + m]; (g[0] / g[1].max(1e-9), m) }).collect();
+            r.sort_by(|a, b| b.0.total_cmp(&a.0));
+            eprintln!("guided moves at {} errors (energy removed per second): {}", name, r.iter().take(4).map(|&(v, m)| format!("{} {:.0}", MOVES[m], v)).collect::<Vec<_>>().join(", "));
+        }
+    }
     if !d.opt_watch.is_empty() {
         let live_w = st.live.iter().filter(|&&i| d.opt_watch[st.item(i).opt]).count();
         eprintln!("watched options: proposed in {} moves, accepted {} ({:.1} %), mean energy change {:.2}; in the final build {}",
