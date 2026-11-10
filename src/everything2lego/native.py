@@ -37,6 +37,7 @@ PATHS4_BUCKETS = 8
 _P = C.POINTER
 
 
+V14_MODEL = Path("/Volumes/PRO-G40/lego_data/analysis/vis_classifiers/v14_model.pt")   # on the external disk
 V14_CB = C.CFUNCTYPE(None, C.c_int32, *[C.POINTER(C.c_int32)] * 5, C.POINTER(C.c_double))
 
 
@@ -544,7 +545,7 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
     if getattr(weights, "mirror", 0.0) > 0:                                      # mirror move: each option's image
         mt = arr(mirror_table(opts), np.int32)
         size_fields.update(p_mirror=weights.mirror, mirror_opt=_ptr(mt, C.c_int32))
-    if getattr(weights, "v14", 0.0) > 0 and getattr(weights, "guide", 0.0) > 0:   # 4 judge calls per run
+    if getattr(weights, "v14", 0.0) > 0 and getattr(weights, "guide", 0.0) > 0 and V14_MODEL.exists():   # 4 judge calls per run
         cb = v14_callback(opts); keep.append(cb)
         size_fields.update(v14_share=weights.v14, v14_every=max(1, iters // max(1000, iters // 400) // 4), v14_cb=cb)
     size_fields.update(p_guide=getattr(weights, "guide", 0.0), guide_every=max(1000, iters // 400),
