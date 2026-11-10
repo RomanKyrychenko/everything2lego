@@ -274,6 +274,11 @@ pub struct Problem {
     // per semantic area how much each option's part is what it shows (n_area * n_opt, in [0, 1]; null = by category,
     // above): an option earns aff * its cells in the area, any category, the area's cap is its best part's cells
     pub area_aff: *const f32,
+    // learned realism (tools/learn/v14_blame.py): every v14_every-th guide refresh, v14_cb(n, opt, colour, y, x, z, out)
+    // writes each live part's blame (P(fake) above the build's median); the guide then gives it v14_share of its weight
+    pub v14_share: f64,
+    pub v14_every: i32,
+    pub v14_cb: Option<unsafe extern "C" fn(i32, *const i32, *const i32, *const i32, *const i32, *const i32, *mut f64)>,
 }
 
 /// Error map layers: shape, colour, support (unsupported, bare side connectors, exposed studs), surface direction,
@@ -1375,13 +1380,15 @@ struct State<'a> {
     gen: u32,
     guide_cells: Vec<u32>, // cells with local error, and their cumulative error (error-guided moves)
     guide_cum: Vec<f64>,
-    guide_layer: Vec<u8>,  // each guide cell's largest error: GG_LAYERS (shape + direction above floor, colour, support, statistics)
+    guide_layer: Vec<u8>,  // each guide cell's largest error: GG_LAYERS (shape + direction above floor, colour, support, statistics, realism)
+    v14: std::collections::HashMap<(usize, i32, i32, i32), f64>, // learned realism blame per part (option, y, x, z) at the last v14 call
+    v14_share: f64,        // the realism layer's share of the guide's weight
     focus: std::cell::Cell<i32>, // a cell the next pick_cell / pick_item must use (gradient-guided move choice), -1: none
     gg: Vec<[f64; 2]>,     // per (error layer, move): energy removed and seconds spent, decayed at each guide refresh
     gg_arm: Option<(usize, usize)>, // the (layer, move) the last proposal was drawn for
 }
 
-const GG_LAYERS: usize = 4;
+const GG_LAYERS: usize = 5;
 
 const UP: u8 = 0;
 const DOWN: u8 = 1;
@@ -1452,6 +1459,8 @@ impl<'a> State<'a> {
             guide_cells: Vec::new(),
             guide_cum: Vec::new(),
             guide_layer: Vec::new(),
+            v14: std::collections::HashMap::new(),
+            v14_share: 0.0,
             focus: std::cell::Cell::new(-1),
             gg: vec![[0.0, 0.0]; GG_LAYERS * MOVES.len()],
             gg_arm: None,
@@ -2374,19 +2383,34 @@ impl<'a> State<'a> {
             g[0] *= 0.5;                                    // forget slowly: what pays changes as the build cools
             g[1] *= 0.5;
         }
-        let mut acc = 0f64;
+        let mut rows: Vec<(usize, [f64; GG_LAYERS])> = Vec::new();
+        let (mut tot, mut tot_v) = (0f64, 0f64);
         for c in 0..d.tbits.len() {
             if (!d.want[c] && self.owner[c] < 0) || (!d.lock.is_empty() && d.lock[c]) {
                 continue;
             }
             let r = &cell[c * N_ERR..(c + 1) * N_ERR];
             let head = if floor[c].is_finite() { (r[0] + r[3] - floor[c]).max(0.0) } else { 0.0 };
-            let e = head + r[1] + r[2] + r[4];
+            let o = self.owner[c];
+            let v = if o >= 0 && !self.v14.is_empty() {
+                let t = self.item(o as usize);
+                self.v14.get(&(t.opt, t.y, t.x, t.z)).map_or(0.0, |b| b / d.opts[t.opt].cells.len() as f64)
+            } else { 0.0 };
+            let l = [head, r[1], r[2], r[4], v];
+            tot += head + r[1] + r[2] + r[4];
+            tot_v += v;
+            rows.push((c, l));
+        }
+        // realism is in P(fake), not energy: scaled so it is v14_share of the guide's weight
+        let k = if tot_v > 0.0 && self.v14_share > 0.0 { self.v14_share / (1.0 - self.v14_share) * tot / tot_v } else { 0.0 };
+        let mut acc = 0f64;
+        for (c, mut l) in rows {
+            l[4] *= k;
+            let e: f64 = l.iter().sum();
             if e > 1e-9 {
                 acc += e;
                 self.guide_cells.push(c as u32);
                 self.guide_cum.push(acc);
-                let l = [head, r[1], r[2], r[4]];
                 self.guide_layer.push((0..GG_LAYERS).max_by(|&a, &b| l[a].total_cmp(&l[b])).unwrap() as u8);
             }
         }
@@ -4519,6 +4543,17 @@ unsafe fn run(p: &Problem) -> i32 {
             filler.w_big = d.w_big + (p.w_big_end - d.w_big) * it as f64 / (iters - 1).max(1) as f64;
         }
         if d.p_guide > 0.0 && p.guide_every > 0 && it % p.guide_every as i64 == 0 {
+            if let (Some(cb), true) = (p.v14_cb, p.v14_share > 0.0 && p.v14_every > 0) {
+                if (it / p.guide_every as i64) % p.v14_every as i64 == 0 {
+                    let live = st.live.clone();
+                    let col = |f: &dyn Fn(&Item) -> i32| live.iter().map(|&i| f(st.item(i))).collect::<Vec<i32>>();
+                    let (o, c, y, x, z) = (col(&|t| t.opt as i32), col(&|t| t.colour), col(&|t| t.y), col(&|t| t.x), col(&|t| t.z));
+                    let mut out = vec![0f64; live.len()];
+                    cb(live.len() as i32, o.as_ptr(), c.as_ptr(), y.as_ptr(), x.as_ptr(), z.as_ptr(), out.as_mut_ptr());
+                    st.v14 = live.iter().zip(&out).filter(|p| *p.1 > 0.0).map(|(&i, &b)| { let t = st.item(i); ((t.opt, t.y, t.x, t.z), b) }).collect();
+                    st.v14_share = p.v14_share.clamp(0.0, 0.9);
+                }
+            }
             st.refresh_guide(&filler.floor);
         }
         let before = if d.opt_watch.is_empty() { [0f64; 8] } else { terms(&st) };
@@ -4572,7 +4607,7 @@ unsafe fn run(p: &Problem) -> i32 {
         .map(|m| format!("  {} {} / {} ({:.1} %)", MOVES[m], n_prop[m], n_acc[m], 100.0 * n_acc[m] as f64 / n_prop[m] as f64))
         .collect::<String>());
     if d.gg {
-        for (l, name) in ["shape", "colour", "support", "statistics"].iter().enumerate() {
+        for (l, name) in ["shape", "colour", "support", "statistics", "realism"].iter().enumerate() {
             let mut r: Vec<(f64, usize)> = gg_arms(&d).into_iter().map(|m| { let g = st.gg[l * MOVES.len() + m]; (g[0] / g[1].max(1e-9), m) }).collect();
             r.sort_by(|a, b| b.0.total_cmp(&a.0));
             eprintln!("guided moves at {} errors (energy removed per second): {}", name, r.iter().take(4).map(|&(v, m)| format!("{} {:.0}", MOVES[m], v)).collect::<Vec<_>>().join(", "));
@@ -4702,5 +4737,5 @@ pub unsafe extern "C" fn e2l_sample(p: *const Problem) -> i32 {
 /// The layout version: Python checks it before calling.
 #[no_mangle]
 pub extern "C" fn e2l_abi() -> i32 {
-    25
+    26
 }

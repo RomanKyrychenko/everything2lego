@@ -29,12 +29,44 @@ from typing import Optional
 
 import numpy as np
 
-ABI = 25
+ABI = 26
 INFO_LEN = 21
 ERR_LAYERS = ("shape", "colour", "support", "direction", "statistics")   # lib.rs N_ERR
 PATHS4_BUCKETS = 8
 
 _P = C.POINTER
+
+
+V14_CB = C.CFUNCTYPE(None, C.c_int32, *[C.POINTER(C.c_int32)] * 5, C.POINTER(C.c_double))
+
+
+def v14_callback(opts):
+    """The guide's realism layer: per live part its V14 blame (P(fake) of the 50-part pieces holding it) above the
+    build's median, so moves go where the judge sees the build least like a real set."""
+    import sys as _sys
+    _sys.path[:0] = [str(Path(__file__).resolve().parents[2] / d) for d in ("tools/learn", "tools/set_study")]
+    from v14_blame import blame_lines
+    from .io_ldraw import placement_to_line
+    from .slope_courses import expand
+
+    def cb(n, o, c, y, x, z, out):
+        try:
+            lines, owner = [], []
+            for k in range(n):
+                v, orient = opts[o[k]]
+                for pl in expand(v.part, c[k], x[k], z[k], y[k], orient):
+                    lines.append(placement_to_line(pl)); owner.append(k)
+            b = blame_lines(lines)
+            per = np.full(n, np.nan)
+            for k, bk in zip(owner, b):
+                if not np.isnan(bk):
+                    per[k] = bk if np.isnan(per[k]) else max(per[k], bk)
+            per = np.nan_to_num(per - np.nanmedian(per), nan=0.0).clip(0.0)
+            for k in range(n):
+                out[k] = per[k]
+        except Exception as e:                                                  # noqa: BLE001  (a raise would be lost in ctypes)
+            print(f"v14 callback failed: {e!r}", file=_sys.stderr)
+    return V14_CB(cb)
 
 
 class Problem(C.Structure):
@@ -130,6 +162,7 @@ class Problem(C.Structure):
         ("cell_part", _P(C.c_int16)),                                   # mesh part per cell (part_labels.py); null = off
         ("cell_area", _P(C.c_int32)),                                   # semantic area per cell; null = per-cell bonus
         ("area_aff", _P(C.c_float)),                                    # per area x option: its part is what it shows
+        ("v14_share", C.c_double), ("v14_every", C.c_int32), ("v14_cb", V14_CB),   # learned realism in the guide (v14_blame.py)
     ]
 
 
@@ -511,6 +544,9 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
     if getattr(weights, "mirror", 0.0) > 0:                                      # mirror move: each option's image
         mt = arr(mirror_table(opts), np.int32)
         size_fields.update(p_mirror=weights.mirror, mirror_opt=_ptr(mt, C.c_int32))
+    if getattr(weights, "v14", 0.0) > 0 and getattr(weights, "guide", 0.0) > 0:   # 4 judge calls per run
+        cb = v14_callback(opts); keep.append(cb)
+        size_fields.update(v14_share=weights.v14, v14_every=max(1, iters // max(1000, iters // 400) // 4), v14_cb=cb)
     size_fields.update(p_guide=getattr(weights, "guide", 0.0), guide_every=max(1000, iters // 400),
                        err_cell=_ptr(err_cell, C.c_double), err_item=_ptr(err_item, C.c_double),
                        p_resolve=getattr(weights, "resolve", 0.0), p_orient=getattr(weights, "orient", 0.0))
