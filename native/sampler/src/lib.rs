@@ -435,7 +435,7 @@ struct Data {
     w_big: f64,
     p_motif: f64,
     p_guide: f64,
-    gg: bool,            // E2L_GG=1: guided proposals choose the move by the cell's error layer (propose)
+    gg: bool,            // on unless E2L_GG=0: guided proposals choose the move by the cell's error layer (propose)
     p_resolve: f64,
     p_orient: f64,
     p_echo: f64,
@@ -674,7 +674,7 @@ impl Data {
             w_big: p.w_big,
             p_motif: 0.0,
             p_guide: p.p_guide,
-            gg: std::env::var("E2L_GG").map_or(false, |v| v == "1"),
+            gg: std::env::var("E2L_GG").map_or(true, |v| v != "0"),
             p_resolve: p.p_resolve,
             p_orient: p.p_orient,
             p_echo: p.p_echo,
