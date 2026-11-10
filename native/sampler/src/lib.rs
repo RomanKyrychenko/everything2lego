@@ -279,6 +279,12 @@ pub struct Problem {
     pub v14_share: f64,
     pub v14_every: i32,
     pub v14_cb: Option<unsafe extern "C" fn(i32, *const i32, *const i32, *const i32, *const i32, *const i32, *mut f64)>,
+    // masked part model (tools/learn/mlm_parts.py): at the same refreshes, mlm_cb(n_items, items (class, y, x, z, h, w, d)
+    // per part, n_cells, cells, out) writes log P(class | the parts around) for each wanted cell (n_cells x net_c);
+    // the filler then ranks with it instead of the proposal net until the next call; with w_mlm > 0 each part also costs
+    // w_mlm * its regret there (the best class's log P minus its own), a pseudo-likelihood term in the energy
+    pub mlm_cb: Option<unsafe extern "C" fn(i32, *const i32, i32, *const i32, *mut f32)>,
+    pub w_mlm: f64,
 }
 
 /// Error map layers: shape, colour, support (unsupported, bare side connectors, exposed studs), surface direction,
@@ -1222,6 +1228,18 @@ impl Net {
     }
 }
 
+/// log P(class | context) at a cell: the masked part model's, cached at the last call, else the proposal net's.
+fn cell_logprobs(d: &Data, st: &State, y: i32, x: i32, z: i32) -> Option<Vec<f64>> {
+    let net = d.net.as_ref()?;
+    if !st.mlm_row.is_empty() {
+        let r = st.mlm_row[d.idx(y, x, z)];
+        if r >= 0 {
+            return Some(st.mlm_lp[r as usize * net.n_c..(r as usize + 1) * net.n_c].iter().map(|&v| v as f64).collect());
+        }
+    }
+    Some(net.logprobs(&net_features(d, net, &st.kindgrid, y, x, z)))
+}
+
 /// The cell's context: the target's cells in the window, the cells built
 /// before it in fill order, the kinds built there, the object's kind.
 fn net_features(d: &Data, net: &Net, kindgrid: &[i32], y: i32, x: i32, z: i32) -> Vec<f32> {
@@ -1383,6 +1401,11 @@ struct State<'a> {
     guide_layer: Vec<u8>,  // each guide cell's largest error: GG_LAYERS (shape + direction above floor, colour, support, statistics, realism)
     v14: std::collections::HashMap<(usize, i32, i32, i32), f64>, // learned realism blame per part (option, y, x, z) at the last v14 call
     v14_share: f64,        // the realism layer's share of the guide's weight
+    mlm_row: Vec<i32>,     // per cell its row in mlm_lp (-1: none)
+    mlm_lp: Vec<f32>,      // masked part model's log P(class) per surface cell, at the last call
+    mlm_max: Vec<f32>,     // per row its best log P
+    mlm_e: f64,            // sum over parts of their regret under the masked model (State::mlm_cost)
+    w_mlm: f64,
     focus: std::cell::Cell<i32>, // a cell the next pick_cell / pick_item must use (gradient-guided move choice), -1: none
     gg: Vec<[f64; 2]>,     // per (error layer, move): energy removed and seconds spent, decayed at each guide refresh
     gg_arm: Option<(usize, usize)>, // the (layer, move) the last proposal was drawn for
@@ -1461,6 +1484,11 @@ impl<'a> State<'a> {
             guide_layer: Vec::new(),
             v14: std::collections::HashMap::new(),
             v14_share: 0.0,
+            mlm_row: Vec::new(),
+            mlm_lp: Vec::new(),
+            mlm_max: Vec::new(),
+            mlm_e: 0.0,
+            w_mlm: 0.0,
             focus: std::cell::Cell::new(-1),
             gg: vec![[0.0, 0.0]; GG_LAYERS * MOVES.len()],
             gg_arm: None,
@@ -1885,6 +1913,18 @@ impl<'a> State<'a> {
             + d.w_sdist * self.sdp
             + d.w_part * self.live.len() as f64
             - d.w_sem * self.semp
+            + self.w_mlm * self.mlm_e
+    }
+
+    /// A part's regret under the masked part model at its first cell (0 where the cell was not scored).
+    fn mlm_cost(&self, it: &Item) -> f64 {
+        if self.mlm_row.is_empty() { return 0.0; }
+        let (d, net) = (self.d, self.d.net.as_ref().unwrap());
+        let o = &d.opts[it.opt];
+        let r = self.mlm_row[d.idx(it.y + o.first.0, it.x + o.first.1, it.z + o.first.2)];
+        if r < 0 { return 0.0; }
+        let r = r as usize;
+        (self.mlm_max[r] - self.mlm_lp[r * net.n_c + net.opt_out[it.opt] as usize]) as f64
     }
 
     /// Bricks among `nb` that sit right on / under brick i with the same footprint (a lined-up joint).
@@ -1953,6 +1993,7 @@ impl<'a> State<'a> {
     }
 
     fn add(&mut self, it: Item) -> usize {
+        self.mlm_e += self.mlm_cost(&it);
         let i = match self.free_ids.pop() {
             Some(i) => i,
             None => {
@@ -2067,6 +2108,7 @@ impl<'a> State<'a> {
 
     fn remove(&mut self, i: usize) -> Item {
         let it = *self.item(i);
+        self.mlm_e -= self.mlm_cost(&it);
         self.touch_lock(&it);
         let linked = if self.d.w_conn != 0.0 { self.links(i) } else { Vec::new() };
         if self.d.w_grip != 0.0 {
@@ -2740,7 +2782,7 @@ impl Filler {
                 continue;
             }
             // with the network: log P(part, yaw | the cell's context), once per cell
-            let lpc: Option<Vec<f64>> = d.net.as_ref().map(|net| net.logprobs(&net_features(d, net, &st.kindgrid, y, x, z)));
+            let lpc = cell_logprobs(d, st, y, x, z);
             self.candidates(st, y, x, z, lpc.as_deref(), d.top_k, &mut cands);
             if cands.is_empty() {
                 continue;
@@ -2939,7 +2981,7 @@ fn plan(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
             for (dy, dx, dz) in (0..3).flat_map(|dy| [(dy, 0, 0), (dy, 1, 0), (dy, 0, 1), (dy, 1, 1)]) {
                 if y - dy < 0 || !inbox(y - dy, x - dx, z - dz) || st.owner[d.idx(y - dy, x - dx, z - dz)] >= 0 { continue; }
                 let lpc = lpcs.entry(d.idx(y - dy, x - dx, z - dz)).or_insert_with(||
-                    d.net.as_ref().map(|net| net.logprobs(&net_features(d, net, &st.kindgrid, y - dy, x - dx, z - dz))));
+                    cell_logprobs(d, st, y - dy, x - dx, z - dz));
                 for force in [true, false] {
                     filler.force = force;
                     filler.candidates(st, y - dy, x - dx, z - dz, lpc.as_deref(), 3, &mut cands);
@@ -3169,7 +3211,7 @@ fn resolve(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<(usize,
     let mut opts: Vec<Vec<Cand>> = Vec::with_capacity(cells.len());
     let mut empty = Vec::with_capacity(cells.len());
     for &(y, x, z) in &cells {
-        let lpc: Option<Vec<f64>> = d.net.as_ref().map(|net| net.logprobs(&net_features(d, net, &st.kindgrid, y, x, z)));
+        let lpc = cell_logprobs(d, st, y, x, z);
         filler.candidates(st, y, x, z, lpc.as_deref(), ask, &mut cands);
         let mut v: Vec<_> = cands.iter().map(|&(_, k, oy, ox, oz, resid)| {
             let (stat, fit, colour) = filler.score(st, lpc.as_deref(), k, oy, ox, oz, resid);
@@ -3341,7 +3383,7 @@ fn orient(st: &mut State, filler: &mut Filler, boxes: &[Vec<usize>], rng: &mut R
         return None;
     }
     let ra = st.remove(i);
-    let lpc: Option<Vec<f64>> = d.net.as_ref().map(|net| net.logprobs(&net_features(d, net, &st.kindgrid, a.y, a.x, a.z)));
+    let lpc = cell_logprobs(d, st, a.y, a.x, a.z);
     let mut best: Option<(f64, usize, i32)> = None;
     for &k in &boxes[a.opt] {
         if k == a.opt || !cells_free(st, k, a.y, a.x, a.z) {
@@ -4554,6 +4596,32 @@ unsafe fn run(p: &Problem) -> i32 {
                     st.v14_share = p.v14_share.clamp(0.0, 0.9);
                 }
             }
+            if let (Some(cb), Some(net)) = (p.mlm_cb, d.net.as_ref()) {
+                if p.v14_every > 0 && (it / p.guide_every as i64) % (2 * p.v14_every as i64) == 0 {
+                    let mut items = Vec::with_capacity(st.live.len() * 7);
+                    for &i in &st.live {
+                        let t = st.item(i);
+                        let o = &d.opts[t.opt];
+                        items.extend_from_slice(&[net.opt_out[t.opt], t.y, t.x, t.z, o.h, o.w, o.d]);
+                    }
+                    // surface cells only (a wanted cell with a side open): the inside is never seen, the net ranks there
+                    let cells: Vec<i32> = d.want_cells.iter().filter(|&&c| {
+                        let (y, x, z) = ((c / (d.x * d.z) as usize) as i32, ((c / d.z as usize) % d.x as usize) as i32, (c % d.z as usize) as i32);
+                        [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)].iter()
+                            .any(|&(a, b, e)| !d.inside(y + a, x + b, z + e) || !d.want[d.idx(y + a, x + b, z + e)])
+                    }).map(|&c| c as i32).collect();
+                    st.mlm_lp = vec![0f32; cells.len() * net.n_c];
+                    cb(st.live.len() as i32, items.as_ptr(), cells.len() as i32, cells.as_ptr(), st.mlm_lp.as_mut_ptr());
+                    st.mlm_row = vec![-1; d.tbits.len()];
+                    for (r, &c) in cells.iter().enumerate() {
+                        st.mlm_row[c as usize] = r as i32;
+                    }
+                    st.mlm_max = st.mlm_lp.chunks(net.n_c).map(|r| r.iter().cloned().fold(f32::NEG_INFINITY, f32::max)).collect();
+                    st.w_mlm = p.w_mlm * d.style;
+                    st.mlm_e = st.live.iter().map(|&i| st.mlm_cost(st.item(i))).sum();
+                    e = st.energy();                                   // the term's table changed
+                }
+            }
             st.refresh_guide(&filler.floor);
         }
         let before = if d.opt_watch.is_empty() { [0f64; 8] } else { terms(&st) };
@@ -4678,7 +4746,7 @@ unsafe fn run(p: &Problem) -> i32 {
     }
     let kl = st.kl();
     let info = [
-        e,
+        e - st.w_mlm * st.mlm_e,                                   // comparable with runs without the masked-model term
         accepted as f64 / iters.max(1) as f64,
         t_start,
         kl,
@@ -4737,5 +4805,5 @@ pub unsafe extern "C" fn e2l_sample(p: *const Problem) -> i32 {
 /// The layout version: Python checks it before calling.
 #[no_mangle]
 pub extern "C" fn e2l_abi() -> i32 {
-    26
+    28
 }

@@ -205,5 +205,44 @@ def train(epochs: int = 10, batch: int = 512, lr: float = 1e-3) -> None:
                        OUT / "model.pt")
 
 
+_SCORER = {}
+
+
+def cell_logprobs(fill: np.ndarray, items: np.ndarray, cells: np.ndarray) -> np.ndarray:
+    """log P(class) per cell (len(cells) x (tokens + other)) for the sampler: items (N, 7) [class, y, x, z, h, w, d]
+    of the parts built now, cells flat (y, x, z) indices into fill.  Parts covering the cell are left out (the cell is
+    asked about when it is to be refilled)."""
+    torch, MLM = _torch()
+    if "m" not in _SCORER:
+        ck = torch.load(OUT / "model.pt", weights_only=False)
+        m = MLM(len(ck["tokens"])); m.load_state_dict(ck["state_dict"]); m.eval()
+        torch.set_num_threads(4)                                               # two builds run at once
+        _SCORER["m"] = m
+    m = _SCORER["m"]
+    H, X, Z = fill.shape
+    q = np.stack([cells // (X * Z), (cells // Z) % X, cells % Z], 1)
+    pad = np.pad(fill, [(-lo, hi) for lo, hi in (WY, WX, WZ)])
+    view = np.lib.stride_tricks.sliding_window_view(pad, (WY[1] - WY[0], WX[1] - WX[0], WZ[1] - WZ[0]))
+    win = view[q[:, 0], q[:, 1], q[:, 2]].reshape(len(q), -1).astype(np.float32)
+    win = np.round(win * 64) / 64                                              # as trained (uint8 / 64)
+    out = np.empty((len(q), m.n_tok + 1), np.float32)
+    o = items[:, 1:4]
+    for k in range(0, len(q), 512):
+        off = o[None] - q[k:k + 512, None]                                    # (c, N, 3)
+        cover = ((off <= 0) & (off + items[None, :, 4:7] > 0)).all(-1)            # parts holding the cell itself: it is asked
+        dist = np.where((np.abs(off) <= R).all(-1) & ~cover, np.abs(off).sum(-1), 1 << 20)   # about when it is refilled
+        nb = np.argsort(dist, 1, kind="stable")[:, :N_CTX] if dist.shape[1] else np.zeros((len(dist), 0), int)
+        ok = np.take_along_axis(dist, nb, 1) < (1 << 20)
+        ctx = np.full((len(nb), N_CTX, 7), -1, np.int64)
+        n = nb.shape[1]
+        ctx[:, :n, 0] = np.where(ok, items[nb, 0], -1)
+        ctx[:, :n, 1:4] = np.take_along_axis(off, nb[..., None], 1)
+        ctx[:, :n, 4:7] = np.minimum(items[nb, 4:7], 32)
+        with torch.inference_mode():
+            z = m(torch.from_numpy(win[k:k + 512]), torch.from_numpy(ctx), torch.zeros(ctx.shape[:2], dtype=torch.bool))
+            out[k:k + 512] = torch.log_softmax(z, -1).numpy()
+    return out
+
+
 if __name__ == "__main__":
     {"dataset": dataset, "train": train}[sys.argv[1]]()

@@ -22,6 +22,7 @@ import os
 import platform
 import shutil
 import subprocess
+import time
 import sys
 from functools import lru_cache
 from pathlib import Path
@@ -29,7 +30,7 @@ from typing import Optional
 
 import numpy as np
 
-ABI = 26
+ABI = 28
 INFO_LEN = 21
 ERR_LAYERS = ("shape", "colour", "support", "direction", "statistics")   # lib.rs N_ERR
 PATHS4_BUCKETS = 8
@@ -68,6 +69,27 @@ def v14_callback(opts):
         except Exception as e:                                                  # noqa: BLE001  (a raise would be lost in ctypes)
             print(f"v14 callback failed: {e!r}", file=_sys.stderr)
     return V14_CB(cb)
+
+
+MLM_CB = C.CFUNCTYPE(None, C.c_int32, C.POINTER(C.c_int32), C.c_int32, C.POINTER(C.c_int32), C.POINTER(C.c_float))
+
+
+def mlm_callback(fill):
+    """The filler's ranking from the masked part model: log P(class | the parts around) for every wanted cell."""
+    import sys as _sys
+    _sys.path[:0] = [str(Path(__file__).resolve().parents[2] / "tools" / "learn")]
+    from mlm_parts import cell_logprobs
+
+    def cb(n_items, items, n_cells, cells, out):
+        try:
+            it = np.ctypeslib.as_array(items, (max(n_items, 1) * 7,))[:n_items * 7].reshape(-1, 7).astype(np.int64)
+            cs = np.ctypeslib.as_array(cells, (n_cells,)).astype(np.int64)
+            t0 = time.time(); lp = cell_logprobs(fill, it, cs)
+            print(f"mlm: {n_cells} cells, {n_items} parts, {time.time() - t0:.2f}s", file=_sys.stderr)
+            np.ctypeslib.as_array(out, (lp.size,))[:] = lp.ravel()
+        except Exception as e:                                                  # noqa: BLE001  (a raise would be lost in ctypes)
+            print(f"mlm callback failed: {e!r}", file=_sys.stderr)
+    return MLM_CB(cb)
 
 
 class Problem(C.Structure):
@@ -164,6 +186,8 @@ class Problem(C.Structure):
         ("cell_area", _P(C.c_int32)),                                   # semantic area per cell; null = per-cell bonus
         ("area_aff", _P(C.c_float)),                                    # per area x option: its part is what it shows
         ("v14_share", C.c_double), ("v14_every", C.c_int32), ("v14_cb", V14_CB),   # learned realism in the guide (v14_blame.py)
+        ("mlm_cb", MLM_CB),                                             # masked part model ranks the filler's parts (mlm_parts.py)
+        ("w_mlm", C.c_double),                                          # and each part's regret under it in the energy (x style)
     ]
 
 
@@ -548,6 +572,9 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
     if getattr(weights, "v14", 0.0) > 0 and getattr(weights, "guide", 0.0) > 0 and V14_MODEL.exists():   # 4 judge calls per run
         cb = v14_callback(opts); keep.append(cb)
         size_fields.update(v14_share=weights.v14, v14_every=max(1, iters // max(1000, iters // 400) // 4), v14_cb=cb)
+    if getattr(weights, "mlm", False) and getattr(weights, "guide", 0.0) > 0 and net:   # same 4 calls per run as V14
+        cb = mlm_callback(np.asarray(target.fill, np.float64)); keep.append(cb)
+        size_fields.update(mlm_cb=cb, w_mlm=getattr(weights, "mlm_weight", 0.0), v14_every=max(1, iters // max(1000, iters // 400) // 4))
     size_fields.update(p_guide=getattr(weights, "guide", 0.0), guide_every=max(1000, iters // 400),
                        err_cell=_ptr(err_cell, C.c_double), err_item=_ptr(err_item, C.c_double),
                        p_resolve=getattr(weights, "resolve", 0.0), p_orient=getattr(weights, "orient", 0.0))
