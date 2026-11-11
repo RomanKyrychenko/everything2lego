@@ -1,0 +1,10 @@
+{
+ "google/siglip2-so400m-patch14-384|views3|dim0.4": {
+  "score": "ctx",
+  "thresholds": {
+   "Plants & Trees": null,
+   "Wheels and Tyres": null,
+   "Windows and Doors": 0.8302311301231384
+  }
+ }
+}

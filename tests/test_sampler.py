@@ -136,7 +136,7 @@ def test_a_wheel_on_a_holder_is_held_at_its_side():
     holder = _vp("4488.dat").orients[0]
     hx, hy, hz, dx, dz, _ = holder.sides[0]
     assert (dx, dz) == (1, 0)                          # its bar points +x
-    wheel = next(v for v in sampler.vocabulary() if v.part.companion == "3641.dat" and
+    wheel = next(v for v in sampler.vocabulary() if v.part.companion and v.part.companion[0][0] == "3641.dat" and
                  any(o.size[1] % 2 == 0 for o in v.orients))
     o = next(o for o in wheel.orients for s in o.sides
              if (s[3], s[4]) == (-1, 0) and sampler.FITS[s[5], sampler.CONNECTORS["bar:M"]])
@@ -162,3 +162,157 @@ def test_region_kind_overrides_object_kind():
     import pytest
     with pytest.raises(ValueError, match="unknown region kinds"):
         sampler.Target(want, np.full(want.shape, 4), want.copy(), region_kind=bad)
+
+
+@pytest.mark.skipif(not native.available(), reason="native sampler not built")
+def test_mirror_images_and_mirror_walk_keeps_its_energy():
+    """A wing's mirror image is the other wing, a brick's is itself; a walk with mirror moves on a target symmetric
+    about x keeps its energy."""
+    pytest.importorskip("brickagent")
+    opts = [(v, o) for p in ("3001.dat", "41769.dat", "41770.dat") for v in [_vp(p)] for o in v.orients]
+    t = native.mirror_table(opts)
+    for i, (v, o) in enumerate(opts):
+        want = {"3001.dat": "3001.dat", "41769.dat": "41770.dat", "41770.dat": "41769.dat"}[v.part.ldraw]
+        assert all(opts[j][0].part.ldraw == want and opts[j][1].size == o.size for j in t[i])
+    want = np.zeros((6, 10, 6), dtype=bool); want[:4, 1:9, 1:5] = True; want[4:, 2:4, 2:4] = want[4:, 6:8, 2:4] = True
+    target = sampler.Target(want, np.full(want.shape, 4), want.copy())
+    w = sampler.Weights(); w.mirror = 0.3
+    _, info = sampler.sample(target, _models(), iters=3000, seed=2, k_models=1, warmup=50, n_special=60,
+                             engine="native", weights=w)
+    assert info["energy"] == pytest.approx(info["energy_recomputed"], rel=1e-6)
+
+
+@pytest.mark.skipif(not native.available(), reason="native sampler not built")
+def test_mirror_planes_per_part(capfd):
+    """Two boxes side by side, 4 and 6 studs wide, 6 and 3 plates tall: with parts each is symmetric about its own
+    centre (x = 1.5 and 6.5 studs), not about the pair's; a walk with mirror and echo moves keeps its energy."""
+    want = np.zeros((6, 10, 4), dtype=bool); want[:, :4] = True; want[:3, 4:] = True
+    part = np.full(want.shape, -1, np.int16); part[:, :4][want[:, :4]] = 0; part[:, 4:][want[:, 4:]] = 1
+    target = sampler.Target(want, np.full(want.shape, 4), want.copy(), cell_part=part)
+    w = sampler.Weights(); w.mirror = 0.3; w.echo = 0.1
+    _, info = sampler.sample(target, _models(), iters=2000, seed=2, k_models=1, warmup=50, n_special=60,
+                             engine="native", weights=w)
+    assert info["energy"] == pytest.approx(info["energy_recomputed"], rel=1e-6)
+    err = capfd.readouterr().err
+    rows = {int(l.split()[1].rstrip(":")): l.split("planes")[-1].strip() for l in err.splitlines() if l.startswith("  part ")}
+    assert rows == {0: "x = 1.5, z = 1.5", 1: "x = 6.5, z = 1.5"}, err
+
+
+@pytest.mark.skipif(not native.available(), reason="native sampler not built")
+def test_mirror_pair_of_parts(capfd):
+    """Two staircases, mirror images of each other across x = 4.5 studs with a gap between, as two parts: the pair's
+    plane is found (all samples map), and a walk with mirror moves across it keeps its energy."""
+    want = np.zeros((6, 10, 4), dtype=bool)
+    for x, hgt in enumerate((6, 4, 3, 2)):
+        want[:hgt, x] = want[:hgt, 9 - x] = True
+    part = np.full(want.shape, -1, np.int16); part[:, :5][want[:, :5]] = 0; part[:, 5:][want[:, 5:]] = 1
+    target = sampler.Target(want, np.full(want.shape, 4), want.copy(), cell_part=part)
+    w = sampler.Weights(); w.mirror = 0.3
+    _, info = sampler.sample(target, _models(), iters=2000, seed=2, k_models=1, warmup=50, n_special=60,
+                             engine="native", weights=w)
+    assert info["energy"] == pytest.approx(info["energy_recomputed"], rel=1e-6)
+    err = capfd.readouterr().err
+    assert [l for l in err.splitlines() if l.startswith("mirror pair")] == ["mirror pair parts 0 / 1: x = 4.5, 100 %"], err
+
+
+@pytest.mark.skipif(not native.available(), reason="native sampler not built")
+def test_error_guided_walk_with_resolve_keeps_its_energy_and_maps_its_error():
+    """With error-guided moves the energy kept move by move is still the recomputed one, and the error map has one
+    row per placement and every cell's shape error where the build differs from the target."""
+    want = np.zeros((6, 8, 6), dtype=bool); want[:4, 1:7, 1:5] = True; want[4:, 2:5, 2:4] = True
+    target = sampler.Target(want, np.full(want.shape, 4), want.copy())
+    w = sampler.Weights(); w.guide = 0.7; w.resolve = 0.2; w.orient = 0.1
+    ps, info = sampler.sample(target, _models(), iters=3000, seed=1, k_models=1, warmup=50, n_special=60,
+                              engine="native", weights=w)
+    assert info["energy"] == pytest.approx(info["energy_recomputed"], rel=1e-6)
+    assert info["_part_error"].shape == (len(ps), len(native.ERR_LAYERS))
+    cell = info["_err_cell"]
+    assert cell.shape == want.shape + (len(native.ERR_LAYERS),) and (cell >= 0).all()
+    assert (cell[..., 0] > 0).sum() > 0 or info["fidelity"] == 0
+
+
+@pytest.mark.skipif(not native.available(), reason="native sampler not built")
+def test_locked_parts_stay_and_a_region_rebuilt_splices_back():
+    """Parts on locked cells come out as they went in; a region rebuilt inside a fixed build leaves the parts
+    outside it alone and overlaps none of them, and the whole-build energy of the result is measured as it stands."""
+    from everything2lego import region_rebuild as rr
+    want = np.zeros((6, 8, 6), dtype=bool); want[:4, 1:7, 1:5] = True; want[4:, 2:5, 2:4] = True
+    target = sampler.Target(want, np.full(want.shape, 4), want.copy())
+    kw = dict(k_models=1, n_special=60, engine="native")
+    ps, info = sampler.sample(target, _models(), iters=2000, seed=1, warmup=50, **kw)
+    key = lambda p: (p.part.ldraw, p.rotation_deg, p.y_plate, p.x_stud, p.z_stud)
+    ev = rr.evaluate(target, _models(), ps, sampler.sample, **kw)
+    assert ev["energy"] == pytest.approx(ev["energy_recomputed"], rel=1e-6)
+    box = (slice(0, 4), slice(1, 4), slice(1, 5))
+    out, ri = rr.rebuild(target, _models(), ps, box, sampler.sample, iters=2000, **kw)
+    assert ri["energy"] == pytest.approx(ri["energy_recomputed"], rel=1e-6)
+    assert {key(p) for p in ps if not rr._inside(p, box)} <= {key(p) for p in out}
+    assert all(rr._inside(p, box) for p in out if key(p) not in {key(q) for q in ps})
+
+
+@pytest.mark.skipif(not native.available(), reason="native sampler not built")
+def test_semantic_labels_draw_their_parts():
+    """Cells labelled 'Windows and Doors' in a wall get a window with the semantic bonus on, and the energy kept move
+    by move (bonus included) is the recomputed one."""
+    want = np.ones((6, 6, 1), dtype=bool)
+    cat = np.full(want.shape, -1, np.int8); cat[:, 2:4, :] = 0
+    target = sampler.Target(want, np.full(want.shape, 4), want.copy(), cell_cat=cat, categories=("Windows and Doors",))
+    stats = sampler.Stats(_models())
+    vocab = sampler.select_vocabulary(None, 0) + (_vp("60592.dat"),)
+    def windows(sem):
+        w = sampler.Weights(); w.sem = sem
+        got, info, _ = native.run(target, stats, vocab, None, w, iters=5000, warmup=20, seed=0, t_start_share=0.05,
+                                  t_final_share=0.002, top_k=12, log_every=50,
+                                  opts_logprior=sampler.option_logprior(vocab, stats, None))
+        assert info["energy"] == pytest.approx(info["energy_recomputed"], rel=1e-6)
+        return [(x, z) for v, o, c, y, x, z in got if v.category == "Windows and Doors"]
+    assert windows(0.0) == []
+    assert (2, 0) in windows(50.0)
+
+
+@pytest.mark.skipif(not native.available(), reason="native sampler not built")
+def test_semantic_area_bonus_saturates_with_one_part():
+    """A 24-cell window area: a 12-cell window in it earns 12 * w, a second window earns nothing more in area mode
+    (24 * w per cell)."""
+    from everything2lego.pack import Placement
+    win = _vp("60592.dat")                                      # 1 x 2 x 2 window: 12 cells
+    def bonus(n_win, area):
+        want = np.zeros((12, 2, 1), bool); want[:6 * n_win] = True
+        target = sampler.Target(want, np.full(want.shape, 4), want.copy(), cell_cat=np.zeros(want.shape, np.int8),
+                                categories=("Windows and Doors",))
+        stats, vocab = sampler.Stats(_models()), sampler.select_vocabulary(None, 0) + (win,)
+        def energy(sem):
+            w = sampler.Weights(); w.sem, w.sem_area = sem, area
+            got, info, _ = native.run(target, stats, vocab, None, w, iters=0, warmup=0, seed=0, t_start_share=0.05,
+                                      t_final_share=0.002, top_k=12, log_every=50,
+                                      init_placements=[Placement(win.part, 4, 0, 0, 6 * i, 2, 1, 0) for i in range(n_win)],
+                                      opts_logprior=sampler.option_logprior(vocab, stats, None))
+            assert len(got) == n_win and info["energy"] == pytest.approx(info["energy_recomputed"])
+            return info["energy"]
+        return energy(0.0) - energy(2.0)
+    assert bonus(1, True) == pytest.approx(24) and bonus(2, True) == pytest.approx(24)
+    assert bonus(2, False) == pytest.approx(48)
+
+
+@pytest.mark.skipif(not native.available(), reason="native sampler not built")
+def test_part_affinity_weights_the_area_bonus():
+    """With per-part affinity a window that is half what the area shows earns half per cell, up to the cap of its
+    best part's cells (12): one window 12 * 0.5, two 24 * 0.5 = the cap."""
+    from everything2lego.pack import Placement
+    win = _vp("60592.dat")
+    def bonus(n_win):
+        want = np.zeros((12, 2, 1), bool); want[:6 * n_win] = True
+        target = sampler.Target(want, np.full(want.shape, 4), want.copy(), cell_cat=np.zeros(want.shape, np.int8),
+                                categories=("Windows and Doors",), cell_area=np.zeros(want.shape, np.int32),
+                                area_aff=np.array([[0.5]], np.float32), aff_parts=("60592.dat",))
+        stats, vocab = sampler.Stats(_models()), sampler.select_vocabulary(None, 0) + (win,)
+        def energy(sem):
+            w = sampler.Weights(); w.sem, w.sem_area = sem, True
+            got, info, _ = native.run(target, stats, vocab, None, w, iters=0, warmup=0, seed=0, t_start_share=0.05,
+                                      t_final_share=0.002, top_k=12, log_every=50,
+                                      init_placements=[Placement(win.part, 4, 0, 0, 6 * i, 2, 1, 0) for i in range(n_win)],
+                                      opts_logprior=sampler.option_logprior(vocab, stats, None))
+            assert info["energy"] == pytest.approx(info["energy_recomputed"])
+            return info["energy"]
+        return energy(0.0) - energy(2.0)
+    assert bonus(1) == pytest.approx(12) and bonus(2) == pytest.approx(24)

@@ -83,7 +83,7 @@ def outline_yaw(mesh: trimesh.Trimesh, *, samples: int = 40000, max_degrees: flo
     textured facade whose normals scatter still has a square plan.
     Returns the angle to turn the mesh by (so that applying it squares
     the plan); 0 when no heading is clearly better."""
-    pts, _ = trimesh.sample.sample_surface(mesh, samples)
+    pts, _ = trimesh.sample.sample_surface(mesh, samples, seed=0)   # seeded: every stage must turn the mesh the same way
     pts = np.asarray(pts)
     y = pts[:, 1]
     lo, hi = np.percentile(y, 20), np.percentile(y, 70)   # walls, not roof or ground
@@ -174,6 +174,32 @@ def _fit_transform(mesh: trimesh.Trimesh, max_studs: int) -> np.ndarray:
     return T
 
 
+def grid_phase(mesh: trimesh.Trimesh, max_studs: int, steps: int = 4) -> np.ndarray:
+    """The sub-cell shift (x, y, z in cells, multiples of 1/steps) of the mesh against the grid that leaves the fewest
+    cells partly filled (10-90 %): walls then fall on cell faces instead of mid-cell.  Cell boundaries are at integers
+    of `_fit_transform`'s frame shifted by the result."""
+    from scipy.ndimage import binary_closing, binary_fill_holes
+    m = mesh.copy()
+    m.apply_transform(_fit_transform(mesh, max_studs))
+    m.apply_translation([-0.5 / steps] * 3)              # trimesh centres voxels on multiples of the pitch
+    v = m.voxelized(pitch=1.0 / steps)
+    surf = v.matrix
+    solid = binary_fill_holes(binary_closing(surf, iterations=1) | surf).astype(np.int32)
+    start = np.rint(v.transform[:3, 3] * steps).astype(int)   # absolute fine index of the matrix's first cell
+    best = None
+    for shift in np.ndindex(steps, steps, steps):
+        # fine cells grouped into whole cells with boundaries at absolute fine index = k*steps - shift
+        pad = [((st + sh) % steps, 0) for st, sh in zip(start, shift)]
+        g = np.pad(solid, pad)
+        g = np.pad(g, [(0, -d % steps) for d in g.shape])
+        X, Y, Z = (d // steps for d in g.shape)
+        fr = g.reshape(X, steps, Y, steps, Z, steps).sum(axis=(1, 3, 5)) / steps ** 3
+        n = int(((fr > 0.1) & (fr < 0.9)).sum())
+        if best is None or n < best[0]:
+            best = (n, shift)
+    return np.array(best[1], float) / steps
+
+
 def _face_color_lookup(mesh: trimesh.Trimesh, points: np.ndarray,
                         face_ids: np.ndarray) -> np.ndarray:
     """RGB per query point sampled directly from the face at the given index.
@@ -211,8 +237,11 @@ def voxelize(mesh: trimesh.Trimesh, max_studs: int = 32, color_samples: int = 20
              hollow: bool = False, wall_thickness: int = 2,
              keep_floor: bool = True, color_k: int = 5,
              color_mode: str = "closest_face", subvoxels: int = 1,
-             align: bool = True) -> VoxelGrid:
+             align: bool = True, offset=(0.0, 0.0, 0.0)) -> VoxelGrid:
     """Voxelize `mesh` at LEGO scale and return a colored grid.
+
+    `offset` shifts the mesh (x, y, z, in cells) against the grid before voxelising.  The grid's metadata carries
+    "mesh_to_voxel", the 4x4 map from (aligned) mesh coordinates to cell indices: floor of it is the cell a point is in.
 
     `align` first squares the mesh's walls to the x/z axes (`align_to_axes`).
 
@@ -242,12 +271,23 @@ def voxelize(mesh: trimesh.Trimesh, max_studs: int = 32, color_samples: int = 20
     if subvoxels < 1:
         raise ValueError("subvoxels must be >= 1")
     T = _fit_transform(mesh, max_studs)
+    T[:3, 3] += offset
+    # shrink 1e-4 about the centre: a face exactly on a cell face (the flat bottom, once shifted) counts in the cell
+    # inside the mesh, not as a touched empty row outside it
+    c = (np.c_[mesh.bounds, np.ones(2)] @ T.T)[:, :3].mean(axis=0)
+    T = np.diag([*(1 - 1e-4,) * 3, 1.0]) @ T
+    T[:3, 3] += c * 1e-4
     scaled = mesh.copy()
     scaled.apply_transform(T)
 
     pitch = 1.0 / subvoxels
     voxels = scaled.voxelized(pitch=pitch)
     voxels.fill()  # solid interior
+    # cell (0, 0, 0)'s low corner in the scaled frame: fine voxel 0's centre minus half a fine pitch
+    to_cells = np.eye(4)
+    to_cells[:3, :3] /= pitch * subvoxels
+    to_cells[:3, 3] = -(voxels.indices_to_points(np.zeros((1, 3)))[0] - pitch / 2) / (pitch * subvoxels)
+    mesh_to_voxel = to_cells @ T
 
     indices = voxels.sparse_indices  # (N, 3), integers in [0, dim)
     if len(indices) == 0:
@@ -305,7 +345,7 @@ def voxelize(mesh: trimesh.Trimesh, max_studs: int = 32, color_samples: int = 20
         return VoxelGrid(palette_idx=palette_idx, metadata={
             "method": "mesh", "color_mode": "closest_face",
             "max_studs": max_studs, "subvoxels": subvoxels,
-            "watertight": bool(mesh.is_watertight),
+            "watertight": bool(mesh.is_watertight), "mesh_to_voxel": mesh_to_voxel,
         })
 
     # Legacy path: random surface sampling + KDTree.
@@ -354,7 +394,8 @@ def voxelize(mesh: trimesh.Trimesh, max_studs: int = 32, color_samples: int = 20
     palette_idx[occ[:, 0], occ[:, 1], occ[:, 2]] = idx
 
     return VoxelGrid(palette_idx=palette_idx, metadata={"method": "mesh", "color_samples": color_samples,
-                                                      "max_studs": max_studs, "watertight": bool(mesh.is_watertight)})
+                                                      "max_studs": max_studs, "watertight": bool(mesh.is_watertight),
+                                                      "mesh_to_voxel": mesh_to_voxel})
 
 
 def hollow_occupancy(occupied: np.ndarray, wall_thickness: int = 2,
@@ -537,52 +578,59 @@ def clean_mesh(mesh: trimesh.Trimesh, *,
     return m
 
 
-def project_photo_colors(mesh: trimesh.Trimesh, image_path: str | Path, *,
-                          forward_axis: str = "-z", flip_v: bool = False,
-                          crop_to_subject: bool = True,
-                          background_tolerance: int = 30,
-                          fallback_rgb: tuple[int, int, int] = (200, 200, 200),
-                          facing_threshold: float = -0.25,
-                          inpaint_unknown: bool = True,
-                          ) -> trimesh.Trimesh:
-    """Paint mesh vertex colors by projecting a source photo onto its
-    canonical front view.
+def view_frame(lat: float, lon: float) -> np.ndarray:
+    """(3, 3) rows right, up, toward-camera of an orthographic camera at `lat` above and `lon` round (degrees) from +z,
+    y up: (0, 0) is the front view project_photo_colors assumed."""
+    la, lo = np.radians(lat), np.radians(lon)
+    f = np.array([np.cos(la) * np.sin(lo), np.sin(la), np.cos(la) * np.cos(lo)])
+    r = np.cross([0.0, 1.0, 0.0], f); r /= np.linalg.norm(r)
+    return np.stack([r, np.cross(f, r), f])
 
-    Assumes the mesh sits in a normalized frame where one axis is the camera
-    "look" direction (e.g. Hunyuan3D-2's meshes have +Y up and the input view
-    looking along -Z). For each vertex, we compute its (u, v) position on the
-    image plane perpendicular to `forward_axis`, sample the photo there, and
-    write the RGB back as vertex colors.
 
-    A single photo can't colour what it can't see, so two kinds of vertex
-    are treated as UNKNOWN rather than painted wrong:
-      - back-facing (vertex normal · view direction < `facing_threshold`),
-        which would otherwise copy whatever front pixel lies in front of them.
-        The threshold is negative on purpose: photos are rarely frontal, so a
-        surface at a grazing angle to the nominal axis (a roof seen from a
-        drone, a side wall in a 3/4 view) is usually still visible and its
-        sample is right; only clearly averted faces are discarded;
-      - background hits (the sampled pixel is within `background_tolerance`
-        of the image's corner-median colour) — the mesh poking outside the
-        photo's silhouette, which on a background-removed photo is pure white.
-    With `inpaint_unknown`, unknown vertices take the colour of the nearest
-    known vertex (Euclidean, over the mesh).  For buildings this is the right
-    prior: the back wall is the same brick as the front, the back pitch the
-    same slate.  Without it they fall back to `fallback_rgb`.
-    """
-    img = np.asarray(Image.open(image_path).convert("RGB"))
-    # Background estimate from the UNCROPPED corners, same as the cropper.
+def background_rgb(img: np.ndarray) -> np.ndarray:
+    """The photo's background colour: the median of its four corners (of the uncropped photo)."""
     s = min(24, img.shape[0] // 4, img.shape[1] // 4)
-    corners = np.concatenate([
-        img[:s, :s].reshape(-1, 3), img[:s, -s:].reshape(-1, 3),
-        img[-s:, :s].reshape(-1, 3), img[-s:, -s:].reshape(-1, 3),
-    ], axis=0)
-    bg_rgb = np.median(corners, axis=0).astype(np.int16)
-    if crop_to_subject:
-        img = _crop_to_subject(img, tolerance=background_tolerance)
-    h, w = img.shape[:2]
+    return np.median(np.concatenate([img[:s, :s].reshape(-1, 3), img[:s, -s:].reshape(-1, 3),
+                                     img[-s:, :s].reshape(-1, 3), img[-s:, -s:].reshape(-1, 3)]), 0).astype(np.int16)
 
-    verts = np.asarray(mesh.vertices, dtype=np.float32)
+
+def fit_photo_view(verts: np.ndarray, subject: np.ndarray, size: int = 128, n_points: int = 60000,
+                   lats=range(0, 50, 5), lons=range(-180, 180, 5)) -> tuple[tuple[float, float], float, float]:
+    """The camera (lat, lon) whose silhouette of the mesh, fitted to the photo's extents as photo_pixels fits it, best
+    overlaps the photo's subject (bool mask, the photo cropped to it): an image-to-3D model leaves the mesh in the object's frame, not
+    the camera's, so a photo from above and to the side is not the front view.  Grid, then +-4 degrees by 1; the
+    camera above the ground the object stands on (lat >= 0: from below, a mirror view fits a symmetric object as well).
+    -> ((lat, lon), IoU, IoU of the front view)."""
+    from PIL import Image as _Im
+    from scipy.ndimage import binary_closing, binary_fill_holes
+    k = size / max(subject.shape); H, W = max(8, round(subject.shape[0] * k)), max(8, round(subject.shape[1] * k))
+    target = np.asarray(_Im.fromarray(subject).resize((W, H))) > 0
+    v = np.asarray(verts, np.float64)
+    v = v[np.random.default_rng(0).permutation(len(v))[:n_points]]
+    probe = np.zeros((H, W, 3), np.uint8)
+
+    def iou(view):
+        px, py, _ = photo_pixels(v, probe, view=view)
+        m = np.zeros((H, W), bool); m[py, px] = True
+        m = binary_fill_holes(binary_closing(m, iterations=2))   # shortcut: points splatted, not faces filled
+        return (m & target).sum() / max(1, (m | target).sum())
+    sc = {(float(a), float(b)): iou((a, b)) for a in lats for b in lons}
+    la, lo = max(sc, key=sc.get)
+    sc.update({(la + a, lo + b): iou((la + a, lo + b)) for a in range(-4, 5) for b in range(-4, 5) if la + a >= min(lats)})
+    best = max(sc, key=sc.get)
+    return best, float(sc[best]), float(sc.get((0.0, 0.0), iou((0, 0))))
+
+
+def photo_pixels(verts: np.ndarray, img: np.ndarray, *, forward_axis: str = "-z", flip_v: bool = False,
+                 view: tuple[float, float] | None = None):
+    """Where each vertex of a mesh in its canonical front frame falls in the photo (already cropped to its subject):
+    the mesh's extents fitted to the image, aspect kept -> (px, py, view_dir), or None for a flat mesh.  `view`
+    (lat, lon): the camera (fit_photo_view), in place of `forward_axis`."""
+    h, w = img.shape[:2]
+    verts = np.asarray(verts, dtype=np.float32)
+    if view is not None:
+        R = view_frame(*view); q = verts @ R.T
+        return photo_pixels(np.stack([q[:, 0], q[:, 1], -q[:, 2]], 1), img, flip_v=flip_v)[:2] + (R[2],)
     sign = -1 if forward_axis.startswith("-") else 1
     axis = forward_axis[-1]
     if axis == "z":
@@ -597,9 +645,7 @@ def project_photo_colors(mesh: trimesh.Trimesh, image_path: str | Path, *,
     u_min, u_max = float(u_c.min()), float(u_c.max())
     v_min, v_max = float(v_c.min()), float(v_c.max())
     if u_max <= u_min or v_max <= v_min:
-        rgba = np.tile(list(fallback_rgb) + [255], (len(verts), 1)).astype(np.uint8)
-        out = mesh.copy(); out.visual.vertex_colors = rgba
-        return out
+        return None
 
     # Fit the mesh's horizontal / vertical extents to the image while
     # preserving aspect ratio; short axis is centered.
@@ -621,6 +667,64 @@ def project_photo_colors(mesh: trimesh.Trimesh, image_path: str | Path, *,
     py = py_top if flip_v else (h - 1 - py_top)  # image y grows downward
     py = np.clip(py, 0, h - 1)
 
+    unit = {"x": np.array([1.0, 0, 0]), "y": np.array([0, 1.0, 0]), "z": np.array([0, 0, 1.0])}[axis]
+    return px, py, -sign * unit                  # view_dir: from surface toward camera
+
+
+def project_photo_colors(mesh: trimesh.Trimesh, image_path: str | Path, *,
+                          forward_axis: str = "-z", flip_v: bool = False,
+                          crop_to_subject: bool = True,
+                          background_tolerance: int = 30,
+                          fallback_rgb: tuple[int, int, int] = (200, 200, 200),
+                          facing_threshold: float = -0.25,
+                          inpaint_unknown: bool = True,
+                          view="fit",
+                          ) -> trimesh.Trimesh:
+    """Paint mesh vertex colors by projecting a source photo onto its
+    canonical front view.
+
+    Assumes the mesh sits in a normalized frame where one axis is the camera
+    "look" direction (e.g. Hunyuan3D-2's meshes have +Y up and the input view
+    looking along -Z). For each vertex, we compute its (u, v) position on the
+    image plane perpendicular to `forward_axis`, sample the photo there, and
+    write the RGB back as vertex colors.
+
+    A single photo can't colour what it can't see, so two kinds of vertex
+    are treated as UNKNOWN rather than painted wrong:
+      - back-facing (vertex normal · view direction < `facing_threshold`),
+        which would otherwise copy whatever front pixel lies in front of them.
+        The threshold is negative on purpose: photos are rarely frontal, so a
+        surface at a grazing angle to the nominal axis (a roof seen from a
+        drone, a side wall in a 3/4 view) is usually still visible and its
+        sample is right; only clearly averted faces are discarded;
+      - background hits (the sampled pixel is within `background_tolerance`
+        of the image's corner-median colour) — the mesh poking outside the
+        photo's silhouette, which on a background-removed photo is pure white.
+    `view`: the camera (lat, lon) the photo was taken from; "fit" (default) fits it by silhouette (fit_photo_view)
+    and keeps it when it overlaps the photo better than the front view by 0.02 IoU; None: the front view along
+    `forward_axis`.
+    With `inpaint_unknown`, unknown vertices take the colour of the nearest
+    known vertex (Euclidean, over the mesh).  For buildings this is the right
+    prior: the back wall is the same brick as the front, the back pitch the
+    same slate.  Without it they fall back to `fallback_rgb`.
+    """
+    img = np.asarray(Image.open(image_path).convert("RGB"))
+    # Background estimate from the UNCROPPED corners, same as the cropper.
+    bg_rgb = background_rgb(img)
+    if crop_to_subject:
+        img = _crop_to_subject(img, tolerance=background_tolerance)
+    h, w = img.shape[:2]
+    verts = np.asarray(mesh.vertices, dtype=np.float32)
+    if isinstance(view, str):
+        fv, iou, iou0 = fit_photo_view(verts, np.abs(img.astype(np.int16) - bg_rgb).sum(-1) > background_tolerance)
+        view = fv if iou >= iou0 + 0.02 else None
+    pix = photo_pixels(verts, img, forward_axis=forward_axis, flip_v=flip_v, view=view)
+    if pix is None:
+        rgba = np.tile(list(fallback_rgb) + [255], (len(verts), 1)).astype(np.uint8)
+        out = mesh.copy(); out.visual.vertex_colors = rgba
+        return out
+    px, py, view_dir = pix
+
     colors = np.array(img[py, px], dtype=np.uint8)  # (N, 3), writable copy
 
     # Unknown = background hit OR facing away from the camera.
@@ -638,9 +742,6 @@ def project_photo_colors(mesh: trimesh.Trimesh, image_path: str | Path, *,
         hit_bg = dist_to_bg[py, px] < edge_px
     else:
         hit_bg = bg_mask[py, px]
-    unit = {"x": np.array([1.0, 0, 0]), "y": np.array([0, 1.0, 0]),
-            "z": np.array([0, 0, 1.0])}[axis]
-    view_dir = -sign * unit                      # from surface toward camera
     facing = np.asarray(mesh.vertex_normals, dtype=np.float32) @ view_dir
     back = facing < facing_threshold
     unknown = hit_bg | back
@@ -662,6 +763,7 @@ def project_photo_colors(mesh: trimesh.Trimesh, image_path: str | Path, *,
     out.metadata["projection_unknown_frac"] = float(unknown.mean())
     out.metadata["projection_back_frac"] = float(back.mean())
     out.metadata["projection_bg_frac"] = float(hit_bg.mean())
+    out.metadata["projection_view"] = None if view is None else [float(x) for x in view]
     return out
 
 

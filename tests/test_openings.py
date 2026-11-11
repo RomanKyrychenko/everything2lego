@@ -19,7 +19,8 @@ def target(mesh, studs=30):
 def front_wall(t):
     walls = [r for r in RegionDetector().detect(t)
              if isinstance(r, PlanarRegion) and r.is_vertical]
-    return next(r for r in walls if openings.wall_frame(r, t).other == 20)
+    front = t.voxel_grid.occupied().shape[2] - 1           # the +z face: the grid's last row of cells
+    return next(r for r in walls if openings.wall_frame(r, t).other == front)
 
 
 def _window_rows(frames):

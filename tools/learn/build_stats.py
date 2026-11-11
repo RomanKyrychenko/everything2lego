@@ -1,0 +1,182 @@
+"""Readable statistics of a build next to real building sets, ranked by how far outside the real range it falls.
+
+Each statistic is something you can see in a render: the mix of bricks / plates / tiles / slopes / round / 1x1
+parts, how long the bricks are, how many studded tops are left bare, how often a brick sits exactly on a brick of
+the same size (stacked joints instead of a bonded wall), how many parts are mounted sideways, colours per 100 parts.
+
+    .venv-arm/bin/python tools/learn/build_stats.py build.ldr [--kind building --n 150] [--extra-ref brickbench]
+
+--extra-ref brickbench adds the BrickBench (kulits/BrickBench-Runs, 'set' setting) agent-designed builds of building
+tasks as a second reference -- below human design quality, so a reference for "designed", not a target.
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import sqlite3
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+import numpy as np
+
+HERE = Path(__file__).resolve().parent
+sys.path[:0] = [str(HERE), str(HERE.parent / "set_study")]
+DATA = Path("/Volumes/PRO-G40/lego_data")
+_cat: dict = {}; _bb: dict = {}
+BRICKBENCH = DATA / "brickbench"                                                  # <agent>/set-XXX/model.mpd
+BB_AGENTS = ("astra", "opus55", "sol61", "gemini")
+# a set task is a building when one of its whole entities (from the task's questions) is one of these
+BB_BUILDING = {"castle", "gatehouse", "fortress", "mill", "house", "houses", "cottage", "diner", "restaurant", "store",
+               "pizzeria", "bar", "buildings", "town", "hacienda", "shop", "lobby", "booth"}
+
+
+def brickbench_buildings() -> list[Path]:
+    """model.mpd of BrickBench set tasks tagged as buildings, for the agents in BB_AGENTS that are downloaded."""
+    import json
+    tasks = json.load(open(BRICKBENCH / "set_tasks.json"))
+    ids = [t["id"] for t in tasks if any(q["kind"] == "entity" and q["subtype"] == "whole" and q["key"] in BB_BUILDING
+                                         for q in t["questions"])]
+    return [f for a in BB_AGENTS for i in ids if (f := BRICKBENCH / a / i / "model.mpd").exists()]
+
+
+def category(name: str) -> str:
+    """Rebrickable category of an LDraw part ('' when unknown)."""
+    if name not in _cat:
+        db = sqlite3.connect(str(DATA / "parts.sqlite"))
+        r = db.execute("select p.category from ldraw_name l join part p on p.part_num = l.part_num where l.ldraw = ?", (name,)).fetchone()
+        _cat[name] = (r[0] or "") if r else ""
+    return _cat[name]
+
+
+def stats(path: Path) -> dict | None:
+    from ldraw_read import flatten, part_bbox
+    from realism import _parts_with_grid
+    ps = flatten(path)
+    for q in ps:
+        if q.name not in _bb:
+            try: _bb[q.name] = part_bbox(q.name)
+            except Exception: _bb[q.name] = None                                  # noqa: BLE001
+    it = _parts_with_grid(ps, _bb)
+    if len(it) < 60: return None
+    lo = np.array([x[3] for x in it]); hi = np.array([x[4] for x in it]); ext = hi - lo
+    w = np.maximum(ext[:, 0], ext[:, 2]); dd = np.minimum(ext[:, 0], ext[:, 2]); h = ext[:, 1]
+    cats = [category(x[0]) for x in it]; low = [c.lower() for c in cats]
+    is_tile = np.array(["tile" in c for c in low]); is_slope = np.array(["slope" in c for c in low])
+    is_round = np.array(["round" in c or "cone" in c or "dish" in c for c in low])
+    is_brick = np.array([c.startswith("bricks") and "slope" not in c for c in low]) & (h > 2.5)
+    is_plate = np.array(["plates" in c for c in low]) & ~is_tile
+    up = np.array([x[2][1, 1] > 0.99 for x in it])
+    one = (w <= 1.01) & (dd <= 1.01)
+    # studs left bare: a studded, upright part with no part's box covering the cells right above its top
+    occ = defaultdict(int); base = lo.min(0)
+    for k in range(len(it)):
+        for y in range(int(round(lo[k, 1] - base[1])), int(round(hi[k, 1] - base[1]))):
+            for x in range(int(np.floor(lo[k, 0] - base[0])), int(np.ceil(hi[k, 0] - base[0]))):
+                for z in range(int(np.floor(lo[k, 2] - base[2])), int(np.ceil(hi[k, 2] - base[2]))):
+                    occ[(y, x, z)] += 1
+    studded = (is_brick | is_plate) & up; bare = 0
+    for k in np.flatnonzero(studded):
+        y = int(round(hi[k, 1] - base[1]))
+        cells = [(y, x, z) for x in range(int(np.floor(lo[k, 0] - base[0])), int(np.ceil(hi[k, 0] - base[0])))
+                 for z in range(int(np.floor(lo[k, 2] - base[2])), int(np.ceil(hi[k, 2] - base[2])))]
+        bare += sum(occ[c] == 0 for c in cells) / max(1, len(cells)) > 0.5
+    # stacked joints: a brick right on top of a brick with the same footprint, edges aligned
+    key = defaultdict(list)
+    for k in np.flatnonzero(is_brick): key[(round(lo[k, 0], 1), round(lo[k, 2], 1), round(hi[k, 0], 1), round(hi[k, 2], 1))].append(k)
+    stacked = sum(1 for ks in key.values() for a in ks for b in ks if a != b and abs(lo[b, 1] - hi[a, 1]) < 0.3)
+    nb = max(1, is_brick.sum())
+    # arrangement on the outside: owner of each cell, parts that show (a cell with an empty neighbour)
+    own = {}
+    for k in range(len(it)):
+        for y in range(int(round(lo[k, 1] - base[1])), int(round(hi[k, 1] - base[1]))):
+            for x in range(int(np.floor(lo[k, 0] - base[0])), int(np.ceil(hi[k, 0] - base[0]))):
+                for z in range(int(np.floor(lo[k, 2] - base[2])), int(np.ceil(hi[k, 2] - base[2]))):
+                    own[(y, x, z)] = k
+    nbr = ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
+    shows = {k for (y, x, z), k in own.items() if any((y + a, x + b, z + c) not in own for a, b, c in nbr)}
+    pairs = {(min(k, j), max(k, j)) for (y, x, z), k in own.items() if k in shows
+             for a, b, c in nbr if (j := own.get((y + a, x + b, z + c), k)) != k and j in shows}
+    same_col = np.mean([it[a][1] == it[b][1] for a, b in pairs]) if pairs else 0.0
+    allp = {(min(k, j), max(k, j)) for (y, x, z), k in own.items() for a, b, c in nbr[2:]
+            if (j := own.get((y + a, x + b, z + c), k)) != k}                    # side by side, as the sampler's level pairs
+    side = [(a, b) for a, b in allp if abs(lo[a, 1] - lo[b, 1]) < 0.3 and abs(hi[a, 1] - hi[b, 1]) < 0.3]
+    row_same = np.mean([it[a][0] == it[b][0] and it[a][1] == it[b][1] for a, b in side]) if side else 0.0
+    # colour patches: same-colour connected regions of showing cells; the size of the patch a showing cell is in
+    cells = [c for c, k in own.items() if k in shows and any((c[0] + a, c[1] + b, c[2] + e) not in own for a, b, e in nbr)]
+    seen, sizes = set(), []
+    for c0 in cells:
+        if c0 in seen: continue
+        col = it[own[c0]][1]; stack = [c0]; seen.add(c0); n = 0
+        while stack:
+            y, x, z = stack.pop(); n += 1
+            for a, b, e in nbr:
+                q = (y + a, x + b, z + e)
+                if q not in seen and q in own and it[own[q]][1] == col and any((q[0] + a2, q[1] + b2, q[2] + e2) not in own for a2, b2, e2 in nbr):
+                    seen.add(q); stack.append(q)
+        sizes.append(n)
+    sizes = np.array(sizes, float)
+    patch = float(np.median(np.repeat(sizes, sizes.astype(int)))) if len(sizes) else 0.0
+    # grip: how many parts each part couples with through its top and bottom faces (boxes touching, footprints
+    # overlapping) -- staggered seams make it 2+, stacked columns and lone plates 1
+    pairs_v = {(k, j) for (y, x, z), k in own.items() for j in [own.get((y + 1, x, z))] if j is not None and j != k}
+    nb_v = defaultdict(set)
+    for k, j in pairs_v: nb_v[k].add(j); nb_v[j].add(k)
+    g = np.array([len(nb_v[k]) for k in range(len(it))])
+    single_grip = float((g == 1).mean()); grip_mean = float(g.mean())
+    top = {}                                                                      # height map seen from above
+    for (y, x, z) in own: top[(x, z)] = max(top.get((x, z), -1), y + 1)
+    dh = [abs(top[(x, z)] - top[q]) for (x, z) in top for q in ((x + 1, z), (x, z + 1)) if q in top]
+    dh = np.array([d for d in dh if d > 0])
+    steps = float(((dh >= 1) & (dh <= 2)).mean()) if len(dh) else 0.0
+    return {"bricks": is_brick.mean(), "plates": is_plate.mean(), "tiles": is_tile.mean(), "slopes": is_slope.mean(),
+            "round": is_round.mean(), "1x1": one.mean(), "brick_len": float(w[is_brick].mean()) if is_brick.any() else 0.0,
+            "brick_len>=4": float((w[is_brick] >= 3.99).mean()) if is_brick.any() else 0.0,
+            "bare_studs": bare / max(1, studded.sum()), "stacked_bricks": stacked / nb, "sideways": 1 - up.mean(),
+            "colours/100": 100 * len({x[1] for x in it}) / len(it), "same_colour_touch": same_col, "row_same_part": row_same,
+            "plate_steps": steps, "colour_patch": patch, "patch_share": patch / max(1, len(cells)), "patches/100": 100 * len(sizes) / max(1, len(cells)), "single_grip": single_grip, "grip_mean": grip_mean, "parts": len(it)}
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(); ap.add_argument("builds", type=Path, nargs="+")
+    ap.add_argument("--kind", default="building"); ap.add_argument("--n", type=int, default=150); ap.add_argument("--min-parts", type=int, default=200)
+    ap.add_argument("--extra-ref", choices=["brickbench"], help="also show BrickBench agent-designed building builds")
+    a = ap.parse_args()
+    kinds = {r["id"]: r["kind"] for r in csv.DictReader(open(DATA / "analysis" / "set_kinds.csv"))}
+    files = [f for f in sorted((DATA / "omr" / "files").glob("*.mpd")) if kinds.get(f.stem.split("_")[0]) == a.kind]
+    real = []
+    for f in files:
+        try: s = stats(f)
+        except Exception: continue                                                 # noqa: BLE001
+        if s and s["parts"] >= a.min_parts: real.append(s)
+        if len(real) >= a.n: break
+    print(f"real {a.kind} sets: {len(real)} (>= {a.min_parts} parts)")
+    extra = []
+    if a.extra_ref:
+        for f in brickbench_buildings():
+            try: s = stats(f)
+            except Exception: continue                                             # noqa: BLE001
+            if s and s["parts"] >= a.min_parts: extra.append(s)
+        print(f"brickbench building builds: {len(extra)} (>= {a.min_parts} parts)")
+    ours = [(p, stats(p)) for p in a.builds]
+    keys = [k for k in real[0] if k != "parts"]
+    rows = []
+    for k in keys:
+        v = np.array([r[k] for r in real]); p10, med, p90 = np.percentile(v, [10, 50, 90])
+        gap = [(s[k] - med) / max(1e-9, (p90 - p10) / 2) for _, s in ours]               # in half-ranges of the real spread
+        bb = np.percentile([r[k] for r in extra], [10, 50, 90]) if extra else None
+        rows.append((max(abs(g) for g in gap), k, p10, med, p90, [s[k] for _, s in ours], gap, bb))
+    names = [p.parent.name or p.stem for p, _ in ours]
+    print(f"{'statistic':15s} {'real p10':>8} {'median':>7} {'p90':>7}  " + (f"{'bb p10':>7} {'median':>7} {'p90':>7}  " if extra else "")
+          + "  ".join(f"{n[:14]:>14}" for n in names))
+    for _, k, p10, med, p90, vals, gap, bb in sorted(rows, key=lambda r: r[0], reverse=True):
+        # * = outside both the real and the BrickBench p10-p90 bands
+        out = [bb is not None and not p10 <= v <= p90 and not bb[0] <= v <= bb[2] for v in vals]
+        print(f"{k:15s} {p10:8.3f} {med:7.3f} {p90:7.3f}  " + (f"{bb[0]:7.3f} {bb[1]:7.3f} {bb[2]:7.3f}  " if extra else "")
+              + "  ".join(f"{v:8.3f} ({g:+4.1f}){'*' if o else ' '}" for v, g, o in zip(vals, gap, out)))
+    print("(+/-x.x = distance from the real median in half real-ranges; |x| > 1 is outside the p10-p90 band"
+          + ("; * = outside both the real and the BrickBench p10-p90 bands)" if extra else ")"))
+
+
+if __name__ == "__main__":
+    main()

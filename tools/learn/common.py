@@ -47,19 +47,25 @@ def _shapes() -> dict:
 
 
 @lru_cache(maxsize=256)
-def model(name: str):
-    """(part_nums, tokens, i0, i1, bits) of an official model: each part's
-    grid box [i0, i1) (y, x, z), and each cell's shape as a 64-bit mask of
-    4x4x4 samples (sampler.pack's bit order).  None when it has no parts."""
+def frame_parts(name: str) -> list:
+    """The official model's parts with a bounding box (ldraw_read.Part), in the model's own frame (to_model_frame)."""
     from ldraw_read import flatten, part_bbox
     from patterns import to_model_frame
     f = F.OMR / f"{name}.mpd"
     if not f.exists():
         f = F.OMR / f"{name}.ldr"
     parts = [p for p in flatten(f) if part_bbox(p.name) is not None]
+    return to_model_frame(parts) if parts else []
+
+
+def model(name: str):
+    """(part_nums, tokens, i0, i1, bits) of an official model: each part's
+    grid box [i0, i1) (y, x, z), and each cell's shape as a 64-bit mask of
+    4x4x4 samples (sampler.pack's bit order).  None when it has no parts."""
+    from ldraw_read import part_bbox
+    parts = frame_parts(name)
     if not parts:
         return None
-    parts = to_model_frame(parts)
     pns, toks, lo, hi = [], [], [], []
     for p in parts:
         a_, b_ = part_bbox(p.name)

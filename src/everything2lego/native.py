@@ -16,11 +16,13 @@ It is looked for at $E2L_NATIVE_LIB, then under native/sampler/target.
 from __future__ import annotations
 
 import ctypes as C
+import json
 import math
 import os
 import platform
 import shutil
 import subprocess
+import time
 import sys
 from functools import lru_cache
 from pathlib import Path
@@ -28,10 +30,67 @@ from typing import Optional
 
 import numpy as np
 
-ABI = 12
-INFO_LEN = 16
+ABI = 29
+INFO_LEN = 21
+ERR_LAYERS = ("shape", "colour", "support", "direction", "statistics")   # lib.rs N_ERR
+PATHS4_BUCKETS = 8
 
 _P = C.POINTER
+
+
+INFILL_NPZ = Path("/Volumes/PRO-G40/lego_data/analysis/infill_model/student.npz")   # tools/learn/infill_model.py export
+V14_MODEL = Path("/Volumes/PRO-G40/lego_data/analysis/vis_classifiers/v14_model.pt")   # on the external disk
+V14_CB = C.CFUNCTYPE(None, C.c_int32, *[C.POINTER(C.c_int32)] * 5, C.POINTER(C.c_double))
+
+
+def v14_callback(opts):
+    """The guide's realism layer: per live part its V14 blame (P(fake) of the 50-part pieces holding it) above the
+    build's median, so moves go where the judge sees the build least like a real set."""
+    import sys as _sys
+    _sys.path[:0] = [str(Path(__file__).resolve().parents[2] / d) for d in ("tools/learn", "tools/set_study")]
+    from v14_blame import blame_lines
+    from .io_ldraw import placement_to_line
+    from .slope_courses import expand
+
+    def cb(n, o, c, y, x, z, out):
+        try:
+            lines, owner = [], []
+            for k in range(n):
+                v, orient = opts[o[k]]
+                for pl in expand(v.part, c[k], x[k], z[k], y[k], orient):
+                    lines.append(placement_to_line(pl)); owner.append(k)
+            b = blame_lines(lines)
+            per = np.full(n, np.nan)
+            for k, bk in zip(owner, b):
+                if not np.isnan(bk):
+                    per[k] = bk if np.isnan(per[k]) else max(per[k], bk)
+            per = np.nan_to_num(per - np.nanmedian(per), nan=0.0).clip(0.0)
+            for k in range(n):
+                out[k] = per[k]
+        except Exception as e:                                                  # noqa: BLE001  (a raise would be lost in ctypes)
+            print(f"v14 callback failed: {e!r}", file=_sys.stderr)
+    return V14_CB(cb)
+
+
+MLM_CB = C.CFUNCTYPE(None, C.c_int32, C.POINTER(C.c_int32), C.c_int32, C.POINTER(C.c_int32), C.POINTER(C.c_float))
+
+
+def mlm_callback(fill):
+    """The filler's ranking from the masked part model: log P(class | the parts around) for every wanted cell."""
+    import sys as _sys
+    _sys.path[:0] = [str(Path(__file__).resolve().parents[2] / "tools" / "learn")]
+    from mlm_parts import cell_logprobs
+
+    def cb(n_items, items, n_cells, cells, out):
+        try:
+            it = np.ctypeslib.as_array(items, (max(n_items, 1) * 7,))[:n_items * 7].reshape(-1, 7).astype(np.int64)
+            cs = np.ctypeslib.as_array(cells, (n_cells,)).astype(np.int64)
+            t0 = time.time(); lp = cell_logprobs(fill, it, cs)
+            print(f"mlm: {n_cells} cells, {n_items} parts, {time.time() - t0:.2f}s", file=_sys.stderr)
+            np.ctypeslib.as_array(out, (lp.size,))[:] = lp.ravel()
+        except Exception as e:                                                  # noqa: BLE001  (a raise would be lost in ctypes)
+            print(f"mlm callback failed: {e!r}", file=_sys.stderr)
+    return MLM_CB(cb)
 
 
 class Problem(C.Structure):
@@ -59,6 +118,10 @@ class Problem(C.Structure):
         ("p_ref", C.c_double), ("w_cnt", C.c_double), ("cnt_sd", C.c_double),
         ("w_sil", C.c_double), ("style", C.c_double), ("w_glob2", C.c_double), ("logp2", _P(C.c_double)),
         ("middle_w", _P(C.c_double)),
+        ("w_glob3", C.c_double), ("logp3", _P(C.c_double)), ("mid_bucket", _P(C.c_int32)),
+        ("max_deg_paths4", C.c_int32), ("paths4_sample_n", C.c_int32),
+        ("w_entropy_glob3", C.c_double),
+        ("w_revkl_glob3", C.c_double), ("pref3", _P(C.c_double)),
         ("pixx_start", _P(C.c_int32)), ("pixx", _P(C.c_int32)),
         ("pixy_start", _P(C.c_int32)), ("pixy", _P(C.c_int32)),
         ("pixz_start", _P(C.c_int32)), ("pixz", _P(C.c_int32)),
@@ -72,6 +135,11 @@ class Problem(C.Structure):
         ("region_object", _P(C.c_int32)),  # H*X*Z: per-cell object index, -1 = use net_object
         ("opt_variants", _P(C.c_int32)),  # n_opt: swap-group id (-1 none)
         ("net_static", C.c_int32), ("static", _P(C.c_float)),
+        ("n_hinge", C.c_int32), ("hinge_data", _P(C.c_int32)),  # n_hinge*5: (opt_a, opt_b, dy, dx, dz)
+        ("n_init", C.c_int32),
+        ("init_opt", _P(C.c_int32)), ("init_colour", _P(C.c_int32)),
+        ("init_y", _P(C.c_int32)), ("init_x", _P(C.c_int32)), ("init_z", _P(C.c_int32)),
+        ("region_label", _P(C.c_int32)),
         ("t_start_share", C.c_double), ("t_final_share", C.c_double),
         ("iters", C.c_int64), ("warmup", C.c_int64), ("seed", C.c_uint64),
         ("top_k", C.c_int32), ("log_every", C.c_int64),
@@ -80,6 +148,49 @@ class Problem(C.Structure):
         ("out_y", _P(C.c_int32)), ("out_x", _P(C.c_int32)), ("out_z", _P(C.c_int32)),
         ("info", _P(C.c_double)),
         ("hist_cap", C.c_int32), ("hist_n", _P(C.c_int32)), ("hist", _P(C.c_double)),
+        ("w_size", C.c_double), ("n_size_class", C.c_int32),      # part-size statistics (null = off)
+        ("opt_class", _P(C.c_int32)), ("size_pref", _P(C.c_double)),
+        ("n_snot_rows", C.c_int32), ("snot_rows", _P(C.c_int32)),      # sideways move (snot_options.pair_rows)
+        ("w_sideways", C.c_double), ("p_sideways", C.c_double), ("opt_sideways", _P(C.c_uint8)),   # sideways-share KL term
+        ("w_out", _P(C.c_float)), ("w_in", _P(C.c_float)),             # surface fit (surface_fit.py); null = sample count
+        ("w_big", C.c_double),                                          # filler: bigger parts first (0 = off)
+        ("w_stack", C.c_double), ("p_stack", C.c_double), ("opt_brick", _P(C.c_uint8)),   # stacked-joints KL term
+        ("w_bare_top", C.c_double),                                     # exposed top studs (0 = off)
+        ("opt_watch", _P(C.c_uint8)),                                   # diagnostics: options to report on (stderr)
+        ("w_dir", C.c_double), ("dir_thr", C.c_double), ("t_normal", _P(C.c_float)),   # surface direction (surface_dir.py)
+        ("dir_start", _P(C.c_int32)), ("dir_rows", _P(C.c_float)),
+        ("w_big_end", C.c_double),                                      # filler: bigger-first weight at the end (< 0 = constant)
+        # building patterns (tools/learn/motifs.py): parts placed together, as real sets do; p_motif = share of moves
+        ("p_motif", C.c_double), ("n_motif", C.c_int32), ("motif_start", _P(C.c_int32)),
+        ("motif_rows", _P(C.c_int32)), ("motif_w", _P(C.c_double)),
+        # part mix by surface type (surface_mix.py)
+        ("w_surf", C.c_double), ("n_stype", C.c_int32), ("n_pclass", C.c_int32), ("cell_type", _P(C.c_int8)),
+        ("opt_pclass", _P(C.c_int32)), ("surf_lpref", _P(C.c_double)), ("surf_lmarg", _P(C.c_double)),
+        ("motif_type", _P(C.c_uint8)),                                  # pattern: 0 anywhere, 1 on a pitched roof
+        # error-guided moves, and the final error map (ERR_LAYERS per cell / per part)
+        ("p_guide", C.c_double), ("guide_every", C.c_int32), ("err_cell", _P(C.c_double)), ("err_item", _P(C.c_double)),
+        ("p_resolve", C.c_double), ("p_orient", C.c_double),                # re-solve / orient move shares (from retile's)
+        ("lock", _P(C.c_uint8)),                                        # cells whose parts stay as they are (null: none)
+        ("col_max", C.c_double),                                        # colour error cap (0 = off)
+        ("p_echo", C.c_double),                                         # echo move share (from retile's)
+        ("fid_cap", C.c_double),                                        # shape budget (unweighted shape term; 0 = off)
+        ("w_part", C.c_double), ("recolour", C.c_int32),                # energy per part; recolour the starting parts
+        ("w_sdist", C.c_double), ("sdist", _P(C.c_float)),               # surface distance (surface_fit.standoff,
+        ("sd_start", _P(C.c_int32)), ("sd_rows", _P(C.c_float)),         # part_surface.tables)
+        ("w_conn", C.c_double),                                         # per part not joined to the ground layer
+        ("w_coll", C.c_double), ("prot_start", _P(C.c_int32)), ("prot_rows", _P(C.c_int32)),   # collisions
+        ("w_grip", C.c_double), ("p_grip", C.c_double),                 # bonding: parts gripped by just one part
+        ("p_mirror", C.c_double), ("mirror_opt", _P(C.c_int32)),        # mirror move share; per option its image (x, z)
+        ("p_phase", C.c_double),                                        # phase move share (from retile's)
+        ("w_sem", C.c_double), ("cell_cat", _P(C.c_int8)), ("opt_cat", _P(C.c_int32)),   # semantic labels (semantic_labels.py)
+        ("cell_part", _P(C.c_int16)),                                   # mesh part per cell (part_labels.py); null = off
+        ("cell_area", _P(C.c_int32)),                                   # semantic area per cell; null = per-cell bonus
+        ("area_aff", _P(C.c_float)),                                    # per area x option: its part is what it shows
+        ("v14_share", C.c_double), ("v14_every", C.c_int32), ("v14_cb", V14_CB),   # learned realism in the guide (v14_blame.py)
+        ("mlm_cb", MLM_CB),                                             # masked part model ranks the filler's parts (mlm_parts.py)
+        ("w_mlm", C.c_double),                                          # and each part's regret under it in the energy (x style)
+        ("inf_w", _P(C.c_float)), ("inf_n", C.c_int32), ("inf_dims", _P(C.c_int32)),   # infill model (infill_model.py student)
+        ("opt_label", _P(C.c_int32)), ("p_infill", C.c_double),
     ]
 
 
@@ -191,9 +302,65 @@ def snap_table(vocab, n_col: int) -> np.ndarray:
     return out
 
 
+def mirror_table(opts) -> np.ndarray:
+    """(n_opt, 2) int32: per option, the option that is its mirror image across an x plane and across a z plane --
+    the same part turned when it is symmetric, else its chiral counterpart (BrickAgent's verified mirror pairs) --
+    found by geometry: same box, sample masks of the mirrored box within 6 %, studs and holes mirrored as tie-break;
+    -1 when the part has no known mirror or no option matches.  Sideways and slope-course options: -1."""
+    from .sampler import SUB
+    out = np.full((len(opts), 2), -1, np.int32)
+    try:
+        from brickagent import catalog
+        from brickagent.reflection import counterpart
+    except ImportError:
+        return out
+
+    def resolve(stem):
+        try:
+            return catalog.resolve(stem)
+        except (KeyError, ValueError):
+            return stem
+    plain = [i for i, (_, o) in enumerate(opts) if o.snot is None and o.stack is None]
+    by_stem: dict[str, list[int]] = {}
+    for i in plain:
+        by_stem.setdefault(resolve(opts[i][0].part.ldraw.removesuffix(".dat")), []).append(i)
+
+    def box(o):
+        b = np.zeros(o.size, np.uint64)
+        b[tuple(o.cells.T)] = o.bits
+        return ((b[..., None] >> np.arange(SUB ** 3, dtype=np.uint64)) & np.uint64(1)).astype(bool).reshape(*o.size, SUB, SUB, SUB)
+    boxes = {}
+    for stem, idx in by_stem.items():
+        try:
+            other = resolve(counterpart(stem)[0])
+        except (KeyError, ValueError):
+            continue                                    # no verified mirror geometry for this part
+        for i in idx:
+            o = opts[i][1]
+            a = boxes.setdefault(i, box(o))
+            for axis in range(2):                       # mirror the box: cells along x (axis 1) / z (axis 2), and samples
+                img = np.flip(a, (1 + axis, 4 + axis))
+                h, W, D = o.size
+                flip = (lambda x, z: (W - 1 - x, z)) if axis == 0 else (lambda x, z: (x, D - 1 - z))
+                top, bot = {flip(*t) for t in o.top}, {flip(*t) for t in o.bottom}
+                best = None
+                for j in by_stem.get(other, ()):
+                    q = opts[j][1]
+                    if q.size != o.size:
+                        continue
+                    miss = int((boxes.setdefault(j, box(q)) ^ img).sum())
+                    score = (miss, len(top ^ set(q.top)) + len(bot ^ set(q.bottom)))
+                    if miss <= 0.06 * img.size and (best is None or score < best[0]):
+                        best = (score, j)
+                if best is not None:
+                    out[i, axis] = best[1]
+    return out
+
+
 def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: int,
         t_start_share: float, t_final_share: float, top_k: int, log_every: int, opts_logprior,
-        net: bool = True):
+        net: bool = True, tile_boost: float = 0.0, snot_boost: float = 0.0,
+        init_placements=None):
     """Run the native sampler.  Returns ([(vpart, orient, colour, y, x, z)], info, history)."""
     lib = library()
     if lib is None:
@@ -226,12 +393,149 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
                 nll[a, b, k] = stats.nll(ta, tb, d)
                 logp[a, b, k] = math.log(stats.ref.p((ta, tb, d)))
                 logp2[a, b, k] = math.log(stats.ref2.p((ta, tb, d)))
+    # paths4 term: only wired when stats.ref3 is present AND weights.glob3 > 0.
+    # Vectorized logp3 build: scatter counts into dense (a, b, dir_bucket) tensors,
+    # then apply the smoothing formula with numpy.  Avoids 6M Python Counter lookups.
+    use_paths4 = getattr(stats, "ref3", None) is not None and getattr(weights, "glob3", 0.0) > 0.0
+    if use_paths4:
+        ref3 = stats.ref3
+        _total = max(1.0, ref3._total); _kind_total = max(1.0, ref3._kind_total); _vocab = ref3._vocab
+        l1, l2, l3 = ref3.lam
+        from .style import kind_of
+        tok_kind_idx: dict[str, int] = {}                              # unique kinds -> small index
+        kind_arr = np.empty(n_tok, np.int32)
+        for i, t in enumerate(toks):
+            k = kind_of(t)
+            if k not in tok_kind_idx:
+                tok_kind_idx[k] = len(tok_kind_idx)
+            kind_arr[i] = tok_kind_idx[k]
+        n_kind = len(tok_kind_idx)
+        n_dkey = 3 * PATHS4_BUCKETS
+        exact = np.zeros((n_tok, n_tok, n_dkey))
+        kind_count = np.zeros((n_kind, n_kind, n_dkey))
+        kind_spread_set: dict[tuple, set] = {}
+        dir_idx = {d: i for i, d in enumerate(dirs)}
+        for (a, b, dbk), n in ref3.counts.items():
+            ai = tid.get(a); bi = tid.get(b)
+            if ai is None or bi is None:
+                continue
+            if ":" not in dbk:
+                continue
+            d_str, bucket_str = dbk.rsplit(":", 1)
+            di = dir_idx.get(d_str)
+            if di is None:
+                continue
+            try:
+                bucket = int(bucket_str)
+            except ValueError:
+                continue
+            if not (0 <= bucket < PATHS4_BUCKETS):
+                continue
+            dkey = di * PATHS4_BUCKETS + bucket
+            exact[ai, bi, dkey] += n
+            # kind-level aggregation (shared across all exact keys with same kinds)
+            kai, kbi = kind_arr[ai], kind_arr[bi]
+            kind_count[kai, kbi, dkey] += n
+            kind_spread_set.setdefault((kai, kbi, dkey), set()).add((ai, bi))
+        kind_spread = np.ones((n_kind, n_kind, n_dkey), np.float64)      # +1 vs _kinds_of
+        for (ka, kb, dk), s in kind_spread_set.items():
+            kind_spread[ka, kb, dk] += len(s)
+        # Build logp3: l1 * exact/total + l2 * kind/kind_total/spread + l3/vocab
+        exact_p = exact / _total
+        # broadcast kind back to (n_tok, n_tok, n_dkey) via indexing
+        kind_p_tok = kind_count[kind_arr[:, None], kind_arr[None, :]] / _kind_total / kind_spread[kind_arr[:, None], kind_arr[None, :]]
+        p3_raw = l1 * exact_p + l2 * kind_p_tok + l3 / _vocab           # p_ref(key) for each slot
+        logp3 = np.log(p3_raw).reshape(n_tok, n_tok, 3, PATHS4_BUCKETS)
+        pref3 = p3_raw.reshape(n_tok, n_tok, 3, PATHS4_BUCKETS)         # parallel array; coverage term uses it
+        # mid_bucket[a, b] = Stats.middle_bucket(tok_a, tok_b)
+        bucket_of = stats.middle_bucket
+        mid_bucket = np.array([[bucket_of(ta, tb) for tb in toks] for ta in toks], np.int32)
+    else:
+        logp3 = None
+        mid_bucket = None
+        pref3 = None
     from .sampler import unpack
     fine = unpack(target.bits)
     tsil = (fine.any(axis=1), fine.any(axis=0), fine.any(axis=2))
     # options
     pid = {id(v): i for i, v in enumerate(vocab)}
     opts = [(v, o) for v in vocab for o in v.orients]
+    size_fields = {}                                                             # part-size mix term (sizes.py); off when weight 0
+    if getattr(weights, "size", 0.0) > 0:
+        from .sizes import N_CLASS, real_mix, size_class
+        oc = arr([size_class(o.size[0], o.size[1], o.size[2]) for _, o in opts], np.int32); sp = arr(real_mix(kind), np.float64)
+        size_fields = dict(w_size=weights.size, n_size_class=N_CLASS, opt_class=_ptr(oc, C.c_int32), size_pref=_ptr(sp, C.c_double))
+    if getattr(weights, "direction", 0.0) > 0:                                   # faces pointing the way the surface does
+        from .surface_dir import tables, target_normals
+        ds, dr = tables(opts); tn = target_normals(target.bits, target.want)
+        ds, dr, tn = arr(ds, np.int32), arr(dr, np.float32), arr(tn, np.float32)
+        size_fields.update(w_dir=weights.direction, dir_thr=getattr(weights, "dir_thr", 0.5), t_normal=_ptr(tn, C.c_float),
+                           dir_start=_ptr(ds, C.c_int32), dir_rows=_ptr(dr, C.c_float))
+    if getattr(weights, "coll", 0.0) > 0:                                        # geometry reaching past a part's cells
+        from .part_surface import protrusion_tables
+        ps, pr = protrusion_tables(opts)
+        size_fields.update(w_coll=weights.coll, prot_start=_ptr(arr(ps, np.int32), C.c_int32),
+                           prot_rows=_ptr(arr(pr.reshape(-1), np.int32), C.c_int32))
+    if getattr(weights, "sdist", 0.0) > 0:                                       # parts' real surface standing off the target
+        from .part_surface import tables as surface_tables
+        from .surface_fit import standoff
+        ss, sr = surface_tables(opts)
+        size_fields.update(w_sdist=weights.sdist, sdist=_ptr(arr(standoff(target.bits), np.float32), C.c_float),
+                           sd_start=_ptr(arr(ss, np.int32), C.c_int32), sd_rows=_ptr(arr(sr, np.float32), C.c_float))
+    if getattr(weights, "roof_mix", 0.0) > 0:                                    # part mix on the target's pitched roof
+        from . import surface_mix as sm
+        roof, flat = sm.roof_mix(kind), sm.flat_mix(kind)
+        if roof is not None:
+            ct = sm.roof_cells(target.want).astype(np.int8)
+            rows = [np.log(sm.all_mix(kind)), np.log(roof)]
+            if flat is not None and getattr(weights, "flat_mix", False):           # flat tops: real sets' flat-top mix
+                ct[sm.flat_cells(target.want) & (ct == 0)] = 2
+                rows.append(np.log(flat))
+            ct = arr(ct.reshape(-1), np.int8)
+            oc = arr([sm.part_class(v.category) for v, _ in opts], np.int32)
+            lm = rows[0]
+            lp = arr(np.stack(rows).reshape(-1), np.float64)                    # type 0 is not scored (lift 0)
+            size_fields.update(w_surf=weights.roof_mix, n_stype=len(rows), n_pclass=len(sm.CLASSES),
+                               cell_type=_ptr(ct, C.c_int8), opt_pclass=_ptr(oc, C.c_int32),
+                               surf_lpref=_ptr(lp, C.c_double), surf_lmarg=_ptr(arr(lm, np.float64), C.c_double))
+    elif getattr(weights, "surface_mix", 0.0) > 0:                               # part mix by surface type
+        from . import surface_mix as sm
+        from .surface_dir import target_normals
+        mix = sm.real_mix(kind)
+        if mix is not None:
+            ct = arr(sm.cell_types(target_normals(target.bits, target.want), target.want.shape).reshape(-1), np.int8)
+            oc = arr([sm.part_class(v.category) for v, _ in opts], np.int32)
+            raw = np.array(json.loads(sm.DATA.read_text())["counts"], float) + 1.0
+            lp = arr(np.log(mix).reshape(-1), np.float64); lm = arr(np.log(raw.sum(0) / raw.sum()), np.float64)
+            size_fields.update(w_surf=weights.surface_mix, n_stype=len(sm.TYPES), n_pclass=len(sm.CLASSES),
+                               cell_type=_ptr(ct, C.c_int8), opt_pclass=_ptr(oc, C.c_int32),
+                               surf_lpref=_ptr(lp, C.c_double), surf_lmarg=_ptr(lm, C.c_double))
+    if getattr(weights, "motif", 0.0) > 0:                                       # building patterns of real sets
+        from .motifs import tables as motif_tables
+        ms, mr, mw, mt = motif_tables(opts, kind)
+        if len(mw):
+            ms, mr, mw, mt = arr(ms, np.int32), arr(mr, np.int32), arr(mw, np.float64), arr(mt, np.uint8)
+            size_fields.update(p_motif=weights.motif, n_motif=len(mw), motif_start=_ptr(ms, C.c_int32),
+                               motif_rows=_ptr(mr, C.c_int32), motif_w=_ptr(mw, C.c_double), motif_type=_ptr(mt, C.c_uint8))
+    watch = os.environ.get("E2L_WATCH") or os.environ.get("E2L_WATCH_MOVE")       # the latter watches a move by name (lib.rs)                                          # diagnostics: a part category to report on
+    if watch or any(getattr(o, "stack", None) is not None for _, o in opts):     # report how slope courses fare (stderr)
+        ow = arr([(v.category == watch) if watch else o.stack is not None for v, o in opts], np.uint8)
+        size_fields.update(opt_watch=_ptr(ow, C.c_uint8))
+    if getattr(weights, "stack", 0.0) > 0:                                       # lined-up joints: brick on same-footprint brick
+        ob = arr([v.box == "brick" and o.snot is None for v, o in opts], np.uint8)
+        size_fields.update(w_stack=weights.stack, p_stack=getattr(weights, "p_stack", 0.093), opt_brick=_ptr(ob, C.c_uint8))
+    if getattr(weights, "surface", 0.0) > 0:                                     # shape term weighted by distance to the surface
+        from .surface_fit import weights as _surface_weights
+        wo, wi = _surface_weights(target.bits, alpha=weights.surface)
+        wo, wi = arr(wo, np.float32), arr(wi, np.float32)
+        size_fields.update(w_out=_ptr(wo, C.c_float), w_in=_ptr(wi, C.c_float))
+    if any(o.snot is not None for _, o in opts):                                 # sideways options present: the combined move
+        from .snot_options import pair_rows
+        sr = arr(pair_rows(opts), np.int32)
+        size_fields.update(n_snot_rows=len(sr), snot_rows=_ptr(sr, C.c_int32))
+        if getattr(weights, "sideways", 0.0) > 0:
+            sf = arr([o.snot is not None for _, o in opts], np.uint8)
+            size_fields.update(w_sideways=weights.sideways, p_sideways=getattr(weights, "p_sideways", 0.10), opt_sideways=_ptr(sf, C.c_uint8))
     boxk = {"brick": 0, "plate": 1, "tile": 2}
     cs, ts, bs, ss, hs = [0], [0], [0], [0], [0]
     halo = []
@@ -255,14 +559,35 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
             pvals[a].append(o.pix[a])
             pstart[a].append(pstart[a][-1] + len(o.pix[a]))
     snap = snap_table(vocab, n_col)
-    cap = int(target.want.sum()) + 16
+    cap = int(target.want.size)                  # parts never overlap: at most one per grid cell (support parts sit outside `want`)
     out = {k: np.zeros(cap, np.int32) for k in ("opt", "colour", "y", "x", "z")}
     out_n = np.zeros(1, np.int32)
     info = np.zeros(INFO_LEN)
     hist_cap = max(2, iters // max(1, log_every) + 2)
     hist = np.zeros(hist_cap)
     hist_n = np.zeros(1, np.int32)
-    keep += list(out.values()) + [out_n, info, hist, hist_n]
+    err_cell = np.zeros(H * X * Z * len(ERR_LAYERS))
+    err_item = np.zeros(cap * len(ERR_LAYERS))
+    keep += list(out.values()) + [out_n, info, hist, hist_n, err_cell, err_item]
+    if getattr(weights, "mirror", 0.0) > 0:                                      # mirror move: each option's image
+        mt = arr(mirror_table(opts), np.int32)
+        size_fields.update(p_mirror=weights.mirror, mirror_opt=_ptr(mt, C.c_int32))
+    if getattr(weights, "v14", 0.0) > 0 and getattr(weights, "guide", 0.0) > 0 and V14_MODEL.exists():   # 4 judge calls per run
+        cb = v14_callback(opts); keep.append(cb)
+        size_fields.update(v14_share=weights.v14, v14_every=max(1, iters // max(1000, iters // 400) // 4), v14_cb=cb)
+    if getattr(weights, "mlm", False) and getattr(weights, "guide", 0.0) > 0 and net:   # same 4 calls per run as V14
+        cb = mlm_callback(np.asarray(target.fill, np.float64)); keep.append(cb)
+        size_fields.update(mlm_cb=cb, w_mlm=getattr(weights, "mlm_weight", 0.0), v14_every=max(1, iters // max(1000, iters // 400) // 4))
+    if getattr(weights, "infill", 0.0) > 0 and net and INFILL_NPZ.exists():   # infill move: refill windows with the model
+        z = np.load(INFILL_NPZ)
+        lid = {str(t): i for i, t in enumerate(z["labels"])}
+        w_, dims_ = arr(z["w"], np.float32), arr(z["dims"], np.int32)
+        lab_ = arr([lid.get(f"{v.part.ldraw}|{o.rot}", -1) for v, o in opts], np.int32)
+        size_fields.update(inf_w=_ptr(w_, C.c_float), inf_n=int(w_.size), inf_dims=_ptr(dims_, C.c_int32),
+                           opt_label=_ptr(lab_, C.c_int32), p_infill=weights.infill)
+    size_fields.update(p_guide=getattr(weights, "guide", 0.0), guide_every=max(1000, iters // 400),
+                       err_cell=_ptr(err_cell, C.c_double), err_item=_ptr(err_item, C.c_double),
+                       p_resolve=getattr(weights, "resolve", 0.0), p_orient=getattr(weights, "orient", 0.0))
     p = Problem(
         h=H, x=X, z=Z,
         tbits=_ptr(arr(target.bits, np.uint64), C.c_uint64),
@@ -279,7 +604,7 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         opt_size=_ptr(arr([o.size for _, o in opts], np.int32), C.c_int32),
         opt_first=_ptr(arr([o.first for _, o in opts], np.int32), C.c_int32),
         opt_logprior=_ptr(arr(opts_logprior, np.float64), C.c_double),
-        opt_box=_ptr(arr([boxk.get(v.box, -1) for v, _ in opts], np.int32), C.c_int32),
+        opt_box=_ptr(arr([-1 if o.snot is not None else boxk.get(v.box, -1) for v, o in opts], np.int32), C.c_int32),   # sideways: no merge / retile
         cell_start=_ptr(arr(cs, np.int32), C.c_int32),
         cell_yxz=_ptr(arr(np.concatenate(cyxz), np.int32), C.c_int32),
         cell_bits=_ptr(arr(np.concatenate(cbits), np.uint64), C.c_uint64),
@@ -293,13 +618,23 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         n_conn=len(CONNECTORS), fits=_ptr(arr(FITS, np.uint8), C.c_uint8),
         halo_start=_ptr(arr(hs, np.int32), C.c_int32),
         halo_yxz=_ptr(arr(np.concatenate(halo), np.int32), C.c_int32),
-        w_cov=weights.cov, w_col=weights.col, w_loc=weights.loc, w_glob=weights.glob,
+        w_cov=weights.cov, w_col=weights.col, col_max=weights.col_max, p_echo=getattr(weights, "echo", 0.0), fid_cap=getattr(weights, "fid_cap", 0.0), w_conn=getattr(weights, "conn", 0.0),
+        w_grip=getattr(weights, "grip", 0.0), p_grip=getattr(weights, "p_grip", 0.113), p_phase=getattr(weights, "phase", 0.0),
+        w_part=getattr(weights, "part", 0.0), recolour=int(getattr(weights, "recolour", False)), w_loc=weights.loc, w_glob=weights.glob,
         w_sup=weights.sup, w_side=weights.side,
         n_ref=stats.density * float(target.fill.sum()), w_dens=weights.dens, dens_sd=stats.density_sd,
         p_ref=stats.part_density * float(target.fill.sum()), w_cnt=weights.cnt, cnt_sd=stats.part_density_sd,
         w_sil=weights.sil, style=weights.style, w_glob2=weights.glob2,
         logp2=_ptr(arr(logp2, np.float64), C.c_double),
         middle_w=_ptr(arr([stats.middle_w(t) for t in toks], np.float64), C.c_double),
+        w_glob3=(weights.glob3 if use_paths4 else 0.0),
+        logp3=(_ptr(arr(logp3, np.float64), C.c_double) if use_paths4 else _P(C.c_double)()),
+        mid_bucket=(_ptr(arr(mid_bucket, np.int32), C.c_int32) if use_paths4 else _P(C.c_int32)()),
+        max_deg_paths4=int(getattr(weights, "max_deg_paths4", 0)),
+        paths4_sample_n=int(getattr(weights, "paths4_sample_n", 1)),
+        w_entropy_glob3=float(getattr(weights, "entropy_glob3", 0.0) if use_paths4 else 0.0),
+        w_revkl_glob3=float(getattr(weights, "revkl_glob3", 0.0) if use_paths4 else 0.0),
+        pref3=(_ptr(arr(pref3, np.float64), C.c_double) if use_paths4 else _P(C.c_double)()),
         pixx_start=_ptr(arr(pstart[0], np.int32), C.c_int32), pixx=_ptr(arr(np.concatenate(pvals[0]), np.int32), C.c_int32),
         pixy_start=_ptr(arr(pstart[1], np.int32), C.c_int32), pixy=_ptr(arr(np.concatenate(pvals[1]), np.int32), C.c_int32),
         pixz_start=_ptr(arr(pstart[2], np.int32), C.c_int32), pixz=_ptr(arr(np.concatenate(pvals[2]), np.int32), C.c_int32),
@@ -312,13 +647,15 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         out_y=_ptr(out["y"], C.c_int32), out_x=_ptr(out["x"], C.c_int32), out_z=_ptr(out["z"], C.c_int32),
         info=_ptr(info, C.c_double),
         hist_cap=hist_cap, hist_n=_ptr(hist_n, C.c_int32), hist=_ptr(hist, C.c_double),
+        w_big=getattr(weights, "big", 0.0), w_big_end=getattr(weights, "big_end", -1.0), w_bare_top=getattr(weights, "bare_top", 0.0),
+        **size_fields,
     )
     from . import proposals
     from .sampler import net_tables
     from .style import kind_of
     nn = proposals.load() if net else None
     if nn is not None:
-        out_t, lpart, obj = net_tables(nn, vocab, kind)
+        out_t, lpart, obj = net_tables(nn, vocab, kind, tile_boost=tile_boost, snot_boost=snot_boost)
         okind = [nn.kind_index.get(kind_of(v.token), len(nn.kinds)) for v, _ in opts]
         p.use_net, p.net_in, p.net_h, p.net_c = 1, nn.W1.shape[0], nn.W1.shape[1], nn.W2.shape[1]
         p.net_kinds, p.net_objects, p.net_object = len(nn.kinds), len(nn.objects), obj
@@ -337,6 +674,8 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         else:
             region = np.full(target.want.shape, -1, dtype=np.int32)
         p.region_object = _ptr(arr(region, np.int32), C.c_int32)
+    if target.region_label is not None:
+        p.region_label = _ptr(arr(target.region_label.astype(np.int32), np.int32), C.c_int32)
     # swap variants: same box kind, size, AND cells positions (so halo matches)
     from .sampler import _box_kind
     group_id = {}
@@ -348,6 +687,74 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
         key = (_box_kind(v), o.size, cells_sig)
         opt_g.append(group_id.setdefault(key, len(group_id)))
     p.opt_variants = _ptr(arr(opt_g, np.int32), C.c_int32)
+    # hinge pairs: (opt_a, opt_b, dy, dx, dz) resolved from hinges.py's catalogue
+    from . import hinges as _hinges
+    opt_by_ldraw_yaw: dict[tuple[str, int], int] = {}
+    for k, (v_, o_) in enumerate(opts):
+        opt_by_ldraw_yaw.setdefault((v_.part.ldraw, o_.rot), k)
+    hinge_rows: list[int] = []
+    for pair in _hinges.load_all_pairs():
+        a_opt = opt_by_ldraw_yaw.get((pair["a_ldraw"], pair["a_yaw"]))
+        if a_opt is None:
+            continue
+        b_opt = opt_by_ldraw_yaw.get((pair["b_ldraw"], pair["yaw_s"]))
+        if b_opt is None:
+            continue
+        a_h = opts[a_opt][1].size[0]
+        if pair["stacked"]:
+            hinge_rows.extend([a_opt, b_opt, a_h, 0, 0])
+        else:
+            hinge_rows.extend([a_opt, b_opt, pair["dy_s"], pair["dx_s"], pair["dz_s"]])
+    if hinge_rows:
+        p.n_hinge = len(hinge_rows) // 5
+        p.hinge_data = _ptr(arr(np.array(hinge_rows, np.int32), np.int32), C.c_int32)
+    else:
+        p.n_hinge = 0
+    # multi-scale warm-start: resolve each Placement to an opt index
+    if init_placements:
+        opt_by_ldraw_yaw: dict[tuple[str, int], int] = {}
+        for k_, (v_, o_) in enumerate(opts):
+            opt_by_ldraw_yaw.setdefault((v_.part.ldraw, o_.rot), k_)
+        init_opt_arr, init_c_arr, init_y_arr, init_x_arr, init_z_arr = [], [], [], [], []
+        for pl in init_placements:
+            k_ = opt_by_ldraw_yaw.get((pl.part.ldraw, pl.rotation_deg))
+            if k_ is None:
+                continue
+            init_opt_arr.append(k_); init_c_arr.append(pl.color_idx)
+            init_y_arr.append(pl.y_plate); init_x_arr.append(pl.x_stud); init_z_arr.append(pl.z_stud)
+        if init_opt_arr:
+            p.n_init = len(init_opt_arr)
+            p.init_opt = _ptr(arr(np.array(init_opt_arr, np.int32), np.int32), C.c_int32)
+            p.init_colour = _ptr(arr(np.array(init_c_arr, np.int32), np.int32), C.c_int32)
+            p.init_y = _ptr(arr(np.array(init_y_arr, np.int32), np.int32), C.c_int32)
+            p.init_x = _ptr(arr(np.array(init_x_arr, np.int32), np.int32), C.c_int32)
+            p.init_z = _ptr(arr(np.array(init_z_arr, np.int32), np.int32), C.c_int32)
+        else:
+            p.n_init = 0
+    else:
+        p.n_init = 0
+    if getattr(weights, "sem", 0.0) > 0 and getattr(target, "cell_cat", None) is not None:   # parts of a cell's labelled category
+        cats = list(target.categories)
+        p.w_sem = weights.sem
+        p.cell_cat = _ptr(arr(target.cell_cat.reshape(-1), np.int8), C.c_int8)
+        p.opt_cat = _ptr(arr([cats.index(v.category) if v.category in cats else -1 for v, _ in opts], np.int32), C.c_int32)
+        if getattr(weights, "sem_area", True):
+            area = getattr(target, "cell_area", None)
+            area = semantic_areas(target.cell_cat) if area is None else area
+            p.cell_area = _ptr(arr(area.reshape(-1), np.int32), C.c_int32)
+            aff = getattr(target, "area_aff", None)
+            if aff is not None and getattr(target, "cell_area", None) is not None:   # areas numbered as labelled
+                col = {n: i for i, n in enumerate(target.aff_parts)}
+                n_area = int(area.max()) + 1
+                A = np.zeros((n_area, len(opts)), np.float32)
+                for k, (v, _) in enumerate(opts):
+                    if v.part.ldraw in col:
+                        A[:, k] = aff[:n_area, col[v.part.ldraw]]
+                p.area_aff = _ptr(arr(A.reshape(-1), np.float32), C.c_float)
+    if getattr(target, "cell_part", None) is not None:
+        p.cell_part = _ptr(arr(target.cell_part.reshape(-1), np.int16), C.c_int16)
+    if getattr(target, "lock", None) is not None:
+        p.lock = _ptr(arr(target.lock, np.uint8), C.c_uint8)
     rc = lib.e2l_sample(C.byref(p))
     if rc == 1:
         raise RuntimeError("native sampler panicked")
@@ -358,11 +765,25 @@ def run(target, stats, vocab, kind, weights, *, iters: int, warmup: int, seed: i
               int(out["y"][i]), int(out["x"][i]), int(out["z"][i])) for i in range(n)]
     keys = ("energy", "accepted", "t_start", "kl", "local_per_pair", "fidelity", "bad_cells",
             "unsupported", "bare_side_connectors", "parts", "pairs", "energy_recomputed",
-            "kl_paths", "outline", "content_loss", "style_loss")
+            "kl_paths", "outline", "content_loss", "style_loss",
+            "kl_paths4", "entropy_paths4", "revkl_paths4", "size_kl", "ungrounded")
     inf = {k: float(v) for k, v in zip(keys, info)}
-    for k in ("bad_cells", "unsupported", "bare_side_connectors", "parts"):
+    for k in ("bad_cells", "unsupported", "bare_side_connectors", "parts", "ungrounded"):
         inf[k] = int(inf[k])
+    inf["_err_cell"] = err_cell.reshape(H, X, Z, len(ERR_LAYERS))               # "_": kept out of info.json
+    inf["_err_item"] = err_item[:n * len(ERR_LAYERS)].reshape(n, len(ERR_LAYERS))
     return items, inf, hist[:int(hist_n[0])].tolist()
+
+
+def semantic_areas(cell_cat: np.ndarray) -> np.ndarray:
+    """Per cell its semantic area (-1 none): the 6-connected runs of cells with one label, numbered from 0."""
+    from scipy import ndimage
+    area, n = np.full(cell_cat.shape, -1, np.int32), 0
+    for c in np.unique(cell_cat[cell_cat >= 0]):
+        lab, k = ndimage.label(cell_cat == c)
+        area[lab > 0] = lab[lab > 0] - 1 + n
+        n += k
+    return area
 
 
 if __name__ == "__main__":

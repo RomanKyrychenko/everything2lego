@@ -16,7 +16,7 @@ import numpy as np
 import trimesh
 
 from .. import bricks, colors
-from ..voxelize import VoxelGrid, load_mesh, voxelize, _fit_transform
+from ..voxelize import VoxelGrid, grid_phase, load_mesh, voxelize
 
 
 @dataclass
@@ -59,8 +59,8 @@ class MeshTarget:
                    n_samples: int = 100_000,
                    color_samples: int = 120_000,
                    subvoxels: int = 1,
-                   min_island_cells: int = 0) -> "MeshTarget":
-        """Load a mesh from disk and build a MeshTarget."""
+                   min_island_cells: int = 0, align: bool = True) -> "MeshTarget":
+        """Load a mesh from disk and build a MeshTarget (align=False: the mesh is already square to the grid)."""
         mesh = load_mesh(path)
         # `voxelize.load_mesh` intentionally skips trimesh processing (for
         # reproducible voxelization). But the facet-based detector requires
@@ -74,7 +74,7 @@ class MeshTarget:
         return cls.from_mesh(mesh, max_studs=max_studs,
                               n_samples=n_samples,
                               color_samples=color_samples,
-                              subvoxels=subvoxels,
+                              subvoxels=subvoxels, align=align,
                               min_island_cells=min_island_cells)
 
     @classmethod
@@ -95,14 +95,17 @@ class MeshTarget:
         # then aggregates by majority vote at the LEGO scale — recovers
         # thin walls, sharp edges, small features (window frames,
         # trim) that the coarse grid alone would alias away.
+        # The mesh keeps its true scale and is shifted so its walls fall on cell faces (fewest part-filled cells);
+        # +0.5: trimesh's cell faces sit at half-integers.  Watermill: perfect-cell build's stray surface 24 % -> 9 %.
+        # shortcut: with subvoxels > 1 the shift is not kept exactly (fine cells group from the mesh's min corner).
         grid = voxelize(mesh, max_studs=max_studs,
                           color_samples=color_samples,
-                          subvoxels=subvoxels, align=False)
+                          subvoxels=subvoxels, align=False,
+                          offset=grid_phase(mesh, max_studs) + 0.5)
         # Drop voxel islands smaller than `min_island_cells`.  A marching-
         # cubes mesh sheds specks (a 2-cell "chimney" floating above the
         # roof) that no builder can attach to; removing them here keeps
-        # them out of every downstream stage and out of the bounds the
-        # mesh→voxel transform is fitted to.  Off by default (0): a clean
+        # them out of every downstream stage.  Off by default (0): a clean
         # authored mesh can legitimately have small detached parts — a
         # window pane modelled as its own box — that a builder will place.
         # The photo CLI path turns it on.
@@ -115,26 +118,9 @@ class MeshTarget:
                 small_ids = np.flatnonzero(sizes < min_island_cells)
                 if small_ids.size:
                     grid.palette_idx[np.isin(lab, small_ids)] = -1
-        # _fit_transform's T maps mesh_mm to voxel space with mesh CENTRED,
-        # but voxelize() shifts the grid so cell (0,0,0) is at the mesh's
-        # min-corner (all indices ≥ 0). Rebuild the transform so surface
-        # builders' coords align with the voxel grid's indices.
-        # The grid trimesh produces is a cell or two larger than the mesh's
-        # scaled extent (it keeps every cell the surface touches), so the
-        # transform is taken from the grid itself: the mesh's bounds map
-        # onto the occupied cells' extent, min corner to its first cell and
-        # max corner to the far side of its last.  Builders then find the
-        # outer faces of the model on the grid's outer cells.
-        occ = grid.occupied()
-        axes = (1, 0, 2)   # grid is (y, x, z); mesh axes are (x, y, z)
-        T = np.eye(4)
-        for mesh_axis, grid_axis in enumerate(axes):
-            filled = np.flatnonzero(occ.any(axis=tuple(a for a in range(3) if a != grid_axis)))
-            lo, n_cells = (int(filled.min()), int(filled.max() - filled.min() + 1)) if len(filled) else (0, 1)
-            extent = float(mesh.bounds[1, mesh_axis] - mesh.bounds[0, mesh_axis])
-            scale = n_cells / extent if extent > 1e-9 else 1.0
-            T[mesh_axis, mesh_axis] = scale
-            T[mesh_axis, 3] = lo - mesh.bounds[0, mesh_axis] * scale
+        # the voxeliser's own mesh -> cell map, at true scale (fitting the mesh's bounds to the occupied cells
+        # instead stretched it 1.5-3 % per axis and put every wall half a stud out)
+        T = grid.metadata["mesh_to_voxel"]
         return cls(
             mesh=mesh,
             max_studs=max_studs,

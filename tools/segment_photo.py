@@ -34,7 +34,7 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tools"))
 
 from everything2lego.sampler import known_kinds  # noqa: E402
-from segment_mesh import _components  # noqa: E402
+from segment_mesh import _components, _merge_small  # noqa: E402
 
 DEFAULT_SAM = os.environ.get("SAM_CHECKPOINT", "/Volumes/PRO-G40/models/sam/sam_vit_b_01ec64.pth")
 
@@ -62,6 +62,45 @@ def _camera(lat_deg: float, lon_deg: float):
     def project(pts: np.ndarray):
         return pts @ R.T                                                               # (N, 3) in camera frame
     return project
+
+
+def _silhouette(mesh: trimesh.Trimesh, view: tuple[float, float], W: int, H: int) -> np.ndarray:
+    """Boolean W x H image of the mesh projected with the view's camera —
+    for silhouette-matching the camera pose."""
+    project = _camera(*view)
+    verts = project(mesh.vertices)
+    lo, hi = verts[:, :2].min(0), verts[:, :2].max(0)
+    scale = min(W / (hi[0] - lo[0] + 1e-6), H / (hi[1] - lo[1] + 1e-6)) * 0.95
+    cx, cy = W / 2 - 0.5 * (lo[0] + hi[0]) * scale, H / 2 - 0.5 * (lo[1] + hi[1]) * scale
+    px = verts[:, 0] * scale + cx
+    py = H - 1 - (verts[:, 1] * scale + cy)
+    from PIL import ImageDraw
+    img = Image.new("1", (W, H), 0)
+    draw = ImageDraw.Draw(img)
+    for a, b, c in mesh.faces:
+        draw.polygon([(float(px[a]), float(py[a])), (float(px[b]), float(py[b])),
+                      (float(px[c]), float(py[c]))], fill=1)
+    return np.asarray(img, bool)
+
+
+def fit_view(mesh: trimesh.Trimesh, photo_mask: np.ndarray,
+             lat_grid=(-30, -15, 0, 15, 30), lon_grid=(0, 45, 90, 135, 180, 225, 270, 315),
+             size: int = 128) -> tuple[tuple[float, float], float]:
+    """The (lat, lon) view whose mesh silhouette best overlaps the photo's
+    foreground mask (biggest SAM mask).  Returns ((lat, lon), IoU)."""
+    from PIL import Image as _Im
+    H, W = photo_mask.shape
+    target = np.asarray(_Im.fromarray(photo_mask.astype(np.uint8) * 255).resize((size, size))) > 128
+    best, best_iou = (0.0, 0.0), -1.0
+    for lat in lat_grid:
+        for lon in lon_grid:
+            sil = _silhouette(mesh, (lat, lon), size, size)
+            inter = int((sil & target).sum())
+            union = int((sil | target).sum()) or 1
+            iou = inter / union
+            if iou > best_iou:
+                best_iou, best = iou, (float(lat), float(lon))
+    return best, best_iou
 
 
 def _face_to_mask(mesh: trimesh.Trimesh, masks: list[dict], view: tuple[float, float], W: int, H: int) -> np.ndarray:
@@ -92,7 +131,8 @@ def main() -> None:
     ap.add_argument("mesh", type=Path)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--studs", type=int, default=24, help="voxel resolution (match sampler_demo --studs)")
-    ap.add_argument("--view", default="0,0", help="LAT,LON (deg) of the camera; 0,0 is frontal +Z, model Y up")
+    ap.add_argument("--view", default="auto", help="LAT,LON (deg) of the camera; 'auto' fits the view by silhouette-matching the photo's biggest mask (default); 0,0 is frontal +Z, model Y up")
+    ap.add_argument("--carve-min-iou", type=float, default=0.65, help="skip the photo-silhouette carve when the fitted view's IoU is below this (default 0.65); a mediocre fit mis-carves real voxels")
     ap.add_argument("--kind", default=None, help="main object kind (biggest mask gets this)")
     ap.add_argument("--kinds", default=None, help='comma-separated mask_id=kind pairs, e.g. "0=road_vehicle,1=object"')
     ap.add_argument("--sam", default=DEFAULT_SAM, help="SAM checkpoint (env SAM_CHECKPOINT, default ViT-B)")
@@ -103,13 +143,18 @@ def main() -> None:
     masks = _sam_masks(photo, a.sam, a.sam_type)
     print(f"  {len(masks)} masks", flush=True)
     mesh = trimesh.load(a.mesh, force="mesh", process=False)
-    view = tuple(float(v) for v in a.view.split(","))
+    if a.view == "auto":
+        biggest = max(masks, key=lambda m: m["area"])["segmentation"]
+        view, iou = fit_view(mesh, np.asarray(biggest, bool))
+        print(f"  fit view lat={view[0]:+.0f} lon={view[1]:+.0f} (silhouette IoU {iou:.2f})", flush=True)
+    else:
+        view = tuple(float(v) for v in a.view.split(","))
+        iou = 1.0                                                    # user-asserted view
     W, H = photo.size
     face_mask = _face_to_mask(mesh, masks, view, W, H)
     # mask id per cluster: split faces with same mask id into connected components,
     # then each component is a region (same pipeline as segment_mesh)
-    comp = _components(mesh, face_mask)
-    face_region = comp
+    face_region = _merge_small(mesh, _components(mesh, face_mask))
     # kind per mask id: biggest mask → main kind, rest → object; overrides win
     kinds_valid = known_kinds()
     overrides: dict[str, str] = {}
@@ -148,8 +193,37 @@ def main() -> None:
     _, nearest_face = tree.query(cell_centres_mesh)
     label = np.full(occ.shape, -1, np.int64)
     label[ys, xs, zs] = face_region[nearest_face]
+    # photo-silhouette carve: voxels whose projection to the fitted view
+    # lands on the photo's background get removed before the sampler runs.
+    # shortcut: single-view silhouette carve, so interior hollows that
+    # project behind foreground pixels are kept; upgrade to a VGG
+    # perceptual loss evaluated during annealing when we need colour/texture
+    # match too, not just outline.
+    biggest = np.asarray(max(masks, key=lambda m: m["area"])["segmentation"], bool)
+    Hp, Wp = biggest.shape
+    project = _camera(*view)
+    verts2 = project(mesh.vertices)
+    vlo, vhi = verts2[:, :2].min(0), verts2[:, :2].max(0)
+    scale = min(Wp / (vhi[0] - vlo[0] + 1e-6), Hp / (vhi[1] - vlo[1] + 1e-6)) * 0.95
+    cx, cy = Wp / 2 - 0.5 * (vlo[0] + vhi[0]) * scale, Hp / 2 - 0.5 * (vlo[1] + vhi[1]) * scale
+    vox_cam = project(cell_centres_mesh)
+    px = (vox_cam[:, 0] * scale + cx).astype(int).clip(0, Wp - 1)
+    py = (Hp - 1 - (vox_cam[:, 1] * scale + cy)).astype(int).clip(0, Hp - 1)
+    carve = np.zeros(occ.shape, bool)
+    carve[ys, xs, zs] = ~biggest[py, px]
+    frac = float(carve.sum()) / max(1, int(occ.sum()))
+    if iou < a.carve_min_iou:
+        print(f"  carve skipped: view-fit IoU {iou:.2f} below --carve-min-iou {a.carve_min_iou}; "
+              f"would have dropped {frac:.0%}", flush=True)
+        carve[:] = False
+    elif frac > 0.5:
+        print(f"  carve skipped: biggest SAM mask excludes {frac:.0%} of mesh — probably not the subject", flush=True)
+        carve[:] = False
+    else:
+        print(f"  carve: {int(carve.sum())} / {int(occ.sum())} voxels drop ({frac:.0%}) by photo silhouette", flush=True)
     np.savez(a.out, label=label,
-             kind_of=np.array([[str(r), region_kind[r]] for r in region_kind], dtype=object))
+             kind_of=np.array([[str(r), region_kind[r]] for r in region_kind], dtype=object),
+             carve=carve)
     seen = {int(r): int((label == r).sum()) for r in region_kind}
     print(f"-> {a.out}: {len(region_kind)} regions by mask-majority; cells {dict(sorted(seen.items(), key=lambda x: -x[1])[:10])}")
 

@@ -45,8 +45,11 @@ from everything2lego.sampler import SUB, pack  # noqa: E402  (one bit order for 
 
 CATEGORIES = ("Bricks", "Plates", "Tiles", "Bricks Sloped", "Bricks Curved", "Bricks Round and Cones",
               "Tiles Round and Curved", "Plates Round Curved and Dishes", "Bricks Wedged", "Plates Wedged",
-              "Bricks Special", "Plates Special", "Tiles Special")
-MIN_SETS = 30
+              "Bricks Special", "Plates Special", "Tiles Special",
+              "Hinges, Arms and Turntables", "Technic Bricks", "Technic Beams",
+              "Windows and Doors", "Panels", "Bars, Ladders and Fences", "Baseplates",
+              "Plants & Trees", "Containers", "Supports, Girders and Cranes", "Flags, Banners and Signs")
+MIN_SETS = 5                  # sets ever (older moulds the official models still use count too)
 TOL = 1.0                     # LDU a body may miss the grid by
 
 
@@ -143,9 +146,12 @@ def shape(row, T: np.ndarray | None = None, relaxed: bool = False, parity: int =
         z0, z1 = _snap(P[:, 2].min(), 10), _snap(P[:, 2].max(), 10)
         y0, y1 = _snap(P[:, 1].min(), 8), _snap(P[:, 1].max(), 8)    # the body's top and bottom
         if None in (y0, y1) and studs:
-            # the plate grid starts at its studs' base (y 0); the box takes in what hangs below
-            y0 = 0.0 if P[:, 1].min() > -TOL else y0
-            y1 = 8 * np.ceil((P[:, 1].max() - TOL) / 8)
+            # the plate grid starts at its studs' base (y 0, body growing
+            # downward); the box takes in what hangs below, and ignores a
+            # finger or clip sticking above (hinge plates)
+            y0 = 0.0
+            body_max = P[P[:, 1] > -TOL, 1]
+            y1 = 8 * np.ceil(((body_max.max() if len(body_max) else P[:, 1].max()) - TOL) / 8)
         if None in (x0, x1, z0, z1) and studs:
             # something sticks out past the grid (a holder's pins, a clip): the
             # grid is where its studs are; the box takes in what sticks out
@@ -180,8 +186,41 @@ def shape(row, T: np.ndarray | None = None, relaxed: bool = False, parity: int =
             "occ": np.round(occ, 3).tolist(), "bits": bits.tolist(), "fill": float(occ.mean())}
 
 
+def filler_assemblies(con) -> dict[str, dict]:
+    """Each host with the filler official models put in it most (fillers.py: a frame's glass, a door frame's door,
+    a counter's drawers), at every offset that filler takes there in at least half as many models: one part, the
+    pair's shape, the host's connectors and box; the fillers written with it (`companion`, JSON
+    [[ldraw, dx, dy, dz, colour], ...], offsets in the host's LDU)."""
+    from build import DATA, _ld_to_part
+    f = DATA / "analysis" / "filler_pairs.json"
+    if not f.exists():
+        return {}
+    ldmap = _ld_to_part(con)
+    studs = {}
+    for pn, x, z in con.execute("SELECT part_num, x, z FROM connector "
+                                "WHERE (kind='stud' AND fy<-0.9) OR (kind='antistud' AND fy>0.9)"):
+        studs.setdefault(pn, []).append((x, z))
+    by_host: dict[str, list] = {}
+    for p in json.loads(f.read_text()):                 # most models first
+        by_host.setdefault(p["host"], []).append(p)
+    out = {}
+    for host, ps in by_host.items():
+        top = [p for p in ps if p["filler"] == ps[0]["filler"] and p["models"] * 2 >= ps[0]["models"]]
+        pn = ldmap.get(host, host[:-4])
+        T = np.concatenate([triangles(host)] + [triangles(p["filler"]) + np.array(p["at"], float) for p in top])
+        s = shape((pn, host, studs.get(pn)), T)
+        if s is not None:
+            s["companion"] = json.dumps([[p["filler"], *p["at"], p["colour"]] for p in top])
+            s["variant"] = "filled"
+            out[f"{pn}|filled"] = s
+    return out
+
+
 SIDE_KINDS = ("stud", "antistud", "pin", "pinhole", "axle", "axlehole", "bar", "barhole", "clip",
               "finger", "generic")
+
+
+VERIFIED = ("stud", "antistud", "barhole")   # side kinds BrickNet labels as points (bars, clips: segments; fingers, pins: other forms)
 
 
 def connections(con, shapes: dict[str, dict]) -> None:
@@ -190,17 +229,25 @@ def connections(con, shapes: dict[str, dict]) -> None:
     opens on and that face.  An assembly takes its first part's connectors."""
     c = pd.read_sql(f"SELECT part_num, kind, gender, x, y, z, fx, fy, fz FROM connector "
                     f"WHERE kind IN ({','.join(repr(k) for k in SIDE_KINDS)})", con)
+    from vocabulary import bricknet_labels
+    labels, aliases = bricknet_labels()
     for pn, g in c.groupby("part_num"):
         for s in [v for v in shapes.values() if v["part_num"] == pn]:
-            _connect(s, g)
+            st = str(s["ldraw"]).lower().removesuffix(".dat")
+            lab = labels.get(aliases.get(st, st) + ".dat")
+            pts = None if lab is None else np.array([r[:3] for k in lab.values() for rows in k.values() for r in rows
+                                                     if all(isinstance(v, (int, float)) for v in r[:3])],
+                                                    float).reshape(-1, 3)
+            _connect(s, g, pts)
 
 
-def _connect(s: dict, g) -> None:
+def _connect(s: dict, g, pts=None) -> None:
     """Top studs and bottom holes as cells; side connectors as points on
     the box's faces: (kind:gender, face, t, hy) — t along the face in half
     studs from the box's minimum corner, hy in half plates from its bottom.
     Two parts join at their sides where their faces touch at the same point
-    with kinds that fit (sampler.FITS)."""
+    with kinds that fit (sampler.FITS); a side connector only within 4 LDU of
+    one of BrickNet's verified connectors (pts, part coordinates; None = all)."""
     top, bottom, sides, off = set(), set(), set(), 0
     occ = s["occ"]
     W, D, H = s["w"], s["d"], s["h"]
@@ -226,6 +273,9 @@ def _connect(s: dict, g) -> None:
             face, t = ("+z" if r.fz > 0 else "-z"), (r.x - s["x0"]) / 10
         else:
             continue                                         # a slanted connector
+        if pts is not None and r.kind in VERIFIED and (not len(pts) or np.min(np.linalg.norm(pts - (r.x, r.y, r.z), axis=1)) > 4):
+            off += 1                                         # no verified connector there (a headlight's hollow-stud axis)
+            continue
         hy = (H * 8 - ry) / 4                                # half plates from the bottom
         if abs(t - round(t)) > 0.2:
             off += 1                                         # between half studs: off the grid
@@ -264,17 +314,32 @@ def wheel_assemblies(con) -> dict[str, dict]:
 
 def main() -> None:
     con = sqlite3.connect(DB)
+    if "--sides-only" in sys.argv:                           # redo the connectors on the stored shapes (seconds, not hours)
+        df = pd.read_sql("SELECT * FROM part_shape", con)
+        shapes = {i: {**r, "occ": json.loads(r["occ"]), "studs_top": [], "holes_bottom": [], "sides": []}
+                  for i, r in enumerate(df.to_dict("records"))}
+        connections(con, shapes)
+        for c in ("studs_top", "holes_bottom", "sides"):
+            df[c] = [json.dumps(shapes[i].get(c, [])) for i in range(len(df))]
+        df["offgrid"] = [shapes[i].get("offgrid", 0) for i in range(len(df))]
+        df.to_sql("part_shape", con, if_exists="replace", index=False)
+        con.execute("CREATE INDEX IF NOT EXISTS ix_shape ON part_shape(part_num)")
+        con.commit()
+        print(f"part_shape: connectors redone on {len(df)} parts")
+        return
     q = f"""SELECT p.part_num, MIN(g.ldraw) FROM part p JOIN geometry g ON g.part_num = p.part_num
-            WHERE p.category IN ({",".join("?" * len(CATEGORIES))}) AND p.n_sets_recent >= ?
+            WHERE p.category IN ({",".join("?" * len(CATEGORIES))}) AND p.n_sets >= ?
             AND g.ldraw IS NOT NULL GROUP BY p.part_num"""
     studs = {}
-    for pn, x, z in con.execute("SELECT part_num, x, z FROM connector WHERE kind = 'stud' AND fy < -0.9"):
+    for pn, x, z in con.execute("SELECT part_num, x, z FROM connector "
+                                "WHERE (kind='stud' AND fy<-0.9) OR (kind='antistud' AND fy>0.9)"):
         studs.setdefault(pn, []).append((x, z))
     rows = [(pn, ld, studs.get(pn)) for pn, ld in con.execute(q, (*CATEGORIES, MIN_SETS)).fetchall()]
     with Pool(max(1, (os.cpu_count() or 2) - 1)) as pool:
         got = [s for s in pool.imap_unordered(shape, rows, chunksize=4) if s]
     shapes = {s["part_num"]: s for s in got}
     shapes.update(wheel_assemblies(con))
+    shapes.update(filler_assemblies(con))
     connections(con, shapes)
     df = pd.DataFrame([{**s, "occ": json.dumps(s["occ"]), "bits": json.dumps(s["bits"]),
                         "studs_top": json.dumps(s.get("studs_top", [])),

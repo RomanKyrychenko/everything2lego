@@ -32,6 +32,9 @@ class Placement:
     # colour code of the glass part (bricks.GLASS), or None.  It shares the
     # frame's cells, so the structure never sees it; the exporters write it.
     glass: int | None = None
+    # A sideways part (snot_options): (LDraw 3x3 rotation, row-major; its origin in box-local LDU x, y up, z),
+    # the box's minimum corner being cell (x_stud, y_plate, z_stud).  None: a studs-up part, posed by rotation_deg.
+    snot: tuple | None = None
 
 
 def _try_fit(voxels: np.ndarray, filled: np.ndarray,

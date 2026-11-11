@@ -40,14 +40,21 @@ from everything2lego.sampler import known_kinds  # noqa: E402
 
 
 def _face_colours(mesh: trimesh.Trimesh) -> np.ndarray | None:
-    """(F, 3) uint8 face colours — from face colours, vertex colours or
-    texture (lazy)."""
+    """(F, 3) uint8 face colours — from face colours, vertex colours, or
+    the texture via visual.to_color() for textured (PBR) meshes."""
     v = mesh.visual
     if hasattr(v, "face_colors") and v.face_colors is not None and len(v.face_colors) == len(mesh.faces):
         return np.asarray(v.face_colors[:, :3], np.uint8)
     if hasattr(v, "vertex_colors") and v.vertex_colors is not None and len(v.vertex_colors) == len(mesh.vertices):
         vc = np.asarray(v.vertex_colors[:, :3], np.uint8)
         return vc[mesh.faces].mean(axis=1).astype(np.uint8)
+    if hasattr(v, "to_color"):
+        try:
+            vc = np.asarray(v.to_color().vertex_colors[:, :3], np.uint8)
+            if len(vc) == len(mesh.vertices):
+                return vc[mesh.faces].mean(axis=1).astype(np.uint8)
+        except Exception:
+            pass
     return None
 
 
@@ -76,6 +83,53 @@ def _components(mesh: trimesh.Trimesh, face_label: np.ndarray) -> np.ndarray:
     g = csr_matrix((np.ones(len(e)), (e[:, 0], e[:, 1])), shape=(n, n))
     _, comp = connected_components(g, directed=False)
     return comp
+
+
+def _merge_small(mesh: trimesh.Trimesh, face_region: np.ndarray, min_faces: int = 20) -> np.ndarray:
+    """Absorb regions with fewer than `min_faces` into the largest adjacent
+    region (and from there into theirs' if still small).  Keeps the big
+    regions' ids; small regions' faces take their new region's id.  Removes
+    projection noise and SAM mask edge artefacts that split one surface
+    into many tiny components."""
+    from collections import Counter, defaultdict
+    region_faces = defaultdict(list)
+    for i, r in enumerate(face_region):
+        region_faces[int(r)].append(i)
+    small = {r for r, f in region_faces.items() if len(f) < min_faces}
+    if not small:
+        return face_region
+    # neighbour sizes per small region
+    e = mesh.face_adjacency
+    adj = defaultdict(lambda: Counter())
+    for a, b in e:
+        ra, rb = int(face_region[a]), int(face_region[b])
+        if ra != rb:
+            adj[ra][rb] += 1
+            adj[rb][ra] += 1
+    out = face_region.copy()
+    changed = True
+    while changed and small:
+        changed = False
+        for r in list(small):
+            # pick the LARGEST neighbour that isn't also small
+            big_neighbours = [(len(region_faces[nb]), nb) for nb in adj[r] if nb not in small]
+            if not big_neighbours:
+                continue
+            _, target = max(big_neighbours)
+            for f in region_faces[r]:
+                out[f] = target
+            region_faces[target].extend(region_faces[r])
+            # retarget adj
+            for nb, w in adj[r].items():
+                if nb != target:
+                    adj[target][nb] += w
+                    adj[nb][target] += w
+                    adj[nb].pop(r, None)
+            del adj[r]
+            del region_faces[r]
+            small.remove(r)
+            changed = True
+    return out
 
 
 def segment(mesh: trimesh.Trimesh, k: int = 4) -> list[dict]:
@@ -111,7 +165,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("mesh", type=Path)
     ap.add_argument("--out", type=Path, default=None, help="where to write regions.json for sampler_demo --regions")
-    ap.add_argument("--k", type=int, default=4, help="k-means clusters over face colours (default 4)")
+    ap.add_argument("--k", type=int, default=8, help="k-means clusters over face colours (default 8; bump for highly textured meshes)")
     ap.add_argument("--studs", type=int, default=24, help="voxelise at this grid resolution (same as sampler_demo)")
     ap.add_argument("--kind", default=None, help="the object's main kind (used to label the biggest region)")
     ap.add_argument("--kinds", default=None, help="comma-separated region=kind, e.g. 'wheel=road_vehicle,body=object'")
@@ -153,7 +207,7 @@ def main() -> None:
     # take its region id (connected-components label).  Fast query via trimesh.
     face_region = np.zeros(len(mesh.faces), np.int64)
     comp = _components(mesh, _cluster_colours(_face_colours(mesh), a.k)[0])
-    face_region[:] = comp
+    face_region[:] = _merge_small(mesh, comp)
     centres = mesh.triangles_center
     from scipy.spatial import cKDTree
     tree = cKDTree(centres)

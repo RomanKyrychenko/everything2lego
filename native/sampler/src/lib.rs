@@ -79,6 +79,16 @@ pub struct Problem {
     pub w_glob2: f64,
     pub logp2: *const f64, // n_tok*n_tok*3: log p_ref of path patterns (a - b - c as (a, c, where))
     pub middle_w: *const f64, // n_tok: a path's weight through a part of this token
+    // 4-walk patterns a - b - c - d, keyed by (a_tok, d_tok, direction, mid_bucket)
+    // with mid_bucket an 8-way hash of the sorted pair of middle kinds.
+    pub w_glob3: f64,
+    pub logp3: *const f64,      // n_tok*n_tok*3*8 or null if disabled
+    pub mid_bucket: *const i32, // n_tok*n_tok or null: bucket for the middle pair (b, c)
+    pub max_deg_paths4: i32,    // degree cap: parts with more neighbours skip paths4 (0 = no cap)
+    pub paths4_sample_n: i32,   // deterministic subsample: keep walks where hash(a,b,c,d) % N == 0 (0/1 = all)
+    pub w_entropy_glob3: f64,   // anti mode-collapse: energy -= w_entropy_glob3 * H(kl3) (nats)
+    pub w_revkl_glob3: f64,     // coverage term: energy -= w_revkl_glob3 * (s_plogc / n_ours)
+    pub pref3: *const f64,      // n_tok*n_tok*3*8 or null: p_ref values parallel to logp3
     // each option's outline in the three axis views, sample pixels box-local:
     // along x (sy, sz), along y (sx, sz), along z (sy, sx)
     pub pixx_start: *const i32,
@@ -112,6 +122,22 @@ pub struct Problem {
     pub opt_variants: *const i32,  // n_opt: swap-group id (same box kind + size); -1 none
     pub net_static: i32,       // the wider view's features per cell (proposals.static_context)
     pub static_: *const f32,   // H*X*Z*net_static
+    // hinge pairs (everything2lego/hinges.py; tools/partsdb/hinges.py): each entry
+    // is (opt_a, opt_b, dy, dx, dz) in sampler grid units, with opt_a/b indexing
+    // into the opts array.  See hinge_swap() for how the pose is applied.
+    pub n_hinge: i32,
+    pub hinge_data: *const i32,   // n_hinge*5: (opt_a, opt_b, dy, dx, dz)
+    // multi-scale warm-start (sampler._place_init / tools/multi_scale.py):
+    // placements from a coarse pass that pre-populate the state before filler.
+    pub n_init: i32,
+    pub init_opt: *const i32,     // n_init
+    pub init_colour: *const i32,  // n_init
+    pub init_y: *const i32,       // n_init
+    pub init_x: *const i32,       // n_init
+    pub init_z: *const i32,       // n_init
+    // per-cell architectural region label (classify_regions.LABEL); -1 absent.
+    // masonry_shift keys on label==1 (wall).
+    pub region_label: *const i32, // H*X*Z or null
     pub t_start_share: f64,
     pub t_final_share: f64,
     pub iters: i64,
@@ -131,11 +157,159 @@ pub struct Problem {
     pub hist_cap: i32,
     pub hist_n: *mut i32,
     pub hist: *mut f64,
+    // part-size statistics: energy += w_size * n_parts * KL(build's size-class mix || real sets'),
+    // classes by footprint and height (sizes.py); null / 0 = off
+    pub w_size: f64,
+    pub n_size_class: i32,
+    pub opt_class: *const i32, // n_opt: size class of each option
+    pub size_pref: *const f64, // n_size_class: the classes' share in real sets
+    // sideways building (snot_options.pair_rows): rows of 7 ints (plain brick option, its side-stud anchor option,
+    // a sideways plate / tile option, dy, dx, dz of the tile's box from the brick's, which anchor stud it hangs on)
+    pub n_snot_rows: i32,
+    pub snot_rows: *const i32,
+    // sideways share: energy += w_sideways * n_parts * KL(Bernoulli(build's sideways share) || p_sideways); 0 = off
+    pub w_sideways: f64,
+    pub p_sideways: f64,
+    pub opt_sideways: *const u8, // n_opt: 1 = a sideways option
+    // surface fit (surface_fit.py): per cell and sample (bit order of the masks), the cost of LEGO there when the
+    // target is empty (grows with the distance to the target's surface) and the reward for covering it when the
+    // target is full (1 near the outer surface, ~0 deep inside); null = the plain count of wrong samples
+    pub w_out: *const f32, // h*x*z*64
+    pub w_in: *const f32,  // h*x*z*64
+    // bigger parts first: the filler adds w_big * ln(cells a part fills) to each candidate's score (a proposal
+    // preference; the energy still accepts or rejects); 0 = off
+    pub w_big: f64,
+    // stacked joints: energy += w_stack * n_bricks * KL(Bernoulli(stacked pairs / bricks) || p_stack), a stacked pair
+    // = a brick right on a brick of the same footprint (joints line up instead of overlapping); null / 0 = off
+    pub w_stack: f64,
+    pub p_stack: f64,
+    pub opt_brick: *const u8, // n_opt: a plain brick
+    // exposed studs: energy += w_bare_top per top stud whose cell above is empty and outside the target (nothing
+    // will ever sit on it: a tile or a slope belongs there); 0 = off
+    pub w_bare_top: f64,
+    // diagnostics: options to watch (e.g. slope courses); stderr reports how often a move adds one and is accepted
+    pub opt_watch: *const u8, // n_opt or null
+    // surface direction (surface_dir.py): energy += w_dir * sum over a part's faces in outer-surface cells that face
+    // outward (cos > dir_thr against the target's direction there) of area * (1 - cos); null / 0 = off
+    pub w_dir: f64,
+    pub dir_thr: f64,
+    pub t_normal: *const f32, // h*x*z*3: unit outward direction (y, x, z) per surface cell, zeros elsewhere
+    pub dir_start: *const i32, // n_opt + 1
+    pub dir_rows: *const f32,  // rows of 7: cy, cx, cz, g (y, x, z), |g|  (area in stud tops)
+    // bigger parts first, falling: w_big goes linearly from w_big to w_big_end over the run (big parts laid first,
+    // smaller ones let in later); < 0 = constant w_big
+    pub w_big_end: f64,
+    // building patterns (tools/learn/motifs.py): groups of parts at fixed relative cells, placed in one move with a
+    // share p_motif of all moves; rows of 4 (option, dy, dx, dz), weight = sets that use the pattern; 0 = off
+    pub p_motif: f64,
+    pub n_motif: i32,
+    pub motif_start: *const i32, // n_motif + 1
+    pub motif_rows: *const i32,  // 4 per row
+    pub motif_w: *const f64,     // n_motif
+    // part mix by surface type (surface_mix.py): energy += w_surf * sum over types of n_t * KL(build's class mix
+    // in type t || real sets'); a part's type is the commonest surface type among its cells; 0 = off
+    pub w_surf: f64,
+    pub n_stype: i32,
+    pub n_pclass: i32,
+    pub cell_type: *const i8,    // h*x*z
+    pub opt_pclass: *const i32,  // n_opt
+    pub surf_lpref: *const f64,  // n_stype * n_pclass: ln P(class | type), real sets
+    pub surf_lmarg: *const f64,  // n_pclass: ln P(class), real sets (the filler adds the lift of the type)
+    pub motif_type: *const u8,   // n_motif: 0 anywhere, 1 on a roof (cell_type 1); null = all 0
+    // error-guided moves: with probability p_guide a move picks its place in proportion to the local error
+    // (State::error_map, refreshed every guide_every steps); err_cell / err_item (n_cell / out_cap * N_ERR) get the
+    // final map when not null
+    pub p_guide: f64,
+    pub guide_every: i32,
+    pub err_cell: *mut f64,
+    pub err_item: *mut f64,
+    pub p_resolve: f64, // shares of the re-solve and orient moves (taken from retile's)
+    pub p_orient: f64,
+    pub lock: *const u8, // H*X*Z: cells whose parts no move may change (a region rebuilt inside a fixed build); null = none
+    pub col_max: f64, // Lab distance past which a showing cell's colour error costs COL_FAR times more (0 = off)
+    pub p_echo: f64,  // share of the echo move (taken from retile's): a part copied along the target's self-similar runs
+    // shape first: a move that leaves the shape term (unweighted) above this and worse than before is rejected, so
+    // the other terms improve the build only within this shape budget; 0 = off
+    pub fid_cap: f64,
+    pub w_part: f64,   // energy per part (fewest parts; 0 = off)
+    pub recolour: i32, // 1: the starting parts take the colour colour_for gives them, not the one passed in
+    // surface distance: energy += w_sdist * sum over parts' surface (sd_rows: the library triangles' area per
+    // sub-sample, part_surface.py) of area * max(d - 1, 0), d = that sub-sample's distance to the target in
+    // tolerances (sdist, 0 inside): LEGO surface standing off the target, thin parts included
+    pub w_sdist: f64,
+    pub sdist: *const f32,    // h*x*z*64
+    pub sd_start: *const i32, // n_opt + 1
+    pub sd_rows: *const f32,  // (sy, sx, sz, area) per row
+    // connectivity: energy += w_conn per part with no chain of connections (stud on hole, side connectors) to the
+    // ground layer -- a part resting on another without a connection, an island built on top; 0 = off
+    pub w_conn: f64,
+    // collisions: energy += w_coll per (part, cell) where the part's geometry reaching past the cells it claims
+    // (prot_rows: box-local sub-samples, part_surface.protrusion_tables) meets another part's sub-samples there, unless
+    // the two join by side connectors (a side stud in a hole); 0 = off
+    pub w_coll: f64,
+    pub prot_start: *const i32, // n_opt + 1
+    pub prot_rows: *const i32,  // (sy, sx, sz) per row
+    // bonding: energy += w_grip * n_parts * KL(Bernoulli(share of parts joined through top and bottom to exactly one
+    // part) || p_grip): real sets interlock (staggered seams), a column or a lone plate on one part does not; 0 = off
+    pub w_grip: f64,
+    pub p_grip: f64,
+    // mirror move: share of moves (taken from retile's) placing a part's mirror image across a plane the target is
+    // mirror-symmetric about; mirror_opt (n_opt*2, null = none): per option, its mirror image's option under x -> -x
+    // and under z -> -z (same part or its chiral counterpart, -1 when none)
+    pub p_mirror: f64,
+    pub mirror_opt: *const i32,
+    pub p_phase: f64, // share of the phase move (taken from retile's): a window's plates rebuilt as bricks on one course phase
+    // semantic labels (tools/semantic_labels.py): energy -= w_sem * sum over parts of their cells whose label cell_cat
+    // (H*X*Z, -1 none) is the part's category opt_cat (n_opt, -1 none); the filler ranks / scores with the same bonus
+    pub w_sem: f64,
+    pub cell_cat: *const i8,
+    pub opt_cat: *const i32,
+    // mesh parts (tools/part_labels.py): H*X*Z part id (-1 none; null = off); mirror planes are found per part and
+    // mirror / echo map a cell only onto cells of its own part
+    pub cell_part: *const i16,
+    // semantic areas (null = per-cell bonus above): H*X*Z area id (-1 none), an area being a 6-connected run of cells
+    // with one label; energy -= w_sem * sum over areas of min(cells covered by parts of its category, cap), cap = the
+    // area's size or its category's smallest part's cells if fewer: one part fills it, a second earns nothing
+    pub cell_area: *const i32,
+    // per semantic area how much each option's part is what it shows (n_area * n_opt, in [0, 1]; null = by category,
+    // above): an option earns aff * its cells in the area, any category, the area's cap is its best part's cells
+    pub area_aff: *const f32,
+    // learned realism (tools/learn/v14_blame.py): every v14_every-th guide refresh, v14_cb(n, opt, colour, y, x, z, out)
+    // writes each live part's blame (P(fake) above the build's median); the guide then gives it v14_share of its weight
+    pub v14_share: f64,
+    pub v14_every: i32,
+    pub v14_cb: Option<unsafe extern "C" fn(i32, *const i32, *const i32, *const i32, *const i32, *const i32, *mut f64)>,
+    // masked part model (tools/learn/mlm_parts.py): at the same refreshes, mlm_cb(n_items, items (class, y, x, z, h, w, d)
+    // per part, n_cells, cells, out) writes log P(class | the parts around) for each wanted cell (n_cells x net_c);
+    // the filler then ranks with it instead of the proposal net until the next call; with w_mlm > 0 each part also costs
+    // w_mlm * its regret there (the best class's log P minus its own), a pseudo-likelihood term in the energy
+    pub mlm_cb: Option<unsafe extern "C" fn(i32, *const i32, i32, *const i32, *mut f32)>,
+    pub w_mlm: f64,
+    // infill model (tools/learn/infill_model.py student): flat weights (export order), sizes [d, layers, heads, n_ctx,
+    // n_lab, n_tok, win], per option its label (-1: none); p_infill = share of moves that refill a window with it
+    pub inf_w: *const f32,
+    pub inf_n: i32,
+    pub inf_dims: *const i32,
+    pub opt_label: *const i32,
+    pub p_infill: f64,
 }
 
-const INFO_LEN: usize = 16;
+/// Error map layers: shape, colour, support (unsupported, bare side connectors, exposed studs), surface direction,
+/// statistics (each part's share of the global terms by the chain rule, State::stat_blame).
+const N_ERR: usize = 5;
+
+const INFO_LEN: usize = 21;
+const PATHS4_BUCKETS: usize = 8;
 const NSAMP: f64 = 64.0;
+
+/// A cell's shape error from its wrong sub-samples (of 64): squared share, so a cell left empty (all wrong) costs
+/// 1 while one a slope or plate misses by an eighth costs 1/64 -- holes count far above near misses.
+fn miss(wrong: u32) -> f64 {
+    let e = wrong as f64 / NSAMP;
+    e * e
+}
 const SUB: i32 = 4;
+const BOTTOM: u64 = 0xFFFF;                                  // a cell's lowest layer of sub-samples
 
 // ---------------------------------------------------------------------------
 // random numbers: xoshiro256**, seeded by splitmix64
@@ -226,12 +400,14 @@ struct Data {
     nll: Vec<f64>,
     logp: Vec<f64>,
     snap: Vec<i32>,
+    part_colours: Vec<Vec<usize>>, // per part, the colours it is made in (snap[c] == c)
     opts: Vec<Opt>,
     boxes: std::collections::HashMap<(i32, i32, i32, i32), usize>,
     variants: std::collections::HashMap<i32, Vec<usize>>,
     opt_variants: Vec<i32>,
     w_cov: f64,
     w_col: f64,
+    col_max: f64,
     w_loc: f64,
     w_glob: f64,
     w_sup: f64,
@@ -247,12 +423,94 @@ struct Data {
     w_glob2: f64,
     logp2: Vec<f64>,
     middle_w: Vec<f64>,
+    w_glob3: f64,
+    logp3: Vec<f64>,       // n_tok*n_tok*3*8 or empty
+    mid_bucket: Vec<i32>,  // n_tok*n_tok or empty
+    max_deg_paths4: i32,
+    paths4_sample_n: u32,
+    w_entropy_glob3: f64,
+    w_revkl_glob3: f64,
+    pref3: Vec<f64>,
     tsil: [Vec<bool>; 3],
     scols: [i32; 3], // columns of each view (rows are implied)
     n_conn: usize,
     fits: Vec<u8>,
     net: Option<Net>,
+    inf: Option<Infill>,
+    opt_label: Vec<i32>,
+    p_infill: f64,
     top_k: usize,
+    hinge_a: Vec<usize>,
+    hinge_b: Vec<usize>,
+    hinge_pose: Vec<[i32; 3]>, // (dy, dx, dz)
+    hinge_by_a: std::collections::HashMap<usize, Vec<usize>>, // opt_a -> indices into hinge_a/b/pose
+    region_label: Vec<i32>,    // H*X*Z or empty
+    w_size: f64,
+    opt_class: Vec<usize>,     // n_opt (empty when off)
+    size_lpref: Vec<f64>,      // ln of the real sets' class shares
+    snot_rows: Vec<(usize, usize, i32, i32, i32, i32)>, // (anchor, tile, dy, dx, dz, stud)
+    snot_by_opt: Vec<Vec<usize>>,                         // brick option -> its rows (empty when off)
+    w_sideways: f64,
+    p_sideways: f64,
+    opt_sideways: Vec<bool>,                              // n_opt (empty when off)
+    w_big: f64,
+    p_motif: f64,
+    p_guide: f64,
+    gg: bool,            // on unless E2L_GG=0: guided proposals choose the move by the cell's error layer (propose)
+    p_resolve: f64,
+    p_orient: f64,
+    p_echo: f64,
+    fid_cap: f64,
+    w_part: f64,
+    recolour: bool,
+    w_sdist: f64,
+    w_conn: f64,
+    w_coll: f64,
+    w_grip: f64,
+    p_grip: f64,
+    p_phase: f64,
+    w_sem: f64,
+    cell_cat: Vec<i8>,
+    opt_cat: Vec<i32>,
+    cell_area: Vec<i32>, // empty = per-cell bonus
+    area_aff: Vec<f32>,  // empty = by category
+    opt_aff: Vec<bool>,  // option earns somewhere (area_aff)
+    area_cap: Vec<i32>,
+    prot: Vec<Vec<(i32, i32, i32, u64)>>, // per option: cells (box-local) its geometry reaches past its own, with the sub-samples
+    sdist: Vec<f32>,
+    sd_start: Vec<usize>,
+    sd_rows: Vec<[f32; 4]>,
+    sim: Vec<u32>,       // per cell: bit k set when the target around it matches the target around it + ECHO_T[k]
+    p_mirror: f64,
+    mirror_opt: Vec<[i32; 2]>,        // per option: its mirror image's option across x / z planes (-1 none)
+    mirror_planes: Vec<(usize, i32)>, // (axis 0 = x, 1 = z; s): cell coordinate c -> s - c
+    msym: Vec<u8>,                    // per cell: bit k set when the target around it is mirror-symmetric about plane gplanes[group][k]
+    gplanes: Vec<Vec<(usize, i32)>>,  // per group (part, or one group without parts): its planes (index into mirror_planes, group its images lie in)
+    cell_part: Vec<i16>,              // H*X*Z part id, -1 none (empty: no parts)
+    lock: Vec<bool>,                                      // H*X*Z (empty when none)
+    w_surf: f64,
+    n_pclass: usize,
+    cell_type: Vec<i8>,
+    opt_pclass: Vec<usize>,
+    surf_lpref: Vec<f64>,
+    surf_lmarg: Vec<f64>,
+    motif_start: Vec<usize>,
+    motif_rows: Vec<(usize, i32, i32, i32)>,
+    motif_cum: Vec<f64>, // cumulative weights, for drawing a pattern by how many sets use it
+    motif_by_type: [(Vec<usize>, Vec<f64>); 3], // per type (0 anywhere, 1 pitched roof, 2 flat top): patterns and cumulative weights
+    w_stack: f64,
+    p_stack: f64,
+    opt_brick: Vec<bool>,
+    w_bare_top: f64,
+    opt_watch: Vec<bool>,
+    w_dir: f64,
+    dir_thr: f64,
+    t_normal: Vec<f32>,
+    dir_start: Vec<usize>,
+    dir_rows: Vec<[f32; 7]>,
+    w_out: Vec<f32>,                                      // n*64 (empty: plain sample count)
+    w_in: Vec<f32>,
+    fid0: f64,                                            // the shape term of an empty build
 }
 
 unsafe fn v<T: Copy>(p: *const T, n: usize) -> Vec<T> {
@@ -268,7 +526,9 @@ impl Data {
         let tbits = v(p.tbits, n);
         let fill = tbits.iter().map(|b| b.count_ones() as f64 / NSAMP).collect();
         let want: Vec<bool> = v(p.want, n).iter().map(|&b| b != 0).collect();
-        let want_cells = (0..n).filter(|&i| want[i]).collect();
+        // with a lock, the cells moves work at are the free ones (a region rebuilt inside the whole build)
+        let lock_cells: Vec<u8> = if p.lock.is_null() { Vec::new() } else { v(p.lock, n) };
+        let want_cells = (0..n).filter(|&i| want[i] && lock_cells.get(i).map_or(true, |&l| l == 0)).collect();
         let n_opt = p.n_opt as usize;
         let size = v(p.opt_size, n_opt * 3);
         let first = v(p.opt_first, n_opt * 3);
@@ -353,7 +613,7 @@ impl Data {
         }
         let n_col = p.n_col as usize;
         let n_tok = p.n_tok as usize;
-        Data {
+        let mut d = Data {
             h: p.h,
             x: p.x,
             z: p.z,
@@ -370,12 +630,17 @@ impl Data {
             nll: v(p.nll, n_tok * n_tok * 3),
             logp: v(p.logp, n_tok * n_tok * 3),
             snap: v(p.snap, p.n_part as usize * n_col),
+            part_colours: (0..p.n_part as usize).map(|q| {
+                let row = v(p.snap, p.n_part as usize * n_col);
+                (0..n_col).filter(|&c| row[q * n_col + c] == c as i32).collect()
+            }).collect(),
             opts,
             boxes,
             variants,
             opt_variants,
             w_cov: p.w_cov,
             w_col: p.w_col,
+            col_max: p.col_max,
             w_loc: p.w_loc,
             w_glob: p.w_glob,
             w_sup: p.w_sup,
@@ -391,6 +656,17 @@ impl Data {
             w_glob2: p.w_glob2,
             logp2: v(p.logp2, n_tok * n_tok * 3),
             middle_w: v(p.middle_w, n_tok),
+            w_glob3: p.w_glob3,
+            logp3: if p.logp3.is_null() { Vec::new() }
+                     else { v(p.logp3, n_tok * n_tok * 3 * PATHS4_BUCKETS) },
+            mid_bucket: if p.mid_bucket.is_null() { Vec::new() }
+                          else { v(p.mid_bucket, n_tok * n_tok) },
+            max_deg_paths4: p.max_deg_paths4,
+            paths4_sample_n: p.paths4_sample_n.max(1) as u32,
+            w_entropy_glob3: p.w_entropy_glob3,
+            w_revkl_glob3: p.w_revkl_glob3,
+            pref3: if p.pref3.is_null() { Vec::new() }
+                    else { v(p.pref3, n_tok * n_tok * 3 * PATHS4_BUCKETS) },
             tsil: [
                 v(p.tsx, (p.h * SUB * p.z * SUB) as usize).iter().map(|&b| b != 0).collect(),
                 v(p.tsy, (p.x * SUB * p.z * SUB) as usize).iter().map(|&b| b != 0).collect(),
@@ -400,8 +676,184 @@ impl Data {
             n_conn: p.n_conn as usize,
             fits: v(p.fits, (p.n_conn * p.n_conn) as usize),
             net: if p.use_net != 0 { Some(Net::from(p, n_opt)) } else { None },
+            inf: if p.inf_w.is_null() || p.use_net == 0 { None } else { Some(Infill::from(p)) },
+            opt_label: if p.opt_label.is_null() { Vec::new() } else { v(p.opt_label, n_opt) },
+            p_infill: if p.inf_w.is_null() || p.use_net == 0 { 0.0 } else { p.p_infill },
             top_k: p.top_k.max(1) as usize,
+            hinge_a: Vec::new(),
+            hinge_b: Vec::new(),
+            hinge_pose: Vec::new(),
+            hinge_by_a: std::collections::HashMap::new(),
+            region_label: if p.region_label.is_null() { Vec::new() }
+                          else { v(p.region_label, n) },
+            w_size: if p.opt_class.is_null() { 0.0 } else { p.w_size },
+            opt_class: if p.opt_class.is_null() { Vec::new() } else { v(p.opt_class, n_opt).iter().map(|&c| c as usize).collect() },
+            size_lpref: if p.size_pref.is_null() { Vec::new() }
+                        else { v(p.size_pref, p.n_size_class as usize).iter().map(|&q| q.max(1e-6).ln()).collect() },
+            snot_rows: Vec::new(),
+            snot_by_opt: Vec::new(),
+            w_sideways: if p.opt_sideways.is_null() { 0.0 } else { p.w_sideways },
+            p_sideways: p.p_sideways.clamp(1e-4, 1.0 - 1e-4),
+            opt_sideways: if p.opt_sideways.is_null() { Vec::new() } else { v(p.opt_sideways, n_opt).iter().map(|&b| b != 0).collect() },
+            w_big: p.w_big,
+            p_motif: 0.0,
+            p_guide: p.p_guide,
+            gg: std::env::var("E2L_GG").map_or(true, |v| v != "0"),
+            p_resolve: p.p_resolve,
+            p_orient: p.p_orient,
+            p_echo: p.p_echo,
+            fid_cap: p.fid_cap,
+            w_part: p.w_part,
+            recolour: p.recolour != 0,
+            w_conn: p.w_conn,
+            w_coll: if p.prot_rows.is_null() { 0.0 } else { p.w_coll },
+            w_grip: p.w_grip,
+            p_grip: p.p_grip.clamp(1e-4, 1.0 - 1e-4),
+            p_phase: p.p_phase,
+            w_sem: if p.cell_cat.is_null() || p.opt_cat.is_null() { 0.0 } else { p.w_sem },
+            cell_cat: if p.cell_cat.is_null() || p.opt_cat.is_null() { Vec::new() } else { v(p.cell_cat, n) },
+            opt_cat: if p.cell_cat.is_null() || p.opt_cat.is_null() { Vec::new() } else { v(p.opt_cat, n_opt) },
+            cell_area: Vec::new(),
+            area_aff: Vec::new(),
+            opt_aff: Vec::new(),
+            area_cap: Vec::new(),
+            prot: if p.prot_rows.is_null() || p.prot_start.is_null() { Vec::new() } else {
+                let st = v(p.prot_start, n_opt + 1);
+                let raw = v(p.prot_rows, st[n_opt] as usize * 3);
+                (0..n_opt).map(|k| {
+                    let mut by: Vec<(i32, i32, i32, u64)> = Vec::new();
+                    for r in st[k] as usize..st[k + 1] as usize {
+                        let (sy, sx, sz) = (raw[3 * r], raw[3 * r + 1], raw[3 * r + 2]);
+                        let c = (sy.div_euclid(SUB), sx.div_euclid(SUB), sz.div_euclid(SUB));
+                        let b = 1u64 << ((sy.rem_euclid(SUB) * SUB + sx.rem_euclid(SUB)) * SUB + sz.rem_euclid(SUB));
+                        match by.iter_mut().find(|e| (e.0, e.1, e.2) == c) { Some(e) => e.3 |= b, None => by.push((c.0, c.1, c.2, b)) }
+                    }
+                    by
+                }).collect()
+            },
+            w_sdist: if p.sdist.is_null() || p.sd_rows.is_null() { 0.0 } else { p.w_sdist },
+            sdist: if p.sdist.is_null() || p.sd_rows.is_null() { Vec::new() } else { v(p.sdist, n * 64) },
+            sd_start: if p.sd_start.is_null() { Vec::new() } else { v(p.sd_start, n_opt + 1).iter().map(|&s| s as usize).collect() },
+            sd_rows: if p.sd_rows.is_null() || p.sd_start.is_null() { Vec::new() } else {
+                let m = *v(p.sd_start, n_opt + 1).last().unwrap() as usize;
+                v(p.sd_rows, m * 4).chunks(4).map(|r| [r[0], r[1], r[2], r[3]]).collect()
+            },
+            sim: Vec::new(),
+            p_mirror: if p.mirror_opt.is_null() { 0.0 } else { p.p_mirror },
+            mirror_opt: if p.mirror_opt.is_null() { Vec::new() } else { v(p.mirror_opt, n_opt * 2).chunks(2).map(|r| [r[0], r[1]]).collect() },
+            mirror_planes: Vec::new(),
+            msym: Vec::new(),
+            gplanes: Vec::new(),
+            cell_part: if p.cell_part.is_null() { Vec::new() } else { v(p.cell_part, n) },
+            lock: if p.lock.is_null() { Vec::new() } else { v(p.lock, n).iter().map(|&b| b != 0).collect() },
+            w_surf: if p.cell_type.is_null() { 0.0 } else { p.w_surf },
+            n_pclass: p.n_pclass.max(0) as usize,
+            cell_type: if p.cell_type.is_null() { Vec::new() } else { v(p.cell_type, n) },
+            opt_pclass: if p.cell_type.is_null() { Vec::new() } else { v(p.opt_pclass, n_opt).iter().map(|&c| c as usize).collect() },
+            surf_lpref: if p.cell_type.is_null() { Vec::new() } else { v(p.surf_lpref, (p.n_stype * p.n_pclass) as usize) },
+            surf_lmarg: if p.cell_type.is_null() { Vec::new() } else { v(p.surf_lmarg, p.n_pclass as usize) },
+            motif_start: Vec::new(),
+            motif_rows: Vec::new(),
+            motif_cum: Vec::new(),
+            motif_by_type: [(Vec::new(), Vec::new()), (Vec::new(), Vec::new()), (Vec::new(), Vec::new())],
+            w_stack: if p.opt_brick.is_null() { 0.0 } else { p.w_stack },
+            p_stack: p.p_stack.clamp(1e-4, 1.0 - 1e-4),
+            opt_brick: if p.opt_brick.is_null() { Vec::new() } else { v(p.opt_brick, n_opt).iter().map(|&b| b != 0).collect() },
+            w_bare_top: p.w_bare_top,
+            opt_watch: if p.opt_watch.is_null() { Vec::new() } else { v(p.opt_watch, n_opt).iter().map(|&b| b != 0).collect() },
+            w_dir: if p.dir_rows.is_null() || p.t_normal.is_null() { 0.0 } else { p.w_dir },
+            dir_thr: p.dir_thr,
+            t_normal: if p.t_normal.is_null() { Vec::new() } else { v(p.t_normal, n * 3) },
+            dir_start: if p.dir_start.is_null() { Vec::new() } else { v(p.dir_start, n_opt + 1).iter().map(|&s| s as usize).collect() },
+            dir_rows: Vec::new(),
+            w_out: if p.w_out.is_null() || p.w_in.is_null() { Vec::new() } else { v(p.w_out, n * 64) },
+            w_in: if p.w_out.is_null() || p.w_in.is_null() { Vec::new() } else { v(p.w_in, n * 64) },
+            fid0: 0.0,
+        };
+        if d.w_sem != 0.0 && !p.cell_area.is_null() {
+            d.cell_area = v(p.cell_area, n);
+            let mut size = vec![0i32; d.cell_area.iter().map(|&a| a + 1).max().unwrap_or(0) as usize];
+            let mut cat = vec![0i8; size.len()];
+            for (i, &a) in d.cell_area.iter().enumerate() { if a >= 0 { size[a as usize] += 1; cat[a as usize] = d.cell_cat[i]; } }
+            let mut small = vec![i32::MAX; 128];                    // per category: its smallest part's cells
+            for (k, &c) in d.opt_cat.iter().enumerate() { if c >= 0 { small[c as usize] = small[c as usize].min(d.opts[k].cells.len() as i32); } }
+            d.area_cap = size.iter().zip(&cat).map(|(&s, &c)| s.min(small[c.max(0) as usize])).collect();
+            if !p.area_aff.is_null() {
+                let no = d.opts.len();
+                d.area_aff = v(p.area_aff, size.len() * no);
+                d.opt_aff = (0..no).map(|k| (0..size.len()).any(|a| d.area_aff[a * no + k] > 0.0)).collect();
+                for a in 0..size.len() {                         // one part of the best match fills it
+                    let row = &d.area_aff[a * no..(a + 1) * no];
+                    if let Some(k) = (0..no).max_by(|&i, &j| row[i].total_cmp(&row[j])) {
+                        if row[k] > 0.0 { d.area_cap[a] = size[a].min(d.opts[k].cells.len() as i32); }
+                    }
+                }
+            }
         }
+        let n_motif = p.n_motif.max(0) as usize;
+        if p.p_motif > 0.0 && n_motif > 0 && !p.motif_rows.is_null() {
+            d.motif_start = v(p.motif_start, n_motif + 1).iter().map(|&s| s as usize).collect();
+            let raw = v(p.motif_rows, d.motif_start[n_motif] * 4);
+            d.motif_rows = raw.chunks(4).map(|r| (r[0] as usize, r[1], r[2], r[3])).collect();
+            let mut acc = 0.0;
+            let w = v(p.motif_w, n_motif);
+            d.motif_cum = w.iter().map(|w| { acc += w; acc }).collect();
+            let ty = if p.motif_type.is_null() { vec![0u8; n_motif] } else { v(p.motif_type, n_motif) };
+            for t in 0..3 {
+                let mut acc = 0.0;
+                let ms: Vec<usize> = (0..n_motif).filter(|&m| ty[m] as usize == t).collect();
+                d.motif_by_type[t].1 = ms.iter().map(|&m| { acc += w[m]; acc }).collect();
+                d.motif_by_type[t].0 = ms;
+            }
+            d.p_motif = p.p_motif;
+        }
+        if d.w_dir != 0.0 {
+            let m = *d.dir_start.last().unwrap();
+            let raw = v(p.dir_rows, m * 7);
+            d.dir_rows = (0..m).map(|r| [raw[7 * r], raw[7 * r + 1], raw[7 * r + 2], raw[7 * r + 3], raw[7 * r + 4], raw[7 * r + 5], raw[7 * r + 6]]).collect();
+        }
+        if d.p_echo > 0.0 {
+            d.sim = self_similarity(&d);
+        }
+        if d.p_mirror > 0.0 {
+            // with parts, the global planes first: their cells per part, for comparison (stderr)
+            let glob = if d.cell_part.is_empty() { Vec::new() } else { mirror_symmetry(&d, false, &[]).2 };
+            let (planes, gplanes, msym) = mirror_symmetry(&d, !d.cell_part.is_empty(), &glob);
+            d.mirror_planes = planes;
+            d.gplanes = gplanes;
+            d.msym = msym;
+        }
+        d.fid0 = if d.w_in.is_empty() { d.tbits.iter().map(|t| miss(t.count_ones())).sum() }
+                 else { (0..n).map(|c| (0..64).filter(|&b| d.tbits[c] >> b & 1 == 1).map(|b| d.w_in[c * 64 + b] as f64).sum::<f64>()).sum::<f64>() / NSAMP };
+        let n_snot = p.n_snot_rows.max(0) as usize;
+        if n_snot > 0 && !p.snot_rows.is_null() {
+            let raw = v(p.snot_rows, n_snot * 7);
+            d.snot_by_opt = vec![Vec::new(); n_opt];
+            for r in 0..n_snot {
+                let q = &raw[7 * r..7 * r + 7];
+                d.snot_by_opt[q[0] as usize].push(d.snot_rows.len());
+                d.snot_rows.push((q[1] as usize, q[2] as usize, q[3], q[4], q[5], q[6]));
+            }
+        }
+        let n_hinge = p.n_hinge.max(0) as usize;
+        if n_hinge > 0 {
+            let raw = v(p.hinge_data, n_hinge * 5);
+            for k in 0..n_hinge {
+                let a = raw[5 * k] as usize;
+                let b = raw[5 * k + 1] as usize;
+                let dy = raw[5 * k + 2];
+                let dx = raw[5 * k + 3];
+                let dz = raw[5 * k + 4];
+                if a >= d.opts.len() || b >= d.opts.len() {
+                    continue;
+                }
+                d.hinge_by_a.entry(a).or_default().push(d.hinge_a.len());
+                d.hinge_a.push(a);
+                d.hinge_b.push(b);
+                d.hinge_pose.push([dy, dx, dz]);
+            }
+        }
+        d
     }
 
     #[inline]
@@ -412,6 +864,28 @@ impl Data {
     #[inline]
     fn key(&self, a: usize, b: usize, d: u8) -> usize {
         (a * self.n_tok + b) * 3 + d as usize
+    }
+
+    /// 4-walk pattern key: (a_tok, d_tok, direction, mid_bucket) into a dense array.
+    #[inline]
+    fn key4(&self, a: usize, d_tok: usize, dir: u8, bucket: usize) -> usize {
+        ((a * self.n_tok + d_tok) * 3 + dir as usize) * PATHS4_BUCKETS + bucket
+    }
+
+    /// Bucket for a middle (b_tok, c_tok) pair.  Returns -1 (interpreted as
+    /// "disabled") when mid_bucket wasn't provided.
+    #[inline]
+    fn bucket(&self, b: usize, c: usize) -> i32 {
+        if self.mid_bucket.is_empty() {
+            -1
+        } else {
+            self.mid_bucket[b * self.n_tok + c]
+        }
+    }
+
+    #[inline]
+    fn paths4_enabled(&self) -> bool {
+        !self.logp3.is_empty() && !self.mid_bucket.is_empty()
     }
 
     /// Index into view `a` of an option's outline pixel (u, v) placed at (oy, ox, oz).
@@ -425,6 +899,19 @@ impl Data {
         (r * self.scols[a] + c) as usize
     }
 
+    /// The colour option k takes when it replaces a part of `colour`: that colour when the part is made in it; with
+    /// colour off (w_col 0: shape and part count first, colour after) the nearest it is made in.
+    fn made_in(&self, k: usize, colour: i32) -> Option<i32> {
+        let c = self.snap[self.opts[k].part * self.n_col + colour as usize];
+        if c == colour || self.w_col == 0.0 { Some(c) } else { None }
+    }
+
+    /// One showing cell's colour error: its Lab distance, and past col_max COL_FAR times more, so a part whose
+    /// colour is plainly not the area's (a grey slope on a brown roof) is all but kept out.
+    fn col_err(&self, e: f64) -> f64 {
+        if self.col_max > 0.0 && e > self.col_max { e + COL_FAR * (e - self.col_max) } else { e }
+    }
+
     /// Colour error of the cells that show, if this option took this colour there.
     fn colour_cost(&self, o: &Opt, oy: i32, ox: i32, oz: i32, colour: i32) -> f64 {
         let lab = &self.pal_lab[3 * colour as usize..3 * colour as usize + 3];
@@ -434,20 +921,112 @@ impl Data {
             if self.visible[i] && self.tcolour[i] >= 0 {
                 let t = &self.tlab[3 * i..3 * i + 3];
                 let (a, b, c) = ((t[0] - lab[0]) as f64, (t[1] - lab[1]) as f64, (t[2] - lab[2]) as f64);
-                s += (a * a + b * b + c * c).sqrt() * occ;
+                s += self.col_err((a * a + b * b + c * c).sqrt()) * occ;
             }
         }
         s
     }
 
     /// Change in wrong samples (/64) from filling these empty cells so.
+    /// Surface direction cost of option k placed at (oy, ox, oz): its outward faces in surface cells, area * (1 - cos).
+    /// Surface type of option k at (oy, ox, oz): the commonest of 1..4 among its cells, else 0 (interior).
+    fn surf_type(&self, k: usize, oy: i32, ox: i32, oz: i32) -> usize {
+        let mut c = [0u32; 8];
+        for &(y, x, z, _, _) in &self.opts[k].cells {
+            c[self.cell_type[self.idx(oy + y, ox + x, oz + z)] as usize & 7] += 1;
+        }
+        (1..5).max_by_key(|&t| (c[t], std::cmp::Reverse(t))).filter(|&t| c[t] > 0).unwrap_or(0)
+    }
+
+    fn dir_cost(&self, k: usize, oy: i32, ox: i32, oz: i32) -> f64 {
+        if self.w_dir == 0.0 { return 0.0; }
+        let mut s = 0f64;
+        for r in &self.dir_rows[self.dir_start[k]..self.dir_start[k + 1]] {
+            let (y, x, z) = (oy + r[0] as i32, ox + r[1] as i32, oz + r[2] as i32);
+            if !self.inside(y, x, z) { continue; }
+            let c = 3 * self.idx(y, x, z);
+            let (ny, nx, nz) = (self.t_normal[c], self.t_normal[c + 1], self.t_normal[c + 2]);
+            if ny == 0.0 && nx == 0.0 && nz == 0.0 { continue; }
+            let dot = (r[3] * ny + r[4] * nx + r[5] * nz) as f64;
+            if dot > self.dir_thr * r[6] as f64 { s += r[6] as f64 - dot; }
+        }
+        s
+    }
+
+    /// Cells of option k placed at (oy, ox, oz) labelled with its semantic category (w_sem).
+    fn sem_hits(&self, k: usize, oy: i32, ox: i32, oz: i32) -> f64 {
+        if self.w_sem == 0.0 || self.opt_cat[k] < 0 { return 0.0; }
+        let c = self.opt_cat[k] as i8;
+        self.opts[k].cells.iter().filter(|&&(y, x, z, _, _)| self.cell_cat[self.idx(oy + y, ox + x, oz + z)] == c).count() as f64
+    }
+
+    /// Labelled cells option k placed at (oy, ox, oz) covers in each semantic area, each weighted by how much its
+    /// part is what the area shows (area_aff; by category: 1 or 0): (area, weighted cells).
+    fn sem_area_hits(&self, k: usize, oy: i32, ox: i32, oz: i32) -> Vec<(usize, f64)> {
+        let mut v: Vec<(usize, f64)> = Vec::new();
+        let aff = !self.area_aff.is_empty();
+        if self.w_sem == 0.0 || if aff { !self.opt_aff[k] } else { self.opt_cat[k] < 0 } { return v; }
+        let c = self.opt_cat[k] as i8;
+        for &(y, x, z, _, _) in &self.opts[k].cells {
+            let i = self.idx(oy + y, ox + x, oz + z);
+            if self.cell_area[i] < 0 || (!aff && self.cell_cat[i] != c) { continue; }
+            let a = self.cell_area[i] as usize;
+            let w = if aff { self.area_aff[a * self.opts.len() + k] as f64 } else { 1.0 };
+            if w <= 0.0 { continue; }
+            match v.iter_mut().find(|e| e.0 == a) { Some(e) => e.1 += w, None => v.push((a, w)) }
+        }
+        v
+    }
+
+    /// Semantic bonus (in cells) option k at (oy, ox, oz) adds to parts covering m[a] cells of each area (missing = 0):
+    /// its labelled cells, or in area mode the cells up to each area's cap.
+    fn sem_gain(&self, m: &[f64], k: usize, oy: i32, ox: i32, oz: i32) -> f64 {
+        if self.cell_area.is_empty() { return self.sem_hits(k, oy, ox, oz); }
+        self.sem_area_hits(k, oy, ox, oz).iter().map(|&(a, n)| {
+            let (m, cap) = (m.get(a).copied().unwrap_or(0.0), self.area_cap[a] as f64);
+            (m + n).min(cap) - m.min(cap)
+        }).sum()
+    }
+
+    /// Surface distance of option k placed at (oy, ox, oz): over its surface rows, area * how far past one tolerance
+    /// the row's sub-sample stands off the target.
+    fn sdist_cost(&self, k: usize, oy: i32, ox: i32, oz: i32) -> f64 {
+        if self.w_sdist == 0.0 { return 0.0; }
+        let mut cost = 0f64;
+        for r in &self.sd_rows[self.sd_start[k]..self.sd_start[k + 1]] {
+            let q = [oy * SUB + r[0] as i32, ox * SUB + r[1] as i32, oz * SUB + r[2] as i32];
+            if q[0] < 0 || q[1] < 0 || q[2] < 0 || q[0] >= self.h * SUB || q[1] >= self.x * SUB || q[2] >= self.z * SUB {
+                continue;                                             // the part is inside its box, the box on the grid
+            }
+            let c = self.idx(q[0] / SUB, q[1] / SUB, q[2] / SUB);
+            let b = ((q[0] % SUB) * SUB + q[1] % SUB) * SUB + q[2] % SUB;
+            let dist = self.sdist[c * 64 + b as usize] as f64;
+            if dist > 1.0 { cost += r[3] as f64 * (dist - 1.0); }
+        }
+        cost
+    }
+
     fn fid_delta(&self, o: &Opt, oy: i32, ox: i32, oz: i32) -> f64 {
-        let mut s = 0i64;
+        if !self.w_in.is_empty() {                       // surface fit: weighted by the distance to the target's surface
+            let mut s = 0f64;
+            for &(y, x, z, bits, _) in &o.cells {
+                let c = self.idx(oy + y, ox + x, oz + z);
+                let t = self.tbits[c];
+                let mut b = bits;
+                while b != 0 {
+                    let k = b.trailing_zeros() as usize;
+                    s += if t >> k & 1 == 1 { -(self.w_in[c * 64 + k] as f64) } else { self.w_out[c * 64 + k] as f64 };
+                    b &= b - 1;
+                }
+            }
+            return s / NSAMP;
+        }
+        let mut s = 0f64;
         for &(y, x, z, bits, _) in &o.cells {
             let t = self.tbits[self.idx(oy + y, ox + x, oz + z)];
-            s += (bits ^ t).count_ones() as i64 - t.count_ones() as i64;
+            s += miss((bits ^ t).count_ones()) - miss(t.count_ones());
         }
-        s as f64 / NSAMP
+        s
     }
 
     /// The cells a side connector faces: just outside its face, one or (on
@@ -476,6 +1055,16 @@ impl Data {
 
     fn inside(&self, y: i32, x: i32, z: i32) -> bool {
         y >= 0 && x >= 0 && z >= 0 && y < self.h && x < self.x && z < self.z
+    }
+
+    /// Cells c and q lie in the same mesh part (always, without parts).
+    fn same_part(&self, c: usize, q: usize) -> bool {
+        self.cell_part.is_empty() || self.cell_part[c] == self.cell_part[q]
+    }
+
+    /// The mirror group of cell c: its part (-1 none), or 0 without parts.
+    fn group(&self, c: usize) -> i32 {
+        if self.cell_part.is_empty() { 0 } else { self.cell_part[c] as i32 }
     }
 
     /// Its side connectors facing no cell of the object.
@@ -513,6 +1102,18 @@ impl Data {
         false
     }
 
+    /// Whether a male side connector of a (stud, pin, axle, bar: CONNECTORS 0, 2, 4, 6) meets a male one of b
+    /// face to face: two studs can't share the point (a side stud into a headlight's recessed stud).
+    fn sides_clash(&self, a: &Opt, ay: i32, ax: i32, az: i32, b: &Opt, by: i32, bx: i32, bz: i32) -> bool {
+        let male = |k: i32| matches!(k, 0 | 2 | 4 | 6);
+        a.sides.iter().filter(|s| male(s.5)).any(|&(hx, hy, hz, dx, dz, _)| {
+            b.sides.iter().any(|&(gx, gy, gz, ex, ez, kb)| {
+                male(kb) && ex == -dx && ez == -dz && 2 * bx + gx == 2 * ax + hx && 2 * bz + gz == 2 * az + hz
+                    && (2 * by + gy - 2 * ay - hy).abs() <= 1
+            })
+        })
+    }
+
     /// The share of its top with more to build above but no stud there.
     fn capped(&self, o: &Opt, oy: i32, ox: i32, oz: i32) -> f64 {
         if oy + o.h >= self.h {
@@ -530,25 +1131,31 @@ impl Data {
     }
 
     /// The target's commonest colour over its cells, as the part is made in it.
-    fn colour_for(&self, o: &Opt, oy: i32, ox: i32, oz: i32, counts: &mut Vec<u32>) -> i32 {
-        counts.iter_mut().for_each(|c| *c = 0);
-        let mut any = false;
-        for &(y, x, z, _, _) in &o.cells {
-            let c = self.tcolour[self.idx(oy + y, ox + x, oz + z)];
-            if c >= 0 {
-                counts[c as usize] += 1;
-                any = true;
-            }
-        }
-        let mut best = 0usize;
-        if any {
-            for c in 0..self.n_col {
-                if counts[c] > counts[best] {
-                    best = c;
+    /// The colour the part is made in that is nearest the target over its cells (Lab distance summed): a 2x4 slope
+    /// over dark orange and reddish brown cells is reddish brown, not the red nearest dark orange alone.  Judged
+    /// first by the cells that show, as colour_cost charges them (a roof part over dark hidden cells was chosen
+    /// black and showed black); all its cells only break ties, so a hidden part still takes its surroundings' colour.
+    fn colour_for(&self, o: &Opt, oy: i32, ox: i32, oz: i32, _counts: &mut Vec<u32>) -> i32 {
+        let cols = &self.part_colours[o.part];
+        let mut best = (f64::INFINITY, f64::INFINITY, -1i32);
+        for &k in cols {
+            let lab = &self.pal_lab[3 * k..3 * k + 3];
+            let (mut shown, mut all) = (0f64, 0f64);
+            for &(y, x, z, _, occ) in &o.cells {
+                let i = self.idx(oy + y, ox + x, oz + z);
+                if self.tcolour[i] >= 0 {
+                    let t = &self.tlab[3 * i..3 * i + 3];
+                    let (a, b, c) = ((t[0] - lab[0]) as f64, (t[1] - lab[1]) as f64, (t[2] - lab[2]) as f64);
+                    let e = (a * a + b * b + c * c).sqrt();
+                    all += e;
+                    if self.visible[i] { shown += self.col_err(e) * occ; }
                 }
             }
+            if (shown, all) < (best.0, best.1) {
+                best = (shown, all, k as i32);
+            }
         }
-        self.snap[o.part * self.n_col + best]
+        if best.2 >= 0 { best.2 } else { self.snap[o.part * self.n_col] }
     }
 }
 
@@ -556,6 +1163,8 @@ impl Data {
 // the proposal network (everything2lego/proposals.py: the same window,
 // features and layers)
 // ---------------------------------------------------------------------------
+
+const COL_FAR: f64 = 10.0;
 
 const WY: (i32, i32) = (-1, 4);
 const WX: (i32, i32) = (-2, 4);
@@ -632,6 +1241,188 @@ impl Net {
     }
 }
 
+/// The infill model (tools/learn/infill_model.py): a pre-norm transformer over [target, target shape, neighbours].
+struct Infill {
+    d: usize, layers: usize, heads: usize, n_ctx: usize, n_lab: usize, n_tok: usize, win: usize,
+    w: Vec<f32>,
+    off: Vec<usize>, // start of each tensor in w, export order
+}
+
+impl Infill {
+    unsafe fn from(p: &Problem) -> Infill {
+        let dm = v(p.inf_dims, 7);
+        let (d, layers, heads, n_ctx, n_lab, n_tok, win) = (dm[0] as usize, dm[1] as usize, dm[2] as usize, dm[3] as usize, dm[4] as usize, dm[5] as usize, dm[6] as usize);
+        let mut sizes = vec![(n_lab + 2) * d, (n_tok + 1) * d, d * 6, d, d * win * 8, d, 3 * d];
+        for _ in 0..layers {
+            sizes.extend_from_slice(&[d, d, 3 * d * d, 3 * d, d * d, d, d, d, 2 * d * d, 2 * d, 2 * d * d, d]);
+        }
+        sizes.extend_from_slice(&[d, d, (n_lab + 1) * d, n_lab + 1]);
+        let mut off = Vec::with_capacity(sizes.len());
+        let mut acc = 0;
+        for s in &sizes { off.push(acc); acc += s; }
+        assert_eq!(acc, p.inf_n as usize, "infill weights: sizes do not match");
+        Infill { d, layers, heads, n_ctx, n_lab, n_tok, win, w: v(p.inf_w, acc), off }
+    }
+
+    fn t(&self, k: usize) -> &[f32] {
+        let end = if k + 1 < self.off.len() { self.off[k + 1] } else { self.w.len() };
+        &self.w[self.off[k]..end]
+    }
+
+    /// y = W x + b, W (out, in) row-major as torch.nn.Linear.
+    fn linear(w: &[f32], b: &[f32], x: &[f32], out: &mut [f32]) {
+        let n = x.len();
+        for (o, (row, bo)) in out.iter_mut().zip(w.chunks_exact(n).zip(b)) {
+            *o = bo + row.iter().zip(x).map(|(a, b)| a * b).sum::<f32>();
+        }
+    }
+
+    fn norm(x: &[f32], g: &[f32], b: &[f32], out: &mut [f32]) {
+        let n = x.len() as f32;
+        let m = x.iter().sum::<f32>() / n;
+        let var = x.iter().map(|v| (v - m) * (v - m)).sum::<f32>() / n;
+        let r = 1.0 / (var + 1e-5).sqrt();
+        for i in 0..x.len() { out[i] = (x[i] - m) * r * g[i] + b[i]; }
+    }
+
+    /// The target's final vector (before the head): ctx rows [label, class, dy, dx, dz, h, w, d], shape WIN*8 fills.
+    fn encode(&self, ctx: &[[i32; 8]], shape: &[f32]) -> Vec<f32> {
+        let d = self.d;
+        let n = 2 + ctx.len();
+        let mut x = vec![0f32; n * d];
+        let kind = self.t(6);
+        let lab = self.t(0);
+        for j in 0..d { x[j] = lab[(self.n_lab + 1) * d + j] + kind[j]; }
+        let mut tmp = vec![0f32; d];
+        Infill::linear(self.t(4), self.t(5), shape, &mut tmp);
+        for j in 0..d { x[d + j] = tmp[j] + kind[d + j]; }
+        let tok = self.t(1);
+        for (r, c) in ctx.iter().enumerate() {
+            let g = [c[2] as f32 / 6.0, c[3] as f32 / 4.0, c[4] as f32 / 4.0, c[5] as f32 / 8.0, c[6] as f32 / 8.0, c[7] as f32 / 8.0];
+            Infill::linear(self.t(2), self.t(3), &g, &mut tmp);
+            let (l, k) = (c[0].max(0) as usize, c[1].max(0) as usize);
+            let row = &mut x[(2 + r) * d..(3 + r) * d];
+            for j in 0..d { row[j] = tmp[j] + lab[l * d + j] + tok[k * d + j] + kind[2 * d + j]; }
+        }
+        let (h, hd) = (self.heads, d / self.heads);
+        let scale = 1.0 / (hd as f32).sqrt();
+        let (mut a, mut qkv, mut att, mut o, mut f1) = (vec![0f32; d], vec![0f32; n * 3 * d], vec![0f32; n * d], vec![0f32; d], vec![0f32; 2 * d]);
+        for l in 0..self.layers {
+            let b = 7 + 12 * l;
+            let last = l + 1 == self.layers;                 // only the target's row is needed after the last layer
+            for r in 0..n {
+                Infill::norm(&x[r * d..(r + 1) * d], self.t(b), self.t(b + 1), &mut a);
+                Infill::linear(self.t(b + 2), self.t(b + 3), &a, &mut qkv[r * 3 * d..(r + 1) * 3 * d]);
+            }
+            let rows = if last { 1 } else { n };
+            let mut sc = vec![0f32; n];
+            for r in 0..rows {
+                for hh in 0..h {
+                    let q = &qkv[r * 3 * d + hh * hd..r * 3 * d + (hh + 1) * hd];
+                    let mut m = f32::NEG_INFINITY;
+                    for k in 0..n {
+                        let kv = &qkv[k * 3 * d + d + hh * hd..k * 3 * d + d + (hh + 1) * hd];
+                        sc[k] = q.iter().zip(kv).map(|(a, b)| a * b).sum::<f32>() * scale;
+                        m = m.max(sc[k]);
+                    }
+                    let mut tot = 0f32;
+                    for k in 0..n { sc[k] = (sc[k] - m).exp(); tot += sc[k]; }
+                    let out = &mut att[r * d + hh * hd..r * d + (hh + 1) * hd];
+                    out.iter_mut().for_each(|v| *v = 0.0);
+                    for k in 0..n {
+                        let vv = &qkv[k * 3 * d + 2 * d + hh * hd..k * 3 * d + 2 * d + (hh + 1) * hd];
+                        let w = sc[k] / tot;
+                        for j in 0..hd { out[j] += w * vv[j]; }
+                    }
+                }
+            }
+            for r in 0..rows {
+                Infill::linear(self.t(b + 4), self.t(b + 5), &att[r * d..(r + 1) * d], &mut o);
+                for j in 0..d { x[r * d + j] += o[j]; }
+                Infill::norm(&x[r * d..(r + 1) * d], self.t(b + 6), self.t(b + 7), &mut a);
+                Infill::linear(self.t(b + 8), self.t(b + 9), &a, &mut f1);
+                f1.iter_mut().for_each(|v| *v = v.max(0.0));
+                Infill::linear(self.t(b + 10), self.t(b + 11), &f1, &mut o);
+                for j in 0..d { x[r * d + j] += o[j]; }
+            }
+        }
+        let k = 7 + 12 * self.layers;
+        let mut h0 = vec![0f32; d];
+        Infill::norm(&x[..d], self.t(k), self.t(k + 1), &mut h0);
+        h0
+    }
+
+    /// The head's logit for label `l` (other: n_lab) given the target's final vector.
+    fn logit(&self, h0: &[f32], l: usize) -> f32 {
+        let k = 9 + 12 * self.layers;
+        let w = &self.t(k)[l * self.d..(l + 1) * self.d];
+        self.t(k + 1)[l] + w.iter().zip(h0).map(|(a, b)| a * b).sum::<f32>()
+    }
+}
+
+/// The infill model's inputs at cell (y, x, z): the nearest n_ctx parts around it (origin within 6 plates / 4 studs,
+/// not covering the cell) and the target's octant fills in the window, as tools/learn/infill_model.py builds them.
+fn infill_inputs(d: &Data, st: &State, inf: &Infill, y: i32, x: i32, z: i32) -> (Vec<[i32; 8]>, Vec<f32>) {
+    let net = d.net.as_ref().unwrap();
+    let mut near: Vec<(i32, usize)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for yy in (y - 6).max(0)..(y + 7).min(d.h) {
+        for xx in (x - 4).max(0)..(x + 5).min(d.x) {
+            for zz in (z - 4).max(0)..(z + 5).min(d.z) {
+                let j = st.owner[d.idx(yy, xx, zz)];
+                if j >= 0 && seen.insert(j) {
+                    let t = st.item(j as usize);
+                    let o = &d.opts[t.opt];
+                    let (dy, dx, dz) = (t.y - y, t.x - x, t.z - z);
+                    let cover = dy <= 0 && dx <= 0 && dz <= 0 && dy + o.h > 0 && dx + o.w > 0 && dz + o.d > 0;
+                    if dy.abs() <= 6 && dx.abs() <= 4 && dz.abs() <= 4 && !cover {
+                        near.push((dy.abs() + dx.abs() + dz.abs(), j as usize));
+                    }
+                }
+            }
+        }
+    }
+    near.sort_unstable();
+    let ctx = near.iter().take(inf.n_ctx).map(|&(_, j)| {
+        let t = st.item(j);
+        let o = &d.opts[t.opt];
+        let lab = if d.opt_label.is_empty() || d.opt_label[t.opt] < 0 { inf.n_lab as i32 } else { d.opt_label[t.opt] };
+        [lab, net.opt_out[t.opt].min(inf.n_tok as i32), t.y - y, t.x - x, t.z - z, o.h.min(32), o.w.min(32), o.d.min(32)]
+    }).collect();
+    let mut shape = vec![0f32; inf.win * 8];
+    let mut k = 0;
+    for dy in WY.0..WY.1 {
+        for dx in WX.0..WX.1 {
+            for dz in WZ.0..WZ.1 {
+                let (yy, xx, zz) = (y + dy, x + dx, z + dz);
+                if d.inside(yy, xx, zz) {
+                    let b = d.tbits[d.idx(yy, xx, zz)];
+                    for bit in 0..64 {
+                        if b >> bit & 1 == 1 {
+                            let (sy, sx, sz) = (bit / 16, (bit / 4) % 4, bit % 4);
+                            shape[k * 8 + (sy / 2) * 4 + (sx / 2) * 2 + sz / 2] += 1.0 / 8.0;
+                        }
+                    }
+                }
+                k += 1;
+            }
+        }
+    }
+    (ctx, shape)
+}
+
+/// log P(class | context) at a cell: the masked part model's, cached at the last call, else the proposal net's.
+fn cell_logprobs(d: &Data, st: &State, y: i32, x: i32, z: i32) -> Option<Vec<f64>> {
+    let net = d.net.as_ref()?;
+    if !st.mlm_row.is_empty() {
+        let r = st.mlm_row[d.idx(y, x, z)];
+        if r >= 0 {
+            return Some(st.mlm_lp[r as usize * net.n_c..(r as usize + 1) * net.n_c].iter().map(|&v| v as f64).collect());
+        }
+    }
+    Some(net.logprobs(&net_features(d, net, &st.kindgrid, y, x, z)))
+}
+
 /// The cell's context: the target's cells in the window, the cells built
 /// before it in fill order, the kinds built there, the object's kind.
 fn net_features(d: &Data, net: &Net, kindgrid: &[i32], y: i32, x: i32, z: i32) -> Vec<f32> {
@@ -674,21 +1465,32 @@ fn net_features(d: &Data, net: &Net, kindgrid: &[i32], y: i32, x: i32, z: i32) -
 // ---------------------------------------------------------------------------
 
 /// KL(counts || reference) under count changes: sum c log c, sum c log p, n.
+/// Optionally also tracks s_plogc = sum_k p_ref(k) * log(c[k] + EPS) for a
+/// reverse-direction coverage term; opt-in by passing a non-empty pref vector.
 struct Kl {
     counts: Vec<f64>,
+    pref: Vec<f64>,         // same length as counts; empty = don't track s_plogc
+    tot_pref: f64,          // sum of pref (for normalisation of the coverage term)
     s_clogc: f64,
     s_clogp: f64,
+    s_plogc: f64,
     n: f64,
 }
 
+const KL_PLOGC_EPS: f64 = 1e-6;
+
 impl Kl {
     fn new(len: usize) -> Kl {
-        Kl { counts: vec![0.0; len], s_clogc: 0.0, s_clogp: 0.0, n: 0.0 }
+        Kl { counts: vec![0.0; len], pref: Vec::new(), tot_pref: 0.0,
+             s_clogc: 0.0, s_clogp: 0.0, s_plogc: 0.0, n: 0.0 }
+    }
+    fn new_with_pref(len: usize, pref: Vec<f64>) -> Kl {
+        let tot = pref.iter().sum::<f64>();
+        let s0 = tot * KL_PLOGC_EPS.ln();
+        Kl { counts: vec![0.0; len], pref, tot_pref: tot,
+             s_clogc: 0.0, s_clogp: 0.0, s_plogc: s0, n: 0.0 }
     }
     fn add(&mut self, key: usize, dc: f64, logp: f64) {
-        // counts may be weights (paths); keep the raw count so swap+undo
-        // round-trips exactly.  The log terms clamp to 0 when counts fall
-        // just below 0 (floating-point noise would give NaN otherwise).
         let c0 = self.counts[key];
         let c1 = c0 + dc;
         if c0 > 0.0 {
@@ -698,6 +1500,12 @@ impl Kl {
             self.s_clogc += c1 * c1.ln();
         }
         self.s_clogp += dc * logp;
+        if !self.pref.is_empty() {
+            let p = self.pref[key];
+            if p != 0.0 {
+                self.s_plogc += p * ((c1 + KL_PLOGC_EPS).ln() - (c0 + KL_PLOGC_EPS).ln());
+            }
+        }
         self.n += dc;
         self.counts[key] = c1;
     }
@@ -706,6 +1514,14 @@ impl Kl {
             return 0.0;
         }
         (self.s_clogc - self.s_clogp) / self.n - self.n.ln()
+    }
+    /// Shannon entropy of the current count distribution: H = log(n) - s_clogc / n.
+    /// Reported in nats.  Used as an anti-mode-collapse regularizer.
+    fn entropy(&self) -> f64 {
+        if self.n <= 1e-9 {
+            return 0.0;
+        }
+        self.n.ln() - self.s_clogc / self.n
     }
 }
 
@@ -728,10 +1544,20 @@ struct State<'a> {
     live_pos: Vec<usize>,
     unsup: Vec<bool>,
     n_unsup: i64,
+    grounded: Vec<bool>, // a chain of connections joins it to the ground layer (w_conn)
+    vgrip: Vec<u32>,    // parts each is joined to through its top and bottom (w_grip)
+    n_single: f64,      // parts joined so to exactly one
+    prot_at: Vec<Vec<(usize, u64)>>, // per cell: the parts whose geometry reaches into it from outside, and where (w_coll)
+    n_coll: i64,
+    n_ungr: i64,
+    cseen: Vec<u32>,     // connectivity searches' visit marks, by generation
+    cgen: u32,
     kl1: Kl, // touching pairs
     kl2: Kl, // paths of two through a shared neighbour
+    kl3: Kl, // 4-walks a-b-c-d, keyed by (a_tok, d_tok, direction, mid_bucket)
     adj: Vec<Vec<(usize, u8)>>,
     path_queue: Vec<(usize, f64)>,
+    path4_queue: Vec<(usize, f64)>,
     csil: [Vec<i32>; 3], // parts covering each outline pixel
     kindgrid: Vec<i32>,  // the part kind built in each cell (-1 empty), the network's context
     sil: i64,            // outline pixels wrong
@@ -739,9 +1565,36 @@ struct State<'a> {
     col: f64,
     fid: f64,
     bare: i64,
+    size_n: Vec<f64>, // live parts per size class
+    surf_n: Vec<f64>, // live parts per (surface type, class)
+    n_side: f64,      // live sideways parts
+    n_brick: f64,     // live plain bricks
+    n_stack: f64,     // brick-on-same-footprint-brick pairs
+    bare_top: Vec<f64>, // per item: its exposed top studs (w_bare_top)
+    dirp: f64,          // surface direction cost of all live parts
+    sdp: f64,           // surface distance cost of all live parts
+    semp: f64,          // semantic hits of all live parts (w_sem)
+    area_m: Vec<f64>,   // per semantic area: its (weighted) cells covered by live parts that earn there
+    n_bare_top: f64,
+    lock_hits: u64,      // adds and removes that touched a locked cell (a move doing so is undone)
     mark: Vec<u32>,
     gen: u32,
+    guide_cells: Vec<u32>, // cells with local error, and their cumulative error (error-guided moves)
+    guide_cum: Vec<f64>,
+    guide_layer: Vec<u8>,  // each guide cell's largest error: GG_LAYERS (shape + direction above floor, colour, support, statistics, realism)
+    v14: std::collections::HashMap<(usize, i32, i32, i32), f64>, // learned realism blame per part (option, y, x, z) at the last v14 call
+    v14_share: f64,        // the realism layer's share of the guide's weight
+    mlm_row: Vec<i32>,     // per cell its row in mlm_lp (-1: none)
+    mlm_lp: Vec<f32>,      // masked part model's log P(class) per surface cell, at the last call
+    mlm_max: Vec<f32>,     // per row its best log P
+    mlm_e: f64,            // sum over parts of their regret under the masked model (State::mlm_cost)
+    w_mlm: f64,
+    focus: std::cell::Cell<i32>, // a cell the next pick_cell / pick_item must use (gradient-guided move choice), -1: none
+    gg: Vec<[f64; 2]>,     // per (error layer, move): energy removed and seconds spent, decayed at each guide refresh
+    gg_arm: Option<(usize, usize)>, // the (layer, move) the last proposal was drawn for
 }
+
+const GG_LAYERS: usize = 5;
 
 const UP: u8 = 0;
 const DOWN: u8 = 1;
@@ -768,19 +1621,60 @@ impl<'a> State<'a> {
             live_pos: Vec::new(),
             unsup: Vec::new(),
             n_unsup: 0,
+            grounded: Vec::new(),
+            vgrip: Vec::new(),
+            n_single: 0.0,
+            prot_at: if d.w_coll != 0.0 { vec![Vec::new(); d.tbits.len()] } else { Vec::new() },
+            n_coll: 0,
+            n_ungr: 0,
+            cseen: Vec::new(),
+            cgen: 0,
             kl1: Kl::new(d.n_tok * d.n_tok * 3),
             kl2: Kl::new(d.n_tok * d.n_tok * 3),
+            kl3: if d.paths4_enabled() {
+                if !d.pref3.is_empty() && d.w_revkl_glob3 != 0.0 {
+                    Kl::new_with_pref(d.n_tok * d.n_tok * 3 * PATHS4_BUCKETS, d.pref3.clone())
+                } else {
+                    Kl::new(d.n_tok * d.n_tok * 3 * PATHS4_BUCKETS)
+                }
+            } else { Kl::new(0) },
             adj: Vec::new(),
             path_queue: Vec::new(),
+            path4_queue: Vec::new(),
             csil: [0, 1, 2].map(|a| vec![0; d.tsil[a].len()]),
             kindgrid: vec![-1; n],
             sil: d.tsil.iter().map(|t| t.iter().filter(|&&b| b).count() as i64).sum(),
             loc: 0.0,
             col: 0.0,
-            fid: d.fill.iter().sum(),
+            fid: d.fid0,
             bare: 0,
+            size_n: vec![0.0; d.size_lpref.len()],
+            surf_n: vec![0.0; d.surf_lpref.len()],
+            n_side: 0.0,
+            n_brick: 0.0,
+            n_stack: 0.0,
+            bare_top: Vec::new(),
+            dirp: 0.0,
+            sdp: 0.0,
+            semp: 0.0,
+            area_m: vec![0.0; d.area_cap.len()],
+            n_bare_top: 0.0,
+            lock_hits: 0,
             mark: Vec::new(),
             gen: 0,
+            guide_cells: Vec::new(),
+            guide_cum: Vec::new(),
+            guide_layer: Vec::new(),
+            v14: std::collections::HashMap::new(),
+            v14_share: 0.0,
+            mlm_row: Vec::new(),
+            mlm_lp: Vec::new(),
+            mlm_max: Vec::new(),
+            mlm_e: 0.0,
+            w_mlm: 0.0,
+            focus: std::cell::Cell::new(-1),
+            gg: vec![[0.0, 0.0]; GG_LAYERS * MOVES.len()],
+            gg_arm: None,
         }
     }
 
@@ -967,6 +1861,146 @@ impl<'a> State<'a> {
         self.path_queue = q;
     }
 
+    /// 4-walks a-b-c-d that i is in.  Four positional roles enumerated; closed
+    /// walks (a=d=i) counted only in position-1.  Must be called AFTER adj is
+    /// updated with i (so adj[c] / adj[b] see i for closed walks).  Mirror of
+    /// Python State._paths4 in src/everything2lego/sampler.py.
+    fn paths4(&mut self, i: usize, nb: &[(usize, u8)], sign: f64) {
+        if !self.d.paths4_enabled() {
+            return;
+        }
+        let d = self.d;
+        // Degree cap: parts whose live degree exceeds this skip their paths4 share.
+        // Applied to BOTH the central part i (via nb.len()) and each middle neighbour,
+        // so baseplates don't blow up the O(deg^3) enumeration.
+        let cap = d.max_deg_paths4;
+        if cap > 0 && nb.len() as i32 > cap {
+            return;
+        }
+        let ti = self.opt(i).token;
+        let wi = d.middle_w[ti];
+        // Subsample weight scalar: when sample_n > 1, each kept walk is reweighted
+        // by sample_n so the expected count matches the full enumeration.
+        let sample_n = d.paths4_sample_n;
+        let sample_scale = sample_n as f64;
+        // Collect i's token's view of neighbours
+        // Deterministic walk-hash: identical for same directed (a, b, c, d) regardless
+        // of which position of i we're enumerating from.  Used for subsampling so add()
+        // and remove() keep the same walks.
+        let keep = |a: usize, b: usize, c: usize, dp: usize| -> bool {
+            if sample_n <= 1 { return true; }
+            let mut h = a as u64;
+            h = h.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(b as u64);
+            h = h.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(c as u64);
+            h = h.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(dp as u64);
+            (h % sample_n as u64) == 0
+        };
+        // position 2: i = b (middle-left).  middle edge (i, c), c in nb_i.
+        for &(c, _) in nb {
+            if cap > 0 && self.adj[c].len() as i32 > cap { continue; }
+            let tc = self.opt(c).token;
+            let bucket = d.bucket(ti, tc);
+            if bucket < 0 { continue; }
+            let w = sign * wi * d.middle_w[tc] * sample_scale;
+            for k in 0..self.adj[c].len() {
+                let d_part = self.adj[c][k].0;
+                if d_part == i { continue; }
+                let td = self.opt(d_part).token;
+                for &(a, _) in nb {
+                    if a == c { continue; }
+                    if !keep(a, i, c, d_part) { continue; }
+                    let ta = self.opt(a).token;
+                    let key = d.key4(ta, td, self.where_(a, d_part), bucket as usize);
+                    self.path4_queue.push((key, w));
+                }
+            }
+        }
+        // position 3: i = c (middle-right).  middle edge (b, i), b in nb_i.
+        for &(b, _) in nb {
+            if cap > 0 && self.adj[b].len() as i32 > cap { continue; }
+            let tb = self.opt(b).token;
+            let bucket = d.bucket(tb, ti);
+            if bucket < 0 { continue; }
+            let w = sign * d.middle_w[tb] * wi * sample_scale;
+            for k in 0..self.adj[b].len() {
+                let a = self.adj[b][k].0;
+                if a == i { continue; }
+                let ta = self.opt(a).token;
+                for &(d_part, _) in nb {
+                    if d_part == b { continue; }
+                    if !keep(a, b, i, d_part) { continue; }
+                    let td = self.opt(d_part).token;
+                    let key = d.key4(ta, td, self.where_(a, d_part), bucket as usize);
+                    self.path4_queue.push((key, w));
+                }
+            }
+        }
+        // position 1: i = a (walk starts at i).  Closed walks (d == i) counted here.
+        for &(b, _) in nb {
+            if cap > 0 && self.adj[b].len() as i32 > cap { continue; }
+            let tb = self.opt(b).token;
+            for k in 0..self.adj[b].len() {
+                let c = self.adj[b][k].0;
+                if c == i { continue; }
+                if cap > 0 && self.adj[c].len() as i32 > cap { continue; }
+                let tc = self.opt(c).token;
+                let bucket = d.bucket(tb, tc);
+                if bucket < 0 { continue; }
+                let w = sign * d.middle_w[tb] * d.middle_w[tc] * sample_scale;
+                for m in 0..self.adj[c].len() {
+                    let d_part = self.adj[c][m].0;
+                    if d_part == b { continue; }
+                    if !keep(i, b, c, d_part) { continue; }
+                    let td = self.opt(d_part).token;
+                    let key = d.key4(ti, td, self.where_(i, d_part), bucket as usize);
+                    self.path4_queue.push((key, w));
+                }
+            }
+        }
+        // position 4: i = d (walk ends at i).  Exclude a == i (closed walks already in position 1).
+        for &(c, _) in nb {
+            if cap > 0 && self.adj[c].len() as i32 > cap { continue; }
+            let tc = self.opt(c).token;
+            for k in 0..self.adj[c].len() {
+                let b = self.adj[c][k].0;
+                if b == i { continue; }
+                if cap > 0 && self.adj[b].len() as i32 > cap { continue; }
+                let tb = self.opt(b).token;
+                let bucket = d.bucket(tb, tc);
+                if bucket < 0 { continue; }
+                let w = sign * d.middle_w[tb] * d.middle_w[tc] * sample_scale;
+                for m in 0..self.adj[b].len() {
+                    let a = self.adj[b][m].0;
+                    if a == c || a == i { continue; }
+                    if !keep(a, b, c, i) { continue; }
+                    let ta = self.opt(a).token;
+                    let key = d.key4(ta, ti, self.where_(a, i), bucket as usize);
+                    self.path4_queue.push((key, w));
+                }
+            }
+        }
+        self.flush_paths4();
+    }
+
+    fn flush_paths4(&mut self) {
+        let mut q = std::mem::take(&mut self.path4_queue);
+        q.sort_unstable_by_key(|&(k, _)| k);
+        let mut i = 0;
+        while i < q.len() {
+            let key = q[i].0;
+            let mut dc = 0.0;
+            while i < q.len() && q[i].0 == key {
+                dc += q[i].1;
+                i += 1;
+            }
+            if dc != 0.0 {
+                self.kl3.add(key, dc, self.d.logp3[key]);
+            }
+        }
+        q.clear();
+        self.path4_queue = q;
+    }
+
     /// Change in outline pixels wrong from adding this option here.
     fn sil_delta(&self, o: &Opt, oy: i32, ox: i32, oz: i32) -> i64 {
         let mut dlt = 0;
@@ -1022,11 +2056,27 @@ impl<'a> State<'a> {
         let np = self.live.len() as f64;
         let rp = if np > 0.0 { (np / d.p_ref).ln() } else { 0.0 };
         let cnt = if np > 0.0 { d.w_cnt * rp * rp / (2.0 * d.cnt_sd * d.cnt_sd) } else { 0.0 };
+        let kl3_v = if d.paths4_enabled() { self.kl3.value() } else { 0.0 };
+        // Entropy regularizer on 4-walks: pull H(kl3) up to counter KL's mode-seeking.
+        // Negative in energy means more entropy -> lower energy -> preferred.
+        let ent = if d.paths4_enabled() && d.w_entropy_glob3 != 0.0 {
+            -d.w_entropy_glob3 * self.kl3.entropy()
+        } else { 0.0 };
+        // Reverse-direction cross-entropy: -sum_k p_ref(k) * log((c[k]+eps)/n_ours).
+        // = -s_plogc + tot_pref * log(n_ours).  Encourages ours to cover high-p_ref
+        // keys; grows linearly with log(n_ours).  Lower value = better coverage.
+        let rkl = if d.paths4_enabled() && d.w_revkl_glob3 != 0.0 && !self.kl3.pref.is_empty() && self.kl3.n > 1e-9 {
+            let tot = self.kl3.tot_pref;
+            d.w_revkl_glob3 * (-self.kl3.s_plogc + tot * self.kl3.n.ln())
+        } else { 0.0 };
         d.style
             * d.n_ref
             * (d.w_loc * self.loc / n
                 + d.w_glob * self.kl1.value()
                 + d.w_glob2 * self.kl2.value()
+                + d.w_glob3 * kl3_v
+                + ent
+                + rkl
                 + d.w_dens * r * r / (2.0 * d.dens_sd * d.dens_sd)
                 + cnt)
     }
@@ -1034,6 +2084,79 @@ impl<'a> State<'a> {
     fn energy(&self) -> f64 {
         let d = self.d;
         self.content() + self.style_loss() + d.w_sup * self.n_unsup as f64 + d.w_side * self.bare as f64
+            + d.w_conn * self.n_ungr as f64
+            + d.w_coll * self.n_coll as f64
+            + d.w_grip * self.grip_kl()
+            + d.w_size * self.size_kl()
+            + d.w_surf * self.surf_kl()
+            + d.w_sideways * self.sideways_kl()
+            + d.w_stack * self.stack_kl()
+            + d.w_bare_top * self.n_bare_top
+            + d.w_dir * self.dirp
+            + d.w_sdist * self.sdp
+            + d.w_part * self.live.len() as f64
+            - d.w_sem * self.semp
+            + self.w_mlm * self.mlm_e
+    }
+
+    /// A part's regret under the masked part model at its first cell (0 where the cell was not scored).
+    fn mlm_cost(&self, it: &Item) -> f64 {
+        if self.mlm_row.is_empty() { return 0.0; }
+        let (d, net) = (self.d, self.d.net.as_ref().unwrap());
+        let o = &d.opts[it.opt];
+        let r = self.mlm_row[d.idx(it.y + o.first.0, it.x + o.first.1, it.z + o.first.2)];
+        if r < 0 { return 0.0; }
+        let r = r as usize;
+        (self.mlm_max[r] - self.mlm_lp[r * net.n_c + net.opt_out[it.opt] as usize]) as f64
+    }
+
+    /// Bricks among `nb` that sit right on / under brick i with the same footprint (a lined-up joint).
+    fn stacked(&self, i: usize, nb: &[(usize, u8)]) -> f64 {
+        let d = self.d;
+        let a = self.item(i);
+        let oa = &d.opts[a.opt];
+        nb.iter().filter(|&&(j, dir)| {
+            if dir == LEVEL || !d.opt_brick[self.item(j).opt] { return false; }
+            let b = self.item(j);
+            let ob = &d.opts[b.opt];
+            b.x == a.x && b.z == a.z && ob.w == oa.w && ob.d == oa.d && (b.y == a.y + oa.h || a.y == b.y + ob.h)
+        }).count() as f64
+    }
+
+    /// n_bricks * KL(Bernoulli(stacked pairs / bricks) || Bernoulli(p_stack))
+    fn stack_kl(&self) -> f64 {
+        if self.d.w_stack == 0.0 || self.n_brick <= 0.0 { return 0.0; }
+        let (n, p) = (self.n_brick, self.d.p_stack);
+        let q = (self.n_stack / n).clamp(1e-9, 1.0 - 1e-9);
+        n * (q * (q / p).ln() + (1.0 - q) * ((1.0 - q) / (1.0 - p)).ln())
+    }
+
+    /// n_parts * KL(Bernoulli(sideways share of the build) || Bernoulli(p_sideways))
+    fn sideways_kl(&self) -> f64 {
+        if self.d.w_sideways == 0.0 { return 0.0; }
+        let n = self.live.len() as f64;
+        if n <= 0.0 { return 0.0; }
+        let p = self.d.p_sideways;
+        let (k, m) = (self.n_side, n - self.n_side);
+        (if k > 0.0 { k * (k / n / p).ln() } else { 0.0 }) + (if m > 0.0 { m * (m / n / (1.0 - p)).ln() } else { 0.0 })
+    }
+
+    /// n_parts * KL(size-class mix of the build || of real sets) = sum_c n_c ln(n_c / (n p_c))
+    /// sum over surface types of n_t * KL(class mix in t || real sets' in t)
+    fn surf_kl(&self) -> f64 {
+        let c = self.d.n_pclass;
+        if c == 0 { return 0.0; }
+        self.surf_n.chunks(c).zip(self.d.surf_lpref.chunks(c)).skip(1).map(|(row, lp)| {   // type 0: not scored
+            let n: f64 = row.iter().sum();
+            if n <= 0.0 { return 0.0; }
+            row.iter().zip(lp).filter(|(&k, _)| k > 0.0).map(|(&k, &l)| k * ((k / n).ln() - l)).sum::<f64>()
+        }).sum()
+    }
+
+    fn size_kl(&self) -> f64 {
+        let n: f64 = self.size_n.iter().sum();
+        if n <= 0.0 { return 0.0; }
+        self.size_n.iter().zip(&self.d.size_lpref).filter(|(&c, _)| c > 0.0).map(|(&c, &lp)| c * ((c / n).ln() - lp)).sum()
     }
 
     fn set_unsup(&mut self, j: usize, v: bool) {
@@ -1053,22 +2176,35 @@ impl<'a> State<'a> {
     }
 
     fn add(&mut self, it: Item) -> usize {
+        self.mlm_e += self.mlm_cost(&it);
         let i = match self.free_ids.pop() {
             Some(i) => i,
             None => {
                 self.items.push(None);
                 self.unsup.push(false);
+                self.grounded.push(false);
+                self.vgrip.push(0);
+                self.cseen.push(0);
+                self.bare_top.push(0.0);
                 self.live_pos.push(0);
                 self.adj.push(Vec::new());
                 self.items.len() - 1
             }
         };
         self.items[i] = Some(it);
+        self.touch_lock(&it);
         self.live_pos[i] = self.live.len();
         self.live.push(i);
         let d = self.d;
         let o = &d.opts[it.opt];
         self.fid += d.fid_delta(o, it.y, it.x, it.z);
+        self.dirp += d.dir_cost(it.opt, it.y, it.x, it.z);
+        self.sdp += d.sdist_cost(it.opt, it.y, it.x, it.z);
+        self.semp += d.sem_gain(&self.area_m, it.opt, it.y, it.x, it.z);
+        if !d.cell_area.is_empty() { for (a, n) in d.sem_area_hits(it.opt, it.y, it.x, it.z) { self.area_m[a] += n; } }
+        if d.w_size != 0.0 { self.size_n[d.opt_class[it.opt]] += 1.0; }
+        if d.w_surf != 0.0 { self.surf_n[d.surf_type(it.opt, it.y, it.x, it.z) * d.n_pclass + d.opt_pclass[it.opt]] += 1.0; }
+        if d.w_sideways != 0.0 && d.opt_sideways[it.opt] { self.n_side += 1.0; }
         for &(y, x, z, bits, _) in &o.cells {
             let c = d.idx(it.y + y, it.x + x, it.z + z);
             self.owner[c] = i as i32;
@@ -1087,14 +2223,98 @@ impl<'a> State<'a> {
             self.adj[j].push((i, flip(dir)));
         }
         self.adj[i] = nb.clone();
+        if d.w_stack != 0.0 && d.opt_brick[it.opt] {
+            self.n_brick += 1.0;
+            self.n_stack += self.stacked(i, &nb);
+        }
+        self.paths4(i, &nb, 1.0);                                      // after adj update (closed walks need adj[c] to contain i)
         let mut ids: Vec<usize> = nb.iter().map(|&(j, _)| j).collect();
         ids.push(i);
         self.refresh_support(&ids);
+        self.refresh_bare_top(&ids);
+        if d.w_grip != 0.0 {
+            let l = self.vlinks(i);
+            for &j in &l { self.grip_step(j, 1); }
+            self.vgrip[i] = l.len() as u32;
+            if l.len() == 1 { self.n_single += 1.0; }
+        }
+        if d.w_coll != 0.0 {
+            for &(cy, cx, cz, m) in &d.prot[it.opt] {
+                if d.inside(it.y + cy, it.x + cx, it.z + cz) {
+                    self.prot_at[d.idx(it.y + cy, it.x + cx, it.z + cz)].push((i, m));
+                }
+            }
+            self.n_coll += self.collisions(i);
+        }
+        if d.w_conn != 0.0 {
+            self.ground_add(i);
+        }
         i
+    }
+
+    /// Top studs of item j with nothing above them and nothing bound to come: the cell above is empty and outside
+    /// the target, or less than half in it (the filler may leave such a cell empty), or shows, or off the grid.
+    fn count_bare_top(&self, j: usize) -> f64 {
+        let d = self.d;
+        let it = self.item(j);
+        let o = &d.opts[it.opt];
+        let y = it.y + o.h;
+        o.top.iter().filter(|&&(dx, dz)| {
+            let (x, z) = (it.x + dx, it.z + dz);
+            if y >= d.h { return true; }
+            if !d.inside(y, x, z) { return true; }
+            let c = d.idx(y, x, z);
+            // a barely-wanted cell (a roof's slant) may stay empty; a wanted one that shows and stayed empty is a hole in
+            // the surface, and the stud under it shows (a hole inside the model hides its studs). fill, not want, says
+            // "outside the model": a layer stage cuts want, and a stud under the next layer's cells is not bare
+            self.owner[c] < 0 && (d.fill[c] < 0.5 || (d.want[c] && d.visible[c]))
+        }).count() as f64
+    }
+
+    fn refresh_bare_top(&mut self, ids: &[usize]) {
+        if self.d.w_bare_top == 0.0 { return; }
+        for &j in ids {
+            if self.items[j].is_some() {
+                let v = self.count_bare_top(j);
+                self.n_bare_top += v - self.bare_top[j];
+                self.bare_top[j] = v;
+            }
+        }
+    }
+
+    fn touch_lock(&mut self, it: &Item) {
+        let d = self.d;
+        if !d.lock.is_empty() && d.opts[it.opt].cells.iter().any(|&(y, x, z, _, _)| d.lock[d.idx(it.y + y, it.x + x, it.z + z)]) {
+            self.lock_hits += 1;
+        }
     }
 
     fn remove(&mut self, i: usize) -> Item {
         let it = *self.item(i);
+        self.mlm_e -= self.mlm_cost(&it);
+        self.touch_lock(&it);
+        let linked = if self.d.w_conn != 0.0 { self.links(i) } else { Vec::new() };
+        if self.d.w_grip != 0.0 {
+            if self.vgrip[i] == 1 { self.n_single -= 1.0; }
+            self.vgrip[i] = 0;
+            for j in self.vlinks(i) { self.grip_step(j, -1); }
+        }
+        if self.d.w_coll != 0.0 {
+            self.n_coll -= self.collisions(i);
+            let d = self.d;
+            for &(cy, cx, cz, _) in &d.prot[it.opt] {
+                if d.inside(it.y + cy, it.x + cx, it.z + cz) {
+                    self.prot_at[d.idx(it.y + cy, it.x + cx, it.z + cz)].retain(|&(k, _)| k != i);
+                }
+            }
+        }
+        // Snapshot adj containing i for paths4 reverse-counting (closed walks).
+        let nb_live: Vec<(usize, u8)> = self.adj[i].clone();
+        if self.d.w_stack != 0.0 && self.d.opt_brick[it.opt] {
+            self.n_brick -= 1.0;
+            self.n_stack -= self.stacked(i, &nb_live);
+        }
+        self.paths4(i, &nb_live, -1.0);                                // before adj cleanup
         let nb = std::mem::take(&mut self.adj[i]);
         for &(j, _) in &nb {
             self.adj[j].retain(|&(k, _)| k != i);
@@ -1112,6 +2332,13 @@ impl<'a> State<'a> {
         }
         self.bare -= d.bare_sides(o, it.y, it.x, it.z);
         self.fid -= d.fid_delta(o, it.y, it.x, it.z);
+        self.dirp -= d.dir_cost(it.opt, it.y, it.x, it.z);
+        self.sdp -= d.sdist_cost(it.opt, it.y, it.x, it.z);
+        if !d.cell_area.is_empty() { for (a, n) in d.sem_area_hits(it.opt, it.y, it.x, it.z) { self.area_m[a] -= n; } }
+        self.semp -= d.sem_gain(&self.area_m, it.opt, it.y, it.x, it.z);
+        if d.w_size != 0.0 { self.size_n[d.opt_class[it.opt]] -= 1.0; }
+        if d.w_surf != 0.0 { self.surf_n[d.surf_type(it.opt, it.y, it.x, it.z) * d.n_pclass + d.opt_pclass[it.opt]] -= 1.0; }
+        if d.w_sideways != 0.0 && d.opt_sideways[it.opt] { self.n_side -= 1.0; }
         self.col -= d.colour_cost(o, it.y, it.x, it.z, it.colour);
         self.items[i] = None;
         self.set_unsup(i, false);
@@ -1124,7 +2351,333 @@ impl<'a> State<'a> {
         self.free_ids.push(i);
         let ids: Vec<usize> = nb.iter().map(|&(j, _)| j).collect();
         self.refresh_support(&ids);
+        self.n_bare_top -= self.bare_top[i];                       // i is gone; its neighbours may now show studs
+        self.bare_top[i] = 0.0;
+        self.refresh_bare_top(&ids);
+        if self.d.w_conn != 0.0 {
+            self.ground_remove(i, &linked);
+        }
         it
+    }
+
+    /// Whether i and its neighbour j (adj direction `dir` from i) are joined: a stud of the lower in a hole of the
+    /// upper, or side connectors that meet.
+    fn joined(&self, i: usize, j: usize, dir: u8) -> bool {
+        let d = self.d;
+        let (a, b) = (self.item(i), self.item(j));
+        let (oa, ob) = (&d.opts[a.opt], &d.opts[b.opt]);
+        match dir {
+            DOWN => b.y + ob.h == a.y && oa.bottom.iter().any(|&(dx, dz)| {
+                self.owner[d.idx(a.y - 1, a.x + dx, a.z + dz)] == j as i32 && ob.has_top(a.x + dx - b.x, a.z + dz - b.z)
+            }),
+            UP => a.y + oa.h == b.y && oa.top.iter().any(|&(dx, dz)| {
+                self.owner[d.idx(b.y, a.x + dx, a.z + dz)] == j as i32 && ob.has_bottom(a.x + dx - b.x, a.z + dz - b.z)
+            }),
+            _ => d.sides_join(oa, a.y, a.x, a.z, ob, b.y, b.x, b.z) || d.sides_join(ob, b.y, b.x, b.z, oa, a.y, a.x, a.z),
+        }
+    }
+
+    fn links(&self, i: usize) -> Vec<usize> {
+        self.adj[i].iter().filter(|&&(j, dir)| self.joined(i, j, dir)).map(|&(j, _)| j).collect()
+    }
+
+    /// Collisions of live part i: its geometry past its cells meeting another part's sub-samples, and other parts'
+    /// geometry reaching into its cells and meeting its sub-samples -- each unless the two join at their sides.
+    fn collisions(&self, i: usize) -> i64 {
+        let d = self.d;
+        let a = self.item(i);
+        let oa = &d.opts[a.opt];
+        let apart = |j: usize| {
+            let b = self.item(j);
+            let ob = &d.opts[b.opt];
+            !(d.sides_join(oa, a.y, a.x, a.z, ob, b.y, b.x, b.z) || d.sides_join(ob, b.y, b.x, b.z, oa, a.y, a.x, a.z))
+        };
+        let mut n = 0;
+        for &(cy, cx, cz, m) in &d.prot[a.opt] {
+            let (y, x, z) = (a.y + cy, a.x + cx, a.z + cz);
+            if !d.inside(y, x, z) { continue; }
+            let c = d.idx(y, x, z);
+            let j = self.owner[c];
+            if j >= 0 && j as usize != i && self.cur[c] & m != 0 && apart(j as usize) { n += 1; }
+        }
+        for &(y, x, z, bits, _) in &oa.cells {
+            let c = d.idx(a.y + y, a.x + x, a.z + z);
+            for &(k, m) in &self.prot_at[c] {
+                if k != i && bits & m != 0 && apart(k) { n += 1; }
+            }
+            // a stud from below where this part has no hole and comes down to its bottom (a tooth, a clip, a solid base)
+            if y == 0 && a.y > 0 && bits & BOTTOM != 0 && !oa.has_bottom(x, z) {
+                let j = self.owner[d.idx(a.y - 1, a.x + x, a.z + z)];
+                if j >= 0 {
+                    let b = self.item(j as usize);
+                    if b.y + d.opts[b.opt].h == a.y && d.opts[b.opt].has_top(a.x + x - b.x, a.z + z - b.z) { n += 1; }
+                }
+            }
+        }
+        // male side connectors face to face (symmetric in a and b, so each part's count sees the pair)
+        for &(j, dir) in &self.adj[i] {
+            let b = self.item(j);
+            if dir == LEVEL && d.sides_clash(oa, a.y, a.x, a.z, &d.opts[b.opt], b.y, b.x, b.z) { n += 1; }
+        }
+        // its own studs under a part above with no hole there
+        for &(dx, dz) in &oa.top {
+            let (y, x, z) = (a.y + oa.h, a.x + dx, a.z + dz);
+            if !d.inside(y, x, z) { continue; }
+            let c = d.idx(y, x, z);
+            let j = self.owner[c];
+            if j >= 0 && j as usize != i && self.cur[c] & BOTTOM != 0 {
+                let b = self.item(j as usize);
+                if b.y == y && !d.opts[b.opt].has_bottom(x - b.x, z - b.z) { n += 1; }
+            }
+        }
+        n
+    }
+
+    /// The parts i is joined to through its top and bottom (stud in hole).
+    fn vlinks(&self, i: usize) -> Vec<usize> {
+        self.adj[i].iter().filter(|&&(j, dir)| dir != LEVEL && self.joined(i, j, dir)).map(|&(j, _)| j).collect()
+    }
+
+    fn grip_step(&mut self, j: usize, by: i32) {
+        let old = self.vgrip[j];
+        let new = (old as i32 + by) as u32;
+        self.n_single += (new == 1) as u8 as f64 - (old == 1) as u8 as f64;
+        self.vgrip[j] = new;
+    }
+
+    /// n_parts * KL(Bernoulli(parts joined through top and bottom to exactly one part / parts) || Bernoulli(p_grip))
+    fn grip_kl(&self) -> f64 {
+        let n = self.live.len() as f64;
+        if self.d.w_grip == 0.0 || n <= 0.0 { return 0.0; }
+        let (q, p) = ((self.n_single / n).clamp(1e-9, 1.0 - 1e-9), self.d.p_grip);
+        n * (q * (q / p).ln() + (1.0 - q) * ((1.0 - q) / (1.0 - p)).ln())
+    }
+
+    /// A part on the ground layer holds the build there only when joined to some other part (a lone tile lying on
+    /// the ground is a piece of its own).
+    fn anchor(&self, k: usize) -> bool {
+        self.item(k).y == 0 && !self.links(k).is_empty()
+    }
+
+    /// A new part: grounded when it anchors, or is joined to a grounded part or to a part on the ground layer (which
+    /// then anchors); then everything joined to it that was not is grounded too.
+    fn ground_add(&mut self, i: usize) {
+        let links = self.links(i);
+        let on_ground = (self.item(i).y == 0 && !links.is_empty())
+            || links.iter().any(|&j| self.grounded[j] || self.item(j).y == 0);
+        if !on_ground {
+            self.grounded[i] = false;
+            self.n_ungr += 1;
+            return;
+        }
+        self.grounded[i] = true;
+        let mut stack: Vec<usize> = links.into_iter().filter(|&j| !self.grounded[j]).collect();
+        while let Some(j) = stack.pop() {
+            if self.grounded[j] { continue; }
+            self.grounded[j] = true;
+            self.n_ungr -= 1;
+            stack.extend(self.links(j).into_iter().filter(|&k| !self.grounded[k]));
+        }
+    }
+
+    /// A part gone: each grounded part it was joined to that no longer reaches the ground, with all joined to it,
+    /// is ungrounded.  The search walks grounded parts, downward joins first, so it usually ends in a few steps.
+    fn ground_remove(&mut self, i: usize, linked: &[usize]) {
+        if !self.grounded[i] {
+            self.n_ungr -= 1;
+            return;
+        }
+        self.grounded[i] = false;
+        for &j in linked {
+            if self.items[j].is_none() || !self.grounded[j] {
+                continue;
+            }
+            self.cgen = self.cgen.wrapping_add(1);
+            let g = self.cgen;
+            let (mut stack, mut seen, mut found) = (vec![j], vec![j], false);
+            self.cseen[j] = g;
+            while let Some(k) = stack.pop() {
+                if self.anchor(k) { found = true; break; }
+                let mut next: Vec<(usize, u8)> = self.adj[k].iter().copied()
+                    .filter(|&(m, dir)| self.grounded[m] && self.cseen[m] != g && self.joined(k, m, dir)).collect();
+                next.sort_by_key(|&(_, dir)| if dir == DOWN { 1 } else { 0 });   // popped last-in: down first
+                for (m, _) in next {
+                    self.cseen[m] = g;
+                    seen.push(m);
+                    stack.push(m);
+                }
+            }
+            if !found {
+                for k in seen {
+                    self.grounded[k] = false;
+                    self.n_ungr += 1;
+                }
+            }
+        }
+    }
+
+    /// Item i's share of the global statistics terms, by the chain rule: sum over the counts it adds of
+    /// dE/dcount.  For a KL of the build's mix q to the real sets' p over n counts, dKL/dc_k = (ln(q_k/p_k) - KL)/n:
+    /// a part is blamed for what the build has too much of, credited for what it lacks.  Terms: neighbour pairs
+    /// (KL and the local score; each pair shared by its two parts), the part mix by surface type, the size mix and the
+    /// lined-up joints.  Left out: two-step paths (shortcut: paths through i reach far, add when they matter) and the
+    /// part / pair counts (the same for every part).
+    fn stat_blame(&self, i: usize) -> f64 {
+        let d = self.d;
+        let it = self.item(i);
+        let o = &d.opts[it.opt];
+        let mut b = 0f64;
+        let n = self.kl1.n;
+        if n > 0.0 {
+            let (kl, mean) = (self.kl1.value(), self.loc / n);
+            let a = d.style * d.n_ref / n;
+            for &(j, dir) in &self.adj[i] {
+                let tj = self.opt(j).token;
+                for k in [d.key(o.token, tj, dir), d.key(tj, o.token, flip(dir))] {
+                    let c = self.kl1.counts[k].max(1e-9);
+                    b += 0.5 * a * (d.w_glob * ((c / n).ln() - d.logp[k] - kl) + d.w_loc * (d.nll[k] - mean));
+                }
+            }
+        }
+        if d.w_surf != 0.0 {
+            let t = d.surf_type(it.opt, it.y, it.x, it.z);
+            if t > 0 {
+                let row = &self.surf_n[t * d.n_pclass..(t + 1) * d.n_pclass];
+                let c = d.opt_pclass[it.opt];
+                b += d.w_surf * ((row[c] / row.iter().sum::<f64>()).ln() - d.surf_lpref[t * d.n_pclass + c]);
+            }
+        }
+        if d.w_size != 0.0 {
+            let c = d.opt_class[it.opt];
+            b += d.w_size * ((self.size_n[c] / self.size_n.iter().sum::<f64>()).ln() - d.size_lpref[c]);
+        }
+        if d.w_stack != 0.0 && d.opt_brick[it.opt] && self.n_brick > 0.0 {
+            let (q, p) = ((self.n_stack / self.n_brick).clamp(1e-9, 1.0 - 1e-9), d.p_stack);
+            b += d.w_stack * 0.5 * self.stacked(i, &self.adj[i]) * ((q / (1.0 - q)).ln() - (p / (1.0 - p)).ln());
+        }
+        b
+    }
+
+    /// Local error per cell, N_ERR layers (see N_ERR), and per live item (its cells' sum), in energy units: a
+    /// part's colour, support, direction and statistics (stat_blame, blame only) costs are spread over its cells.
+    fn error_map(&self) -> (Vec<f64>, Vec<f64>) {
+        let d = self.d;
+        let n = d.tbits.len();
+        let mut cell = vec![0f64; n * N_ERR];
+        for c in 0..n {
+            let wrong = (self.cur[c] ^ d.tbits[c]).count_ones();
+            if wrong > 0 {
+                cell[c * N_ERR] = d.w_cov * miss(wrong);
+            }
+        }
+        let mut item = vec![0f64; self.items.len() * N_ERR];
+        for &i in &self.live {
+            let it = self.item(i);
+            let o = &d.opts[it.opt];
+            let mut e = [0f64; N_ERR];
+            e[1] = d.w_col * d.colour_cost(o, it.y, it.x, it.z, it.colour);
+            e[2] = d.w_sup * self.unsup[i] as u8 as f64 + d.w_side * d.bare_sides(o, it.y, it.x, it.z) as f64
+                + d.w_bare_top * self.bare_top[i]
+                + if d.w_conn != 0.0 && !self.grounded[i] { d.w_conn } else { 0.0 };
+            e[3] = d.w_dir * d.dir_cost(it.opt, it.y, it.x, it.z);
+            e[4] = self.stat_blame(i).max(0.0);
+            let m = o.cells.len() as f64;
+            for &(y, x, z, _, _) in &o.cells {
+                let c = d.idx(it.y + y, it.x + x, it.z + z);
+                for l in 1..N_ERR {
+                    cell[c * N_ERR + l] += e[l] / m;
+                }
+                item[i * N_ERR] += cell[c * N_ERR];
+            }
+            for l in 1..N_ERR {
+                item[i * N_ERR + l] = e[l];
+            }
+        }
+        (cell, item)
+    }
+
+    /// Re-weigh the error-guided picks by the current error map (wanted or occupied cells with any error): shape and
+    /// direction count only above the cell's floor (what no part can remove there is not worth a move).
+    fn refresh_guide(&mut self, floor: &[f64]) {
+        let (cell, _) = self.error_map();
+        let d = self.d;
+        self.guide_cells.clear();
+        self.guide_cum.clear();
+        self.guide_layer.clear();
+        for g in self.gg.iter_mut() {
+            g[0] *= 0.5;                                    // forget slowly: what pays changes as the build cools
+            g[1] *= 0.5;
+        }
+        let mut rows: Vec<(usize, [f64; GG_LAYERS])> = Vec::new();
+        let (mut tot, mut tot_v) = (0f64, 0f64);
+        for c in 0..d.tbits.len() {
+            if (!d.want[c] && self.owner[c] < 0) || (!d.lock.is_empty() && d.lock[c]) {
+                continue;
+            }
+            let r = &cell[c * N_ERR..(c + 1) * N_ERR];
+            let head = if floor[c].is_finite() { (r[0] + r[3] - floor[c]).max(0.0) } else { 0.0 };
+            let o = self.owner[c];
+            let v = if o >= 0 && !self.v14.is_empty() {
+                let t = self.item(o as usize);
+                self.v14.get(&(t.opt, t.y, t.x, t.z)).map_or(0.0, |b| b / d.opts[t.opt].cells.len() as f64)
+            } else { 0.0 };
+            let l = [head, r[1], r[2], r[4], v];
+            tot += head + r[1] + r[2] + r[4];
+            tot_v += v;
+            rows.push((c, l));
+        }
+        // realism is in P(fake), not energy: scaled so it is v14_share of the guide's weight
+        let k = if tot_v > 0.0 && self.v14_share > 0.0 { self.v14_share / (1.0 - self.v14_share) * tot / tot_v } else { 0.0 };
+        let mut acc = 0f64;
+        for (c, mut l) in rows {
+            l[4] *= k;
+            let e: f64 = l.iter().sum();
+            if e > 1e-9 {
+                acc += e;
+                self.guide_cells.push(c as u32);
+                self.guide_cum.push(acc);
+                self.guide_layer.push((0..GG_LAYERS).max_by(|&a, &b| l[a].total_cmp(&l[b])).unwrap() as u8);
+            }
+        }
+    }
+
+    /// A cell for a move to work at: with probability p_guide drawn in proportion to the local error, else a
+    /// uniform wanted cell.  (No Hastings correction: the guide is a fixed-for-a-while proposal bias in an annealed
+    /// search, like retile's own; the energy still decides every move.)
+    fn pick_cell(&self, rng: &mut Rng) -> i32 {
+        let d = self.d;
+        let f = self.focus.replace(-1);
+        if f >= 0 {
+            return f;
+        }
+        if !self.guide_cum.is_empty() && rng.f64() < d.p_guide {
+            let r = rng.f64() * self.guide_cum.last().unwrap();
+            return self.guide_cells[self.guide_cum.partition_point(|&w| w <= r).min(self.guide_cum.len() - 1)] as i32;
+        }
+        d.want_cells[rng.below(d.want_cells.len())] as i32
+    }
+
+    /// A live part for a move: the owner of an error-guided cell (p_guide), else uniform.
+    fn pick_item(&self, rng: &mut Rng) -> usize {
+        let f = self.focus.replace(-1);
+        if f >= 0 && self.owner[f as usize] >= 0 {
+            return self.owner[f as usize] as usize;
+        }
+        if !self.guide_cum.is_empty() && rng.f64() < self.d.p_guide {
+            let r = rng.f64() * self.guide_cum.last().unwrap();
+            let c = self.guide_cells[self.guide_cum.partition_point(|&w| w <= r).min(self.guide_cum.len() - 1)];
+            let j = self.owner[c as usize];
+            if j >= 0 {
+                return j as usize;
+            }
+        }
+        if !self.d.lock.is_empty() && !self.d.want_cells.is_empty() {   // the owner of a free cell, so moves stay in the region
+            for _ in 0..8 {
+                let j = self.owner[self.d.want_cells[rng.below(self.d.want_cells.len().max(1))]];
+                if j >= 0 { return j as usize; }
+            }
+        }
+        self.live[rng.below(self.live.len())]
     }
 
     fn bad_cells(&self) -> i64 {
@@ -1140,12 +2693,145 @@ impl<'a> State<'a> {
 // proposals
 // ---------------------------------------------------------------------------
 
+/// The placements whose first cell is one cell, ranked once for the run.  A candidate's score is
+/// style * (log P(class | context) + log P(option | class)) - w_cov * residual - w_dir * direction: only the class term
+/// depends on the state, so each cell keeps its fitting options grouped by class (one class without the network),
+/// each group sorted by the rest of the score; a query merges the groups and checks which spots are still free.
+struct Ranked {
+    entries: Box<[(f32, u32)]>,  // (fixed part of the score, option), by class, best first within a class
+    groups: Box<[(u32, u32)]>,   // (class, start in entries)
+}
+
+#[derive(PartialEq, PartialOrd)]
+struct OrdF64(f64); // scores are finite
+impl Eq for OrdF64 {}
+impl Ord for OrdF64 {
+    fn cmp(&self, o: &Self) -> std::cmp::Ordering { self.partial_cmp(o).unwrap() }
+}
+
+fn rank_cell(d: &Data, y: i32, x: i32, z: i32, support: bool) -> Ranked {
+    let mut v: Vec<(u32, f64, u32)> = Vec::new();
+    let mut counts = vec![0u32; d.n_col.max(1)];
+    'opt: for (k, o) in d.opts.iter().enumerate() {
+        let (oy, ox, oz) = (y - o.first.0, x - o.first.1, z - o.first.2);
+        if oy < 0 || ox < 0 || oz < 0 || oy + o.h > d.h || ox + o.w > d.x || oz + o.d > d.z {
+            continue;
+        }
+        let n = (o.w * o.d) as usize;
+        if support && (o.top.len() != n || o.bottom.len() != n || o.cells.len() != n * o.h as usize) {
+            continue;                               // a support is plain bricks and plates: studs and holes on every cell
+        }
+        let mut wrong = 0f64;
+        for &(cy, cx, cz, bits, occ) in &o.cells {
+            let t = d.tbits[d.idx(oy + cy, ox + cx, oz + cz)];
+            if occ >= 0.5 && t == 0 && !support {
+                continue 'opt; // solid where the object is not (a support may be)
+            }
+            wrong += miss((bits ^ t).count_ones());
+        }
+        let (class, lp) = match &d.net {
+            Some(net) => (net.opt_out[k] as u32, net.opt_lpart[k]),
+            None => (0, o.logprior),
+        };
+        // the colour it would get here is fixed by the target too: a part not made in the target's colour ranks lower
+        let colour = d.colour_for(o, oy, ox, oz, &mut counts);
+        let mut score = d.style * lp - d.w_cov * wrong - d.w_dir * d.dir_cost(k, oy, ox, oz)
+            - d.w_col * d.colour_cost(o, oy, ox, oz, colour) + d.w_sem * d.sem_gain(&[], k, oy, ox, oz);
+        if d.w_surf != 0.0 {                            // what real sets build this kind of surface from
+            let c = d.opt_pclass[k];
+            score += d.style * (d.surf_lpref[d.surf_type(k, oy, ox, oz) * d.n_pclass + c] - d.surf_lmarg[c]);
+        }
+        v.push((class, score, k as u32));
+    }
+    v.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.partial_cmp(&a.1).unwrap()));
+    let mut groups = Vec::new();
+    for (i, e) in v.iter().enumerate() {
+        if i == 0 || v[i - 1].0 != e.0 {
+            groups.push((e.0, i as u32));
+        }
+    }
+    Ranked { entries: v.iter().map(|e| (e.1 as f32, e.2)).collect(), groups: groups.into_boxed_slice() }
+}
+
+/// For each cell an option placed with its first cell at (y, x, z) covers: that cell's shape error plus its share of
+/// the option's direction cost (the least of these over options is the cell's floor: error no part can remove).
+fn floor_at(d: &Data, y: i32, x: i32, z: i32, out: &mut Vec<(usize, f64)>) {
+    'opt: for (k, o) in d.opts.iter().enumerate() {
+        let (oy, ox, oz) = (y - o.first.0, x - o.first.1, z - o.first.2);
+        if oy < 0 || ox < 0 || oz < 0 || oy + o.h > d.h || ox + o.w > d.x || oz + o.d > d.z {
+            continue;
+        }
+        for &(cy, cx, cz, _, occ) in &o.cells {
+            if occ >= 0.5 && d.tbits[d.idx(oy + cy, ox + cx, oz + cz)] == 0 {
+                continue 'opt;
+            }
+        }
+        let dir = d.w_dir * d.dir_cost(k, oy, ox, oz) / o.cells.len() as f64;
+        for &(cy, cx, cz, bits, _) in &o.cells {
+            let c = d.idx(oy + cy, ox + cx, oz + cz);
+            out.push((c, d.w_cov * miss((bits ^ d.tbits[c]).count_ones()) + dir));
+        }
+    }
+}
+
 struct Filler {
+    floor: Vec<f64>,             // per cell: the least shape + direction error reachable there (INFINITY: none)
     colour_counts: Vec<u32>,
+    w_big: f64,                  // the current bigger-first weight (falls over the run with w_big_end)
+    ranked: Vec<Option<Ranked>>, // per cell, filled on all cores up front for the wanted cells, lazily elsewhere
+    force: bool,                 // every cell gets a part where one fits (a prop's column: not wanted, still needed)
+    ranked_support: Vec<Option<Ranked>>, // as `ranked`, solid parts allowed where the object is not (force), lazily
 }
 
 impl Filler {
-    /// Whether a stud of a part already below would sit in one of its holes.
+    fn new(d: &Data) -> Filler {
+        let mut ranked: Vec<Option<Ranked>> = (0..(d.h * d.x * d.z) as usize).map(|_| None).collect();
+        {
+            let n = std::thread::available_parallelism().map_or(1, |n| n.get());
+            let cells = &d.want_cells;
+            let done: Vec<(Vec<(usize, Ranked)>, Vec<f64>)> = std::thread::scope(|s| {
+                let hs: Vec<_> = (0..n)
+                    .map(|t| {
+                        s.spawn(move || {
+                            let mut floor = vec![f64::INFINITY; d.tbits.len()];
+                            let mut buf = Vec::new();
+                            let r = cells.iter().skip(t).step_by(n) // interleaved: heavy and light layers spread evenly
+                                .map(|&c| {
+                                    let ci = c as i32;
+                                    let (y, x, z) = (ci / (d.x * d.z), (ci / d.z) % d.x, ci % d.z);
+                                    buf.clear();
+                                    floor_at(d, y, x, z, &mut buf);
+                                    for &(cc, e) in &buf {
+                                        floor[cc] = floor[cc].min(e);
+                                    }
+                                    (c, rank_cell(d, y, x, z, false))
+                                })
+                                .collect();
+                            (r, floor)
+                        })
+                    })
+                    .collect();
+                hs.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            let mut floor: Vec<f64> = (0..d.tbits.len()).map(|c| {
+                // a cell may stay empty when it is outside the target, or less than half in it
+                if !d.want[c] { 0.0 } else if d.fill[c] < 0.5 { d.w_cov * miss(d.tbits[c].count_ones()) } else { f64::INFINITY }
+            }).collect();
+            for (rs, f) in done {
+                for (c, r) in rs {
+                    ranked[c] = Some(r);
+                }
+                for (a, b) in floor.iter_mut().zip(f) {
+                    *a = a.min(b);
+                }
+            }
+            return Filler { floor, colour_counts: vec![0; d.n_col.max(1)], w_big: d.w_big, ranked, force: false,
+                             ranked_support: (0..(d.h * d.x * d.z) as usize).map(|_| None).collect() };
+        }
+    }
+
+    /// Whether a stud of a part already below would sit in one of its holes, or one of its studs in a hole of a part
+    /// already above (it hangs), or a side connector holds it -- as State::supported.
     fn held(st: &State, o: &Opt, oy: i32, ox: i32, oz: i32) -> bool {
         if oy == 0 {
             return true;
@@ -1158,6 +2844,17 @@ impl Filler {
                 let bo = &d.opts[b.opt];
                 if b.y + bo.h == oy && bo.has_top(ox + dx - b.x, oz + dz - b.z) {
                     return true;
+                }
+            }
+        }
+        if oy + o.h < d.h {
+            for &(dx, dz) in &o.top {
+                let j = st.owner[d.idx(oy + o.h, ox + dx, oz + dz)];
+                if j >= 0 {
+                    let b = st.item(j as usize);
+                    if b.y == oy + o.h && d.opts[b.opt].has_bottom(ox + dx - b.x, oz + dz - b.z) {
+                        return true;
+                    }
                 }
             }
         }
@@ -1188,38 +2885,72 @@ impl Filler {
         s
     }
 
-    /// Candidates whose first cell can go at (y, x, z): (pre-score, option, origin, residual).
-    fn candidates(st: &State, y: i32, x: i32, z: i32, prior: Option<&[f64]>,
+    /// Candidates whose first cell can go at (y, x, z): (pre-score, option, origin, residual), the best top_k free
+    /// ones; `lpc` is the network's log P(class | context) at the cell.
+    fn candidates(&mut self, st: &State, y: i32, x: i32, z: i32, lpc: Option<&[f64]>, n: usize,
                   out: &mut Vec<(f64, usize, i32, i32, i32, f64)>) {
-        out.clear();
         let d = st.d;
-        'opt: for (k, o) in d.opts.iter().enumerate() {
+        let force = self.force;
+        let cache = if force { &mut self.ranked_support } else { &mut self.ranked };
+        let r = cache[d.idx(y, x, z)].get_or_insert_with(|| rank_cell(d, y, x, z, force));
+        let end = |g: usize| if g + 1 < r.groups.len() { r.groups[g + 1].1 as usize } else { r.entries.len() };
+        let lift = |g: usize| lpc.map_or(0.0, |lp| d.style * lp[r.groups[g].0 as usize]);
+        // max-heap over groups by their best remaining entry: (score, group, position)
+        let mut heap: std::collections::BinaryHeap<(OrdF64, usize, usize)> = (0..r.groups.len())
+            .map(|g| { let i = r.groups[g].1 as usize; (OrdF64(r.entries[i].0 as f64 + lift(g)), g, i) })
+            .collect();
+        out.clear();
+        while let Some((OrdF64(score), g, i)) = heap.pop() {
+            let k = r.entries[i].1 as usize;
+            let o = &d.opts[k];
             let (oy, ox, oz) = (y - o.first.0, x - o.first.1, z - o.first.2);
-            if oy < 0 || ox < 0 || oz < 0 || oy + o.h > d.h || ox + o.w > d.x || oz + o.d > d.z {
-                continue;
-            }
-            let mut wrong = 0u32;
-            for &(cy, cx, cz, bits, occ) in &o.cells {
+            let mut wrong = 0f64;
+            let free = o.cells.iter().all(|&(cy, cx, cz, bits, _)| {
                 let c = d.idx(oy + cy, ox + cx, oz + cz);
-                if st.owner[c] >= 0 {
-                    continue 'opt;
+                wrong += miss((bits ^ d.tbits[c]).count_ones());
+                st.owner[c] < 0
+            });
+            if free {
+                out.push((score, k, oy, ox, oz, wrong));
+                if out.len() == n {
+                    return;
                 }
-                let t = d.tbits[c];
-                if occ >= 0.5 && t == 0 {
-                    continue 'opt; // solid where the object is not
-                }
-                wrong += (bits ^ t).count_ones();
             }
-            let resid = wrong as f64 / NSAMP;
-            // style and content weighed as in the energy
-            let lp = prior.map_or(o.logprior, |p| p[k]);
-            out.push((d.style * lp - d.w_cov * resid, k, oy, ox, oz, resid));
+            if i + 1 < end(g) {
+                heap.push((OrdF64(r.entries[i + 1].0 as f64 + lift(g)), g, i + 1));
+            }
         }
-        let k = d.top_k;
-        if out.len() > k {
-            out.select_nth_unstable_by(k - 1, |a, b| b.0.partial_cmp(&a.0).unwrap());
-            out.truncate(k);
+    }
+
+    /// The filler's local score of option k at (oy, ox, oz), whose cells miss the target by `resid` samples:
+    /// (statistics + bigger-first, fit to the target and support, its colour there).
+    fn score(&mut self, st: &mut State, lpc: Option<&[f64]>, k: usize, oy: i32, ox: i32, oz: i32, resid: f64) -> (f64, f64, i32) {
+        let d = st.d;
+        let o = &d.opts[k];
+        let colour = d.colour_for(o, oy, ox, oz, &mut self.colour_counts);
+        let stat = d.style
+            * match (lpc, &d.net) {
+                (Some(lp), Some(net)) => lp[net.opt_out[k] as usize] + net.opt_lpart[k],
+                _ => Filler::stat_score(st, k, oy, ox, oz),
+            }
+            + self.w_big * ((o.w * o.d) as f64).ln();                // footprint: longer / wider, not taller
+        let mut fit = d.w_sem * d.sem_gain(&st.area_m, k, oy, ox, oz) - d.w_dir * d.dir_cost(k, oy, ox, oz) - d.w_cov * resid
+            - d.w_sil * st.sil_delta(o, oy, ox, oz) as f64 / (SUB * SUB) as f64
+            - d.w_col * d.colour_cost(o, oy, ox, oz, colour);
+        if !Filler::held(st, o, oy, ox, oz) {
+            fit -= d.w_sup;
         }
+        fit -= d.w_sup * d.capped(o, oy, ox, oz) + d.w_side * d.bare_sides(o, oy, ox, oz) as f64;
+        if d.w_bare_top != 0.0 {                                    // top studs nothing will sit on (count_bare_top)
+            let y = oy + o.h;
+            fit -= d.w_bare_top * o.top.iter().filter(|&&(dx, dz)| {
+                y >= d.h || !d.inside(y, ox + dx, oz + dz) || {
+                    let c = d.idx(y, ox + dx, oz + dz);
+                    st.owner[c] < 0 && d.fill[c] < 0.5
+                }
+            }).count() as f64;
+        }
+        (stat, fit, colour)
     }
 
     fn fill(&mut self, st: &mut State, rng: &mut Rng, mut cells: Vec<(i32, i32, i32)>) -> Vec<usize> {
@@ -1234,38 +2965,22 @@ impl Filler {
                 continue;
             }
             // with the network: log P(part, yaw | the cell's context), once per cell
-            let prior: Option<Vec<f64>> = d.net.as_ref().map(|net| {
-                let lp = net.logprobs(&net_features(d, net, &st.kindgrid, y, x, z));
-                (0..d.opts.len()).map(|k| lp[net.opt_out[k] as usize] + net.opt_lpart[k]).collect()
-            });
-            Filler::candidates(st, y, x, z, prior.as_deref(), &mut cands);
+            let lpc = cell_logprobs(d, st, y, x, z);
+            self.candidates(st, y, x, z, lpc.as_deref(), d.top_k, &mut cands);
             if cands.is_empty() {
                 continue;
             }
             scored.clear();
             for &(_, k, oy, ox, oz, resid) in &cands {
-                let o = &d.opts[k];
-                let colour = d.colour_for(o, oy, ox, oz, &mut self.colour_counts);
-                let stat = d.style
-                    * match &prior {
-                        Some(p) => p[k],
-                        None => Filler::stat_score(st, k, oy, ox, oz),
-                    };
-                let mut fit = -d.w_cov * resid
-                    - d.w_sil * st.sil_delta(o, oy, ox, oz) as f64 / (SUB * SUB) as f64
-                    - d.w_col * d.colour_cost(o, oy, ox, oz, colour);
-                if !Filler::held(st, o, oy, ox, oz) {
-                    fit -= d.w_sup;
-                }
-                fit -= d.w_sup * d.capped(o, oy, ox, oz) + d.w_side * d.bare_sides(o, oy, ox, oz) as f64;
+                let (stat, fit, colour) = self.score(st, lpc.as_deref(), k, oy, ox, oz, resid);
                 scored.push((stat, fit, k, oy, ox, oz, colour));
             }
             let best_stat = scored.iter().map(|s| s.0).fold(f64::NEG_INFINITY, f64::max);
             let mut scores: Vec<f64> = scored.iter().map(|s| s.0 + s.1).collect();
             let f = d.fill[d.idx(y, x, z)];
-            let skip = f < 0.5; // a barely-wanted cell may stay empty
+            let skip = f < 0.5 && !self.force; // a barely-wanted cell may stay empty
             if skip {
-                scores.push(best_stat - d.w_cov * f);
+                scores.push(best_stat - d.w_cov * f * f);       // its shape error left empty (miss)
             }
             let m = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
             let ws: Vec<f64> = scores.iter().map(|s| (s - m).exp()).collect();
@@ -1293,6 +3008,8 @@ enum Undo {
     Retile { added: Vec<usize>, removed: Vec<Item> },
     Merge { k: usize, a: Item, b: Item },
     Swap { k: usize, a: Item },
+    Hinge { k: usize, evicted: Option<Item> },
+    MasonryShift { k: usize, a: Item },
 }
 
 fn undo(st: &mut State, u: Undo) {
@@ -1314,7 +3031,231 @@ fn undo(st: &mut State, u: Undo) {
             st.remove(k);
             st.add(a);
         }
+        Undo::Hinge { k, evicted } => {
+            st.remove(k);
+            if let Some(it) = evicted {
+                st.add(it);
+            }
+        }
+        Undo::MasonryShift { k, a } => {
+            st.remove(k);
+            st.add(a);
+        }
     }
+}
+
+/// Prop: a part not joined to the ground (or unsupported) gets a column under one of its bottom cells -- the empty cells
+/// down to the next part or the ground, filled though not wanted -- as a slicer adds supports: a floating part costs
+/// w_conn, a column cell a few shape units.  The energy decides, as for any move.
+fn prop(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
+    let d = st.d;
+    let loose: Vec<usize> = st.live.iter().copied()
+        .filter(|&i| (d.w_conn != 0.0 && !st.grounded[i]) || st.unsup[i]).collect();
+    if loose.is_empty() {
+        return None;
+    }
+    let it = *st.item(loose[rng.below(loose.len())]);
+    let feet = &d.opts[it.opt].bottom;                // its holes: where a column's top stud joins it
+    if feet.is_empty() {
+        return None;
+    }
+    let (dx, dz) = feet[rng.below(feet.len())];
+    let (x, z) = (it.x + dx, it.z + dz);
+    let mut cells = Vec::new();
+    let mut y = it.y - 1;
+    while y >= 0 && st.owner[d.idx(y, x, z)] < 0 && cells.len() < 48 {   // shortcut: straight down only, add tree supports if columns land badly
+        cells.push((y, x, z));
+        y -= 1;
+    }
+    let base = y < 0 || st.owner[d.idx(y, x, z)] >= 0 && {   // on the ground, or on a stud of a grounded part
+        let j = st.owner[d.idx(y, x, z)] as usize;
+        let b = st.item(j);
+        (d.w_conn == 0.0 || st.grounded[j]) && b.y + d.opts[b.opt].h == y + 1 && d.opts[b.opt].has_top(x - b.x, z - b.z)
+    };
+    if cells.is_empty() || !base {
+        return None;
+    }
+    filler.force = true;
+    let added = filler.fill(st, rng, cells);
+    filler.force = false;
+    Some(Undo::Retile { added, removed: Vec::new() })
+}
+
+/// Plan: Monte Carlo tree search (UCB1) over short chains of parts from a part with no connection chain to the ground.
+/// A child is a part joined to the chain's last part (a stud in its hole, or side connectors); rollouts extend the chain
+/// toward grounded parts (a distance field in a box around it); a chain's value is the exact energy it saves at its best
+/// grounding prefix (each tried part added, then removed).  A support needing several parts each costing on its own
+/// (a bracket, then a column) is one move: the best chain found, which the annealer accepts or not.
+static PLAN_STATS: [std::sync::atomic::AtomicUsize; 4] = [const { std::sync::atomic::AtomicUsize::new(0) }; 4];   // calls, root has no child, nothing grounds, found
+
+fn plan(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
+    use std::sync::atomic::Ordering::Relaxed;
+    const R: i32 = 8;         // box around the part: how far a support may reach sideways
+    const DEPTH: usize = 8;   // parts in a chain
+    const ITERS: usize = 32;  // tree iterations
+    const BRANCH: usize = 3;  // children per node
+    let d = st.d;
+    if d.w_conn == 0.0 {
+        return None;
+    }
+    // loose parts with a free cell under a hole or at a side connector: where a support can join (a group's lowest)
+    let loose: Vec<usize> = st.live.iter().copied().filter(|&i| !st.grounded[i] && {
+        let a = st.item(i);
+        let o = &d.opts[a.opt];
+        a.y > 0 && o.bottom.iter().any(|&(dx, dz)| st.owner[d.idx(a.y - 1, a.x + dx, a.z + dz)] < 0)
+            || o.sides.iter().any(|sd| Data::side_cells(o, a.y, a.x, a.z, sd).iter()
+                .any(|&(y, x, z)| d.inside(y, x, z) && st.owner[d.idx(y, x, z)] < 0))
+    }).collect();
+    if loose.is_empty() {
+        return None;
+    }
+    let root = loose[rng.below(loose.len())];
+    PLAN_STATS[0].fetch_add(1, Relaxed);
+    let ri = *st.item(root);
+    let ro = &d.opts[ri.opt];
+    // steps through empty cells to a grounded part's cell or the ground layer, in the box (u16::MAX: unreached)
+    let (x0, x1) = ((ri.x - R).max(0), (ri.x + ro.w + R).min(d.x));
+    let (z0, z1) = ((ri.z - R).max(0), (ri.z + ro.d + R).min(d.z));
+    let y1 = (ri.y + ro.h).min(d.h);
+    let (bx, bz) = ((x1 - x0) as usize, (z1 - z0) as usize);
+    let bidx = |y: i32, x: i32, z: i32| (y as usize * bx + (x - x0) as usize) * bz + (z - z0) as usize;
+    let inbox = |y: i32, x: i32, z: i32| y >= 0 && y < y1 && x >= x0 && x < x1 && z >= z0 && z < z1;
+    let mut dist = vec![u16::MAX; y1 as usize * bx * bz];
+    let mut q = std::collections::VecDeque::new();
+    for y in 0..y1 {
+        for x in x0..x1 {
+            for z in z0..z1 {
+                let j = st.owner[d.idx(y, x, z)];
+                if (j < 0 && y == 0) || (j >= 0 && st.grounded[j as usize]) {
+                    dist[bidx(y, x, z)] = 0;
+                    q.push_back((y, x, z));
+                }
+            }
+        }
+    }
+    while let Some((y, x, z)) = q.pop_front() {
+        let n = dist[bidx(y, x, z)] + 1;
+        for (dy, dx, dz) in [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)] {
+            let (yy, xx, zz) = (y + dy, x + dx, z + dz);
+            if inbox(yy, xx, zz) && st.owner[d.idx(yy, xx, zz)] < 0 && dist[bidx(yy, xx, zz)] > n {
+                dist[bidx(yy, xx, zz)] = n;
+                q.push_back((yy, xx, zz));
+            }
+        }
+    }
+    // children of part f: (item, energy after it, its distance to the ground, root grounded with it)
+    let mut cands = Vec::new();
+    // shortcut: the net's ranking per cell is kept for the whole call, from the parts around it when first asked; recompute per node if chains start to depend on it
+    let mut lpcs: std::collections::HashMap<usize, Option<Vec<f64>>> = std::collections::HashMap::new();
+    let mut children = |st: &mut State, filler: &mut Filler, rng: &mut Rng, f: usize, n: usize| -> Vec<(Item, f64, u16, bool)> {
+        let a = *st.item(f);
+        let o = &d.opts[a.opt];
+        let mut at: Vec<(i32, i32, i32)> = o.bottom.iter().map(|&(dx, dz)| (a.y - 1, a.x + dx, a.z + dz)).collect();
+        for sd in &o.sides {
+            at.extend(Data::side_cells(o, a.y, a.x, a.z, sd));
+        }
+        at.retain(|&(y, x, z)| inbox(y, x, z) && st.owner[d.idx(y, x, z)] < 0);
+        while at.len() > 3 {
+            at.swap_remove(rng.below(at.len()));
+        }
+        let mut out: Vec<(Item, f64, u16, bool)> = Vec::new();
+        for &(y, x, z) in &at {
+            // the part's first cell (lowest, then least x, z): a plate's or a brick's, the cell or one before it
+            for (dy, dx, dz) in (0..3).flat_map(|dy| [(dy, 0, 0), (dy, 1, 0), (dy, 0, 1), (dy, 1, 1)]) {
+                if y - dy < 0 || !inbox(y - dy, x - dx, z - dz) || st.owner[d.idx(y - dy, x - dx, z - dz)] >= 0 { continue; }
+                let lpc = lpcs.entry(d.idx(y - dy, x - dx, z - dz)).or_insert_with(||
+                    cell_logprobs(d, st, y - dy, x - dx, z - dz));
+                for force in [true, false] {
+                    filler.force = force;
+                    filler.candidates(st, y - dy, x - dx, z - dz, lpc.as_deref(), 3, &mut cands);
+                    for &(_, k, oy, ox, oz, _) in cands.iter() {
+                        let ok = &d.opts[k];
+                        if out.iter().any(|c| (c.0.opt, c.0.y, c.0.x, c.0.z) == (k, oy, ox, oz))
+                            || !ok.cells.iter().all(|&(cy, cx, cz, _, _)| inbox(oy + cy, ox + cx, oz + cz)) {
+                            continue;
+                        }
+                        let colour = d.colour_for(ok, oy, ox, oz, &mut filler.colour_counts);
+                        let it = Item { opt: k, colour, y: oy, x: ox, z: oz };
+                        let i = st.add(it);
+                        if st.links(i).contains(&f) {
+                            let dd = ok.cells.iter().map(|&(cy, cx, cz, _, _)| dist[bidx(oy + cy, ox + cx, oz + cz)]).min().unwrap_or(u16::MAX);
+                            out.push((it, st.energy(), dd, st.grounded[root]));
+                        }
+                        st.remove(i);
+                    }
+                }
+            }
+        }
+        filler.force = false;
+        out.sort_by(|p, q| (!p.3, p.2).cmp(&(!q.3, q.2)).then(p.1.partial_cmp(&q.1).unwrap()));
+        out.truncate(n);
+        out
+    };
+    struct Node { item: Option<Item>, kids: Vec<usize>, open: bool, n: f64, w: f64 }
+    let mut tree = vec![Node { item: None, kids: Vec::new(), open: false, n: 0.0, w: 0.0 }];
+    let e0 = st.energy();
+    let mut best: Option<(f64, Vec<Item>)> = None;
+    for _ in 0..ITERS {
+        let (mut path, mut added, mut node) = (vec![0usize], Vec::new(), 0usize);
+        let mut last = root;
+        // selection: UCB1 down the opened nodes
+        while tree[node].open && !tree[node].kids.is_empty() {
+            let ln = tree[node].n.max(1.0).ln();
+            node = *tree[node].kids.iter().max_by(|&&p, &&q| {
+                let u = |c: usize| if tree[c].n == 0.0 { f64::INFINITY } else { tree[c].w / tree[c].n + (2.0 * ln / tree[c].n).sqrt() };
+                u(p).partial_cmp(&u(q)).unwrap()
+            }).unwrap();
+            last = st.add(tree[node].item.unwrap());
+            added.push(last);
+            path.push(node);
+        }
+        // expansion
+        if !tree[node].open && added.len() < DEPTH {
+            tree[node].open = true;
+            for (it, _, _, _) in children(st, filler, rng, last, BRANCH) {
+                tree.push(Node { item: Some(it), kids: Vec::new(), open: false, n: 0.0, w: 0.0 });
+                let c = tree.len() - 1;
+                tree[node].kids.push(c);
+            }
+            if let Some(&c) = tree[node].kids.first() {
+                last = st.add(tree[c].item.unwrap());
+                added.push(last);
+                path.push(c);
+            }
+        }
+        // rollout: one of the best few children each step, as long as the chain is loose
+        let mut value = 0.0f64;
+        loop {
+            if !added.is_empty() && st.grounded[root] {
+                let gain = (e0 - st.energy()) / d.w_conn;
+                value = value.max(gain);
+                if best.as_ref().map_or(true, |b| gain > b.0) {
+                    best = Some((gain, added.iter().map(|&i| *st.item(i)).collect()));
+                }
+                break;
+            }
+            if added.len() >= DEPTH { break; }
+            let k = children(st, filler, rng, last, 3);
+            if k.is_empty() { break; }
+            let it = k[rng.below(k.len())].0;
+            last = st.add(it);
+            added.push(last);
+        }
+        for &p in &path {
+            tree[p].n += 1.0;
+            tree[p].w += value;
+        }
+        for &i in added.iter().rev() {
+            st.remove(i);
+        }
+    }
+    if tree[0].kids.is_empty() { PLAN_STATS[1].fetch_add(1, Relaxed); }
+    let Some((gain, items)) = best else { PLAN_STATS[2].fetch_add(1, Relaxed); return None };
+    PLAN_STATS[3].fetch_add(1, Relaxed);
+    if gain <= -1.0 {
+        return None;                                            // costs more than leaving it loose
+    }
+    Some(Undo::Retile { added: items.into_iter().map(|it| st.add(it)).collect(), removed: Vec::new() })
 }
 
 /// Remove the parts meeting a random window and re-fill its cells.
@@ -1323,7 +3264,7 @@ fn retile(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
     if d.want_cells.is_empty() {
         return None;
     }
-    let c = d.want_cells[rng.below(d.want_cells.len())] as i32;
+    let c = st.pick_cell(rng);
     let (cy, cx, cz) = (c / (d.x * d.z), (c / d.z) % d.x, c % d.z);
     let hy = if rng.f64() < 0.5 { 1 } else { 3 };
     let hx = 1 + rng.below(3) as i32;
@@ -1331,6 +3272,14 @@ fn retile(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
     let (y0, y1) = (cy, (cy + hy).min(d.h));
     let (x0, x1) = ((cx - hx + 1).max(0), (cx + hx).min(d.x));
     let (z0, z1) = ((cz - hz + 1).max(0), (cz + hz).min(d.z));
+    let (removed, cells) = clear_window(st, (y0, y1), (x0, x1), (z0, z1));
+    let added = filler.fill(st, rng, cells);
+    Some(Undo::Retile { added, removed })
+}
+
+/// Remove the parts meeting the window; the cells to fill again: theirs and the window's empty wanted ones.
+fn clear_window(st: &mut State, (y0, y1): (i32, i32), (x0, x1): (i32, i32), (z0, z1): (i32, i32)) -> (Vec<Item>, Vec<(i32, i32, i32)>) {
+    let d = st.d;
     let mut ids = Vec::new();
     let g = st.next_gen();
     for y in y0..y1 {
@@ -1363,8 +3312,286 @@ fn retile(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
             }
         }
     }
-    let added = filler.fill(st, rng, cells);
-    Some(Undo::Retile { added, removed })
+    (removed, cells)
+}
+
+/// Re-solve: clear a window (error-guided) and cover its cells again by the best of a bounded exact search over the
+/// filler's candidates -- each cell in turn, lowest first, takes a candidate starting there or stays empty -- scored
+/// by the filler's local score; the energy then decides as for any move.  Where the target's surface slants (a roof,
+/// the wheel) the window is a slope run: three plates tall, longer along the way the surface falls, so a stair of
+/// plates can become a row of slopes -- or an edge run: two plates tall, long along the edge (an eave's row of
+/// slopes).  Where it curves or runs diagonal on a wall (the wheel), a curve fit: many more candidates per cell
+/// (round and curved parts that only pay off together) and a bigger search.
+fn resolve(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<(usize, Undo)> {
+    let d = st.d;
+    if d.want_cells.is_empty() {
+        return None;
+    }
+    let c = st.pick_cell(rng);
+    let (cy, cx, cz) = (c / (d.x * d.z), (c / d.z) % d.x, c % d.z);
+    let (mut hy, mut hx, mut hz) = (1 + rng.below(2) as i32, 1 + rng.below(2) as i32, 1 + rng.below(2) as i32);
+    // (move, candidates asked per cell, kept per cell, search nodes)
+    let (mut m, mut ask, mut top, mut budget) = (10usize, d.top_k, 6usize, 3000usize);
+    let mut deep = 0;                                       // plates cleared below the window too: its support
+    if !d.t_normal.is_empty() {
+        let n = &d.t_normal[3 * c as usize..3 * c as usize + 3];
+        let along_x = n[1].abs() > n[2].abs();             // the surface falls / faces along x
+        if n[0] > 0.2 && n[0] < 0.95 {
+            deep = 3;
+            budget = 6000;
+            if rng.f64() < 0.5 {                            // slope run: down the fall
+                hy = 3;
+                if along_x { hx = 3 } else { hz = 3 }
+            } else {                                        // edge run: along the edge
+                m = 12;
+                hy = 2;
+                if along_x { hx = 1; hz = 4 } else { hz = 1; hx = 4 }
+            }
+        } else if n[0].abs() <= 0.2 && n[1].abs().min(n[2].abs()) > 0.25 {
+            (m, ask, top, budget) = (13, 32, 12, 6000);    // curve fit
+            (hy, hx, hz) = (2, 2, 2);
+            deep = 3;
+        }
+    }
+    let (y0, y1) = ((cy - hy + 1 - deep).max(0), (cy + hy).min(d.h));
+    let (x0, x1) = ((cx - hx + 1).max(0), (cx + hx).min(d.x));
+    let (z0, z1) = ((cz - hz + 1).max(0), (cz + hz).min(d.z));
+    let (removed, mut cells) = clear_window(st, (y0, y1), (x0, x1), (z0, z1));
+    cells.sort_unstable();
+    cells.dedup();
+    // per cell: its best candidates (score, option, place, colour, cells) and the score of leaving it empty
+    let mut cands = Vec::new();
+    // parts beside the window (resting on it, or hanging from it) that nothing outside it holds now: each needs a new
+    // part's stud under one of its holes, or a new part's hole over one of its studs (those cells), or the cover pays
+    // for it unsupported
+    let freed: std::collections::HashSet<usize> = cells.iter().map(|&(y, x, z)| d.idx(y, x, z)).collect();
+    let mut near = std::collections::HashSet::new();
+    for &(y, x, z) in &cells {
+        for yy in [y - 1, y + 1] {
+            if yy >= 0 && yy < d.h {
+                let j = st.owner[d.idx(yy, x, z)];
+                if j >= 0 {
+                    near.insert(j as usize);
+                }
+            }
+        }
+    }
+    let needs: Vec<(Vec<usize>, Vec<usize>)> = near.into_iter().filter_map(|j| {
+        if st.supported(j) {
+            return None;
+        }
+        let a = st.item(j);
+        let o = &d.opts[a.opt];
+        let under: Vec<usize> = if a.y == 0 { Vec::new() } else {
+            o.bottom.iter().map(|&(dx, dz)| d.idx(a.y - 1, a.x + dx, a.z + dz)).filter(|c| freed.contains(c)).collect() };
+        let over: Vec<usize> = if a.y + o.h >= d.h { Vec::new() } else {
+            o.top.iter().map(|&(dx, dz)| d.idx(a.y + o.h, a.x + dx, a.z + dz)).filter(|c| freed.contains(c)).collect() };
+        if under.is_empty() && over.is_empty() { None } else { Some((under, over)) }
+    }).collect();
+    // (score without the support penalty, option, place, colour, cells, held by parts outside the window, cells below,
+    // cells of its top studs, cells of its bottom holes, cells just above its top studs)
+    type Cand = (f64, usize, i32, i32, i32, i32, Vec<usize>, bool, Vec<usize>, Vec<usize>, Vec<usize>, Vec<usize>);
+    let mut opts: Vec<Vec<Cand>> = Vec::with_capacity(cells.len());
+    let mut empty = Vec::with_capacity(cells.len());
+    for &(y, x, z) in &cells {
+        let lpc = cell_logprobs(d, st, y, x, z);
+        filler.candidates(st, y, x, z, lpc.as_deref(), ask, &mut cands);
+        let mut v: Vec<_> = cands.iter().map(|&(_, k, oy, ox, oz, resid)| {
+            let (stat, fit, colour) = filler.score(st, lpc.as_deref(), k, oy, ox, oz, resid);
+            let o = &d.opts[k];
+            let held = Filler::held(st, o, oy, ox, oz);
+            let cs = o.cells.iter().map(|&(a, b, e, _, _)| d.idx(oy + a, ox + b, oz + e)).collect();
+            let below = if oy == 0 { Vec::new() } else { o.bottom.iter().map(|&(a, b)| d.idx(oy - 1, ox + a, oz + b)).collect() };
+            let tops = o.top.iter().map(|&(a, b)| d.idx(oy + o.h - 1, ox + a, oz + b)).collect();
+            let bots = o.bottom.iter().map(|&(a, b)| d.idx(oy, ox + a, oz + b)).collect();
+            let ups = if oy + o.h >= d.h { Vec::new() } else { o.top.iter().map(|&(a, b)| d.idx(oy + o.h, ox + a, oz + b)).collect() };
+            (stat + fit + if held { 0.0 } else { d.w_sup }, k, oy, ox, oz, colour, cs, held, below, tops, bots, ups)
+        }).collect();
+        v.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        v.truncate(top);
+        // the parts removed here are candidates too: the cover can always be put back as it was (held)
+        for r in removed.iter().filter(|r| { let f = d.opts[r.opt].first; (r.y + f.0, r.x + f.1, r.z + f.2) == (y, x, z) }) {
+            if v.iter().any(|c| (c.1, c.2, c.3, c.4) == (r.opt, r.y, r.x, r.z)) {
+                continue;
+            }
+            let o = &d.opts[r.opt];
+            let wrong: f64 = o.cells.iter().map(|&(a, b, e, bits, _)| miss((bits ^ d.tbits[d.idx(r.y + a, r.x + b, r.z + e)]).count_ones())).sum();
+            let (stat, fit, _) = filler.score(st, lpc.as_deref(), r.opt, r.y, r.x, r.z, wrong);
+            let held = Filler::held(st, o, r.y, r.x, r.z);
+            let cs = o.cells.iter().map(|&(a, b, e, _, _)| d.idx(r.y + a, r.x + b, r.z + e)).collect();
+            let below = if r.y == 0 { Vec::new() } else { o.bottom.iter().map(|&(a, b)| d.idx(r.y - 1, r.x + a, r.z + b)).collect() };
+            let tops = o.top.iter().map(|&(a, b)| d.idx(r.y + o.h - 1, r.x + a, r.z + b)).collect();
+            let bots = o.bottom.iter().map(|&(a, b)| d.idx(r.y, r.x + a, r.z + b)).collect();
+            let ups = if r.y + o.h >= d.h { Vec::new() } else { o.top.iter().map(|&(a, b)| d.idx(r.y + o.h, r.x + a, r.z + b)).collect() };
+            v.push((stat + fit + if held { 0.0 } else { d.w_sup }, r.opt, r.y, r.x, r.z, r.colour, cs, held, below, tops, bots, ups));
+        }
+        let i = d.idx(y, x, z);
+        // as the filler: a barely-wanted cell may stay empty; one nothing fits stays empty at a high price (the energy
+        // charges a hole only its shape, too little: left to it, the search trades parts for holes)
+        empty.push(if d.fill[i] < 0.5 { -d.w_cov * miss(d.tbits[i].count_ones()) } else { -d.w_cov * miss(d.tbits[i].count_ones()) - 1e3 });
+        opts.push(v);
+    }
+    struct Search<'a> {
+        cells: Vec<usize>,
+        opts: &'a [Vec<Cand>],
+        empty: &'a [f64],
+        w_sup: f64,
+        needs: &'a [(Vec<usize>, Vec<usize>)],
+        studs: std::collections::HashSet<usize>,
+        holes: std::collections::HashSet<usize>,
+        taken: std::collections::HashSet<usize>,
+        cur: Vec<(usize, usize)>,
+        best: (f64, Vec<(usize, usize)>),
+        nodes: usize,
+        budget: usize,
+    }
+    impl Search<'_> {
+        /// Limited discrepancy: `disc` choices on this path may leave the best feasible candidate (or the empty cell
+        /// where a candidate fits); passes with 0, 1, 2, ... share the budget, so a lower layer is reconsidered as
+        /// readily as the top one.
+        fn go(&mut self, mut p: usize, score: f64, disc: usize) {
+            if self.nodes >= self.budget {
+                return;
+            }
+            self.nodes += 1;
+            while p < self.cells.len() && self.taken.contains(&self.cells[p]) {
+                p += 1;
+            }
+            if p == self.cells.len() {
+                // support of the finished cover, as State::supported: a stud below, or hanging from a hole above
+                // (outside parts: o.7; side connectors to the new parts are not counted)
+                let mut unheld = self.needs.iter().filter(|(u, o)| !u.iter().any(|c| self.studs.contains(c))
+                    && !o.iter().any(|c| self.holes.contains(c))).count();
+                for &(q, j) in &self.cur {
+                    let o = &self.opts[q][j];
+                    if !(o.7 || o.8.iter().any(|c| self.studs.contains(c)) || o.11.iter().any(|c| self.holes.contains(c))) {
+                        unheld += 1;
+                    }
+                }
+                let score = score - self.w_sup * unheld as f64;
+                if score > self.best.0 {
+                    self.best = (score, self.cur.clone());
+                }
+                return;
+            }
+            let mut rank = 0;
+            for j in 0..self.opts[p].len() {
+                let o = &self.opts[p][j];
+                if o.6.iter().any(|c| self.taken.contains(c)) {
+                    continue;
+                }
+                let cost = (rank > 0) as usize;
+                rank += 1;
+                if cost > disc {
+                    break;
+                }
+                let gain = o.0;                             // support is counted on the finished cover
+                for &c in &o.6 { self.taken.insert(c); }
+                for &c in &o.9 { self.studs.insert(c); }
+                for &c in &o.10 { self.holes.insert(c); }
+                self.cur.push((p, j));
+                self.go(p + 1, score + gain, disc - cost);
+                self.cur.pop();
+                for c in &o.6 { self.taken.remove(c); }
+                for c in &o.9 { self.studs.remove(c); }
+                for c in &o.10 { self.holes.remove(c); }
+            }
+            let cost = (rank > 0) as usize;
+            if cost <= disc {
+                self.taken.insert(self.cells[p]);
+                self.go(p + 1, score + self.empty[p], disc - cost);
+                self.taken.remove(&self.cells[p]);
+            }
+        }
+    }
+    let mut s = Search {
+        cells: cells.iter().map(|&(y, x, z)| d.idx(y, x, z)).collect(),
+        opts: &opts,
+        empty: &empty,
+        w_sup: d.w_sup,
+        needs: &needs,
+        studs: std::collections::HashSet::new(),
+        holes: std::collections::HashSet::new(),
+        taken: std::collections::HashSet::new(),
+        cur: Vec::new(),
+        best: (f64::NEG_INFINITY, Vec::new()),
+        nodes: 0,
+        budget,
+    };
+    // the cover as it was (the window's empty cells then filled best-first) is the one to beat
+    let mut sc = 0.0;
+    for r in &removed {
+        let f = d.opts[r.opt].first;
+        let c = d.idx(r.y + f.0, r.x + f.1, r.z + f.2);
+        if let Some(p) = s.cells.iter().position(|&x| x == c) {
+            if let Some(j) = opts[p].iter().position(|o| (o.1, o.2, o.3, o.4) == (r.opt, r.y, r.x, r.z)) {
+                let o = &opts[p][j];
+                for &c in &o.6 { s.taken.insert(c); }
+                for &c in &o.9 { s.studs.insert(c); }
+                for &c in &o.10 { s.holes.insert(c); }
+                s.cur.push((p, j));
+                sc += o.0;
+            }
+        }
+    }
+    s.go(0, sc, 0);
+    s.taken.clear();
+    s.studs.clear();
+    s.holes.clear();
+    s.cur.clear();
+    for disc in 0..=3 {
+        if s.nodes >= budget {
+            break;
+        }
+        s.go(0, 0.0, disc);
+    }
+    let best = std::mem::take(&mut s.best.1);
+    let added = best.into_iter().map(|(p, j)| {
+        let (_, k, oy, ox, oz, colour, ..) = opts[p][j];
+        st.add(Item { opt: k, colour, y: oy, x: ox, z: oz })
+    }).collect();
+    Some((m, Undo::Retile { added, removed }))
+}
+
+/// Orient: a part becomes the best-scoring option of its box (another turn, or another part of that size -- a slope
+/// facing the way the surface falls, a tile where nothing sits).
+fn orient(st: &mut State, filler: &mut Filler, boxes: &[Vec<usize>], rng: &mut Rng) -> Option<Undo> {
+    if st.live.is_empty() {
+        return None;
+    }
+    let d = st.d;
+    let i = st.pick_item(rng);
+    let a = *st.item(i);
+    if boxes[a.opt].len() < 2 {
+        return None;
+    }
+    let ra = st.remove(i);
+    let lpc = cell_logprobs(d, st, a.y, a.x, a.z);
+    let mut best: Option<(f64, usize, i32)> = None;
+    for &k in &boxes[a.opt] {
+        if k == a.opt || !cells_free(st, k, a.y, a.x, a.z) {
+            continue;
+        }
+        let o = &d.opts[k];
+        if o.cells.iter().any(|&(cy, cx, cz, _, occ)| occ >= 0.5 && d.tbits[d.idx(a.y + cy, a.x + cx, a.z + cz)] == 0) {
+            continue;                                            // solid where the object is not
+        }
+        let wrong: f64 = o.cells.iter().map(|&(cy, cx, cz, bits, _)| miss((bits ^ d.tbits[d.idx(a.y + cy, a.x + cx, a.z + cz)]).count_ones())).sum();
+        let (stat, fit, colour) = filler.score(st, lpc.as_deref(), k, a.y, a.x, a.z, wrong);
+        if best.map_or(true, |b| stat + fit > b.0) {
+            best = Some((stat + fit, k, colour));
+        }
+    }
+    match best {
+        None => {
+            st.add(ra);
+            None
+        }
+        Some((_, k, colour)) => {
+            let j = st.add(Item { opt: k, colour, y: a.y, x: a.x, z: a.z });
+            Some(Undo::Retile { added: vec![j], removed: vec![ra] })
+        }
+    }
 }
 
 /// Join a random plain part with a neighbour of the same kind, height and
@@ -1373,7 +3600,7 @@ fn merge(st: &mut State, rng: &mut Rng) -> Option<Undo> {
     if st.live.is_empty() {
         return None;
     }
-    let i = st.live[rng.below(st.live.len())];
+    let i = st.pick_item(rng);
     let a = *st.item(i);
     let d = st.d;
     let ao = &d.opts[a.opt];
@@ -1389,7 +3616,7 @@ fn merge(st: &mut State, rng: &mut Rng) -> Option<Undo> {
         }
         let b = *st.item(j);
         let bo = &d.opts[b.opt];
-        if bo.boxk != ao.boxk || bo.h != ao.h || b.colour != a.colour || b.y != a.y {
+        if bo.boxk != ao.boxk || bo.h != ao.h || (b.colour != a.colour && d.w_col != 0.0) || b.y != a.y {
             continue;
         }
         let (x0, z0) = (a.x.min(b.x), a.z.min(b.z));
@@ -1401,7 +3628,7 @@ fn merge(st: &mut State, rng: &mut Rng) -> Option<Undo> {
             Some(&k) => k,
             None => continue,
         };
-        if d.snap[d.opts[k].part * d.n_col + a.colour as usize] != a.colour {
+        if d.made_in(k, a.colour).is_none() {
             continue;
         }
         let area = (x1 - x0) * (z1 - z0);
@@ -1412,7 +3639,8 @@ fn merge(st: &mut State, rng: &mut Rng) -> Option<Undo> {
     let (_, j, x0, z0, _x1, _z1, k) = best?;
     let ra = st.remove(i);
     let rb = st.remove(j);
-    let k = st.add(Item { opt: k, colour: a.colour, y: a.y, x: x0, z: z0 });
+    let colour = d.made_in(k, a.colour)?;
+    let k = st.add(Item { opt: k, colour, y: a.y, x: x0, z: z0 });
     Some(Undo::Merge { k, a: ra, b: rb })
 }
 
@@ -1422,7 +3650,7 @@ fn swap(st: &mut State, rng: &mut Rng) -> Option<Undo> {
     if st.live.is_empty() {
         return None;
     }
-    let i = st.live[rng.below(st.live.len())];
+    let i = st.pick_item(rng);
     let a = *st.item(i);
     let d = st.d;
     let g = d.opt_variants[a.opt];
@@ -1451,11 +3679,1054 @@ fn swap(st: &mut State, rng: &mut Rng) -> Option<Undo> {
     Some(Undo::Swap { k: k2, a: ra })
 }
 
-fn propose(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
+/// Attach B at its canonical pose to an existing A, drawn from the hinge-pair
+/// catalogue (everything2lego/hinges.py).  Mirrors sampler.hinge_swap.
+fn hinge_swap(st: &mut State, rng: &mut Rng) -> Option<Undo> {
+    let d = st.d;
+    if d.hinge_a.is_empty() || st.live.is_empty() {
+        return None;
+    }
+    // sample a few live items and pick one whose opt has a hinge pair
+    let mut i = usize::MAX;
+    for _ in 0..8 {
+        let cand = st.pick_item(rng);
+        let a = st.item(cand);
+        if d.hinge_by_a.contains_key(&a.opt) {
+            i = cand;
+            break;
+        }
+    }
+    if i == usize::MAX {
+        return None;
+    }
+    let a = *st.item(i);
+    let pairs = &d.hinge_by_a[&a.opt];
+    let p = pairs[rng.below(pairs.len())];
+    let b_opt = d.hinge_b[p];
+    let [dy, dx, dz] = d.hinge_pose[p];
+    let (by, bx, bz) = (a.y + dy, a.x + dx, a.z + dz);
+    let b = &d.opts[b_opt];
+    // in-bounds?
+    if by < 0 || by + b.h > d.h || bx < 0 || bx + b.w > d.x || bz < 0 || bz + b.d > d.z {
+        return None;
+    }
+    // cells either empty or all owned by one evictable item (not A)
+    let mut occ: Option<usize> = None;
+    for &(cy, cx, cz, _, _) in &b.cells {
+        let j = st.owner[d.idx(by + cy, bx + cx, bz + cz)];
+        if j < 0 {
+            continue;
+        }
+        let j = j as usize;
+        if j == i {
+            return None;
+        }
+        if let Some(k) = occ {
+            if k != j {
+                return None;
+            }
+        } else {
+            occ = Some(j);
+        }
+    }
+    let evicted = if let Some(j) = occ {
+        // only evict j if all its cells are inside B's footprint (don't orphan)
+        let jitem = *st.item(j);
+        let jo = &d.opts[jitem.opt];
+        let b_cells: std::collections::HashSet<(i32, i32, i32)> =
+            b.cells.iter().map(|&(cy, cx, cz, _, _)| (by + cy, bx + cx, bz + cz)).collect();
+        let ok = jo.cells.iter().all(|&(cy, cx, cz, _, _)|
+            b_cells.contains(&(jitem.y + cy, jitem.x + cx, jitem.z + cz)));
+        if !ok {
+            return None;
+        }
+        Some(st.remove(j))
+    } else {
+        None
+    };
+    // colour: inherit A's unless not allowed; snap replaces a disallowed one
+    let colour = d.snap[b.part * d.n_col + a.colour as usize];
+    let k = st.add(Item { opt: b_opt, colour, y: by, x: bx, z: bz });
+    Some(Undo::Hinge { k, evicted })
+}
+
+/// Shift a wall-region long rectangular part by 1 stud along its long axis
+/// to break vertically-aligned seams with the part directly above.
+/// Mirrors sampler.masonry_shift.
+fn masonry_shift(st: &mut State, rng: &mut Rng) -> Option<Undo> {
+    let d = st.d;
+    if d.region_label.is_empty() || st.live.is_empty() {
+        return None;
+    }
+    let i = st.pick_item(rng);
+    let a = *st.item(i);
+    let o = &d.opts[a.opt];
+    // long rectangular box
+    if o.w + o.d < 3 || o.w * o.d > 8 {
+        return None;
+    }
+    // dominant region of A's cells must be wall (label 1)
+    let mut counts = [0i32; 8];
+    for &(cy, cx, cz, _, _) in &o.cells {
+        let r = d.region_label[d.idx(a.y + cy, a.x + cx, a.z + cz)];
+        if r >= 0 && (r as usize) < counts.len() {
+            counts[r as usize] += 1;
+        }
+    }
+    let dom = counts.iter().enumerate().max_by_key(|(_, &c)| c).map(|(i, _)| i).unwrap_or(0);
+    if dom != 1 {
+        return None;
+    }
+    // part B above with same (x_stud, z_stud, W, D) at y_top?
+    let y_top = a.y + o.h;
+    if y_top >= d.h {
+        return None;
+    }
+    let mut above: i32 = -1;
+    'find: for x in a.x..a.x + o.w {
+        for z in a.z..a.z + o.d {
+            let j = st.owner[d.idx(y_top, x, z)];
+            if j >= 0 {
+                above = j;
+                break 'find;
+            }
+        }
+    }
+    if above < 0 {
+        return None;
+    }
+    let b = *st.item(above as usize);
+    let bo = &d.opts[b.opt];
+    if b.y != y_top || b.x != a.x || b.z != a.z || bo.w != o.w || bo.d != o.d {
+        return None;
+    }
+    // shift along the long axis
+    let along_x = o.w >= o.d;
+    for &dir in &[1i32, -1i32] {
+        let nx = a.x + if along_x { dir } else { 0 };
+        let nz = a.z + if along_x { 0 } else { dir };
+        // in-bounds + cells free (ignoring self) + in want
+        let ok = o.cells.iter().all(|&(cy, cx, cz, _, _)| {
+            let yy = a.y + cy;
+            let xx = nx + cx;
+            let zz = nz + cz;
+            if yy < 0 || yy >= d.h || xx < 0 || xx >= d.x || zz < 0 || zz >= d.z {
+                return false;
+            }
+            let idx = d.idx(yy, xx, zz);
+            d.want[idx] && (st.owner[idx] == -1 || st.owner[idx] == i as i32)
+        });
+        if !ok {
+            continue;
+        }
+        let ra = st.remove(i);
+        let k = st.add(Item { opt: a.opt, colour: a.colour, y: a.y, x: nx, z: nz });
+        return Some(Undo::MasonryShift { k, a: ra });
+    }
+    None
+}
+
+/// Sideways building in one step: a plain brick becomes its side-stud version, and a sideways plate / tile is hung
+/// on each of its side studs, the parts in their way removed (at most 3 per tile).  The energy takes or leaves it.
+fn snot_face(st: &mut State, rng: &mut Rng) -> Option<Undo> {
+    if st.live.is_empty() {
+        return None;
+    }
+    let d = st.d;
+    let i = st.pick_item(rng);
+    let a = *st.item(i);
+    let rows = &d.snot_by_opt[a.opt];
+    if rows.is_empty() {
+        return None;
+    }
+    let anchor = d.snot_rows[rows[rng.below(rows.len())]].0;
+    let ra = st.remove(i);
+    let k = st.add(Item { opt: anchor, colour: a.colour, y: a.y, x: a.x, z: a.z });
+    let mut added = vec![k];
+    let mut removed = vec![ra];
+    let mut studs: Vec<i32> = Vec::new();
+    for &r in rows.iter() {
+        let (an, tile, dy, dx, dz, stud) = d.snot_rows[r];
+        if an != anchor || studs.contains(&stud) {
+            continue;
+        }
+        let t = &d.opts[tile];
+        let (ty, tx, tz) = (a.y + dy, a.x + dx, a.z + dz);
+        let mut owners: Vec<usize> = Vec::new();
+        let mut ok = true;
+        for &(cy, cx, cz, _, _) in &t.cells {
+            let (y, x, z) = (ty + cy, tx + cx, tz + cz);
+            if !d.inside(y, x, z) {
+                ok = false;
+                break;
+            }
+            let o = st.owner[d.idx(y, x, z)];
+            if o >= 0 {
+                let o = o as usize;
+                if added.contains(&o) {
+                    ok = false;
+                    break;
+                }
+                if !owners.contains(&o) {
+                    owners.push(o);
+                }
+            }
+        }
+        if !ok || owners.len() > 3 {
+            continue;
+        }
+        let mut colour = a.colour;
+        for o in owners {
+            let it = st.remove(o);
+            colour = it.colour;                                  // the tile takes the colour of the face it replaces
+            removed.push(it);
+        }
+        added.push(st.add(Item { opt: tile, colour, y: ty, x: tx, z: tz }));
+        studs.push(stud);
+    }
+    if added.len() == 1 {
+        undo(st, Undo::Retile { added, removed });
+        return None;
+    }
+    Some(Undo::Retile { added, removed })
+}
+
+/// Options with the same box (h, w, d) as each option and fewer top studs: what re-top may turn it into.
+/// Per option, the upright options of its box (h, w, d), itself included: what orient may turn it into.
+fn box_groups(d: &Data) -> Vec<Vec<usize>> {
+    let mut by_box: std::collections::HashMap<(i32, i32, i32), Vec<usize>> = std::collections::HashMap::new();
+    for (k, o) in d.opts.iter().enumerate() {
+        if d.opt_sideways.get(k).copied().unwrap_or(false) || o.boxk < 0 && o.top.is_empty() && o.bottom.is_empty() { continue; }
+        by_box.entry((o.h, o.w, o.d)).or_default().push(k);
+    }
+    d.opts.iter().map(|o| by_box.get(&(o.h, o.w, o.d)).cloned().unwrap_or_default()).collect()
+}
+
+fn retop_groups(d: &Data) -> Vec<Vec<usize>> {
+    let mut by_box: std::collections::HashMap<(i32, i32, i32), Vec<usize>> = std::collections::HashMap::new();
+    for (k, o) in d.opts.iter().enumerate() {
+        if d.opt_sideways.get(k).copied().unwrap_or(false) { continue; }
+        by_box.entry((o.h, o.w, o.d)).or_default().push(k);
+    }
+    d.opts.iter().map(|o| by_box.get(&(o.h, o.w, o.d)).map_or_else(Vec::new, |g| g.iter().copied().filter(|&k| d.opts[k].top.len() < o.top.len()).collect())).collect()
+}
+
+/// Whether option k's cells at (y, x, z) are all free (boxes of the same size can still differ in their cells).
+fn cells_free(st: &State, k: usize, y: i32, x: i32, z: i32) -> bool {
+    let d = st.d;
+    d.opts[k].cells.iter().all(|&(cy, cx, cz, _, _)| st.owner[d.idx(y + cy, x + cx, z + cz)] < 0)
+}
+
+/// Whether some top stud of item i has nothing on it.
+fn top_exposed(st: &State, i: usize) -> bool {
+    let d = st.d;
+    let a = st.item(i);
+    let o = &d.opts[a.opt];
+    o.top.iter().any(|&(dx, dz)| a.y + o.h >= d.h || st.owner[d.idx(a.y + o.h, a.x + dx, a.z + dz)] < 0)
+}
+
+/// Re-top: a part with a bare top stud becomes a part of the same box with fewer studs on top (plate -> tile,
+/// brick -> slope, ...): caps studs nothing will sit on.
+fn retop(st: &mut State, groups: &[Vec<usize>], rng: &mut Rng) -> Option<Undo> {
+    if st.live.is_empty() {
+        return None;
+    }
+    let d = st.d;
+    for _ in 0..8 {
+        let i = st.pick_item(rng);
+        let a = *st.item(i);
+        let g = &groups[a.opt];
+        if g.is_empty() || !top_exposed(st, i) {
+            continue;
+        }
+        let k = g[rng.below(g.len())];
+        let colour = d.snap[d.opts[k].part * d.n_col + a.colour as usize];
+        let ra = st.remove(i);
+        if !cells_free(st, k, a.y, a.x, a.z) {
+            st.add(ra);                                   // it would overlap a neighbour in a corner a left empty
+            return None;
+        }
+        let added = vec![st.add(Item { opt: k, colour, y: a.y, x: a.x, z: a.z })];
+        return Some(Undo::Retile { added, removed: vec![ra] });
+    }
+    None
+}
+
+/// Split: the reverse of merge -- a plain part cut in two along x or z (same kind, height, colour).
+fn split(st: &mut State, rng: &mut Rng) -> Option<Undo> {
+    if st.live.is_empty() {
+        return None;
+    }
+    let d = st.d;
+    let i = st.pick_item(rng);
+    let a = *st.item(i);
+    let o = &d.opts[a.opt];
+    if o.boxk < 0 || (o.w < 2 && o.d < 2) {
+        return None;
+    }
+    let along_x = if o.w < 2 { false } else if o.d < 2 { true } else { rng.f64() < 0.5 };
+    let n = if along_x { o.w } else { o.d };
+    let c = 1 + rng.below((n - 1) as usize) as i32;
+    let (b1, b2, o2) = if along_x {
+        ((o.boxk, o.h, c, o.d), (o.boxk, o.h, o.w - c, o.d), (c, 0))
+    } else {
+        ((o.boxk, o.h, o.w, c), (o.boxk, o.h, o.w, o.d - c), (0, c))
+    };
+    let (&k1, &k2) = (d.boxes.get(&b1)?, d.boxes.get(&b2)?);
+    let ra = st.remove(i);
+    if !cells_free(st, k1, a.y, a.x, a.z) || !cells_free(st, k2, a.y, a.x + o2.0, a.z + o2.1) {
+        st.add(ra);
+        return None;
+    }
+    // each piece in its own colour nearest the target over its cells: a part across a colour edge splits along it
+    let mut counts = Vec::new();
+    let c1 = d.colour_for(&d.opts[k1], a.y, a.x, a.z, &mut counts);
+    let c2 = d.colour_for(&d.opts[k2], a.y, a.x + o2.0, a.z + o2.1, &mut counts);
+    let added = vec![st.add(Item { opt: k1, colour: c1, y: a.y, x: a.x, z: a.z }),
+                     st.add(Item { opt: k2, colour: c2, y: a.y, x: a.x + o2.0, z: a.z + o2.1 })];
+    Some(Undo::Retile { added, removed: vec![ra] })
+}
+
+/// Stack: a plain brick becomes three plates of its footprint, or three such plates stacked become the brick (in
+/// their colour, or when they differ, the one colour_for gives it).
+fn stack(st: &mut State, rng: &mut Rng) -> Option<Undo> {
+    const BRICK: i32 = 0;
+    const PLATE: i32 = 1;
+    if st.live.is_empty() {
+        return None;
+    }
+    let d = st.d;
+    let i = st.pick_item(rng);
+    let a = *st.item(i);
+    let o = &d.opts[a.opt];
+    if o.boxk == BRICK && o.h == 3 {
+        let &kp = d.boxes.get(&(PLATE, 1, o.w, o.d))?;
+        let c = d.made_in(kp, a.colour)?;
+        let ra = st.remove(i);
+        if !(0..3).all(|dy| cells_free(st, kp, a.y + dy, a.x, a.z)) {
+            st.add(ra);
+            return None;
+        }
+        let added = (0..3).map(|dy| st.add(Item { opt: kp, colour: c, y: a.y + dy, x: a.x, z: a.z })).collect();
+        return Some(Undo::Retile { added, removed: vec![ra] });
+    }
+    if o.boxk == PLATE && o.h == 1 && a.y + 3 <= d.h {
+        let &kb = d.boxes.get(&(BRICK, 3, o.w, o.d))?;
+        let c = d.made_in(kb, a.colour)?;
+        let mut idx = vec![i];
+        let mut mixed = false;
+        for dy in 1..3 {
+            let j = st.owner[d.idx(a.y + dy, a.x + o.first.1, a.z + o.first.2)];
+            if j < 0 { return None; }
+            let b = *st.item(j as usize);
+            if b.opt != a.opt || b.x != a.x || b.z != a.z || b.y != a.y + dy {
+                return None;
+            }
+            mixed |= b.colour != a.colour;
+            idx.push(j as usize);
+        }
+        // plates of different colours: the brick takes the colour nearest the target, the colour cost decides
+        let c = if mixed { d.colour_for(&d.opts[kb], a.y, a.x, a.z, &mut Vec::new()) } else { c };
+        let removed: Vec<Item> = idx.into_iter().map(|j| st.remove(j)).collect();
+        if !cells_free(st, kb, a.y, a.x, a.z) {
+            for r in removed { st.add(r); }
+            return None;
+        }
+        let added = vec![st.add(Item { opt: kb, colour: c, y: a.y, x: a.x, z: a.z })];
+        return Some(Undo::Retile { added, removed });
+    }
+    None
+}
+
+/// Pattern: a group of parts real sets build together (tools/learn/motifs.py), placed at a random wanted cell --
+/// of a few drawn by how many sets use them, the one that fits the target there best -- with what stood in its way
+/// cleared and the cleared space refilled.
+fn motif(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
+    let d = st.d;
+    if d.motif_cum.is_empty() || d.want_cells.is_empty() {
+        return None;
+    }
+    let c = st.pick_cell(rng);
+    let (cy, cx, cz) = (c / (d.x * d.z), (c / d.z) % d.x, c % d.z);
+    // on the target's pitched roof or flat tops, that surface's patterns (when there are any); elsewhere the rest
+    let t = if d.cell_type.is_empty() { 0 } else { d.cell_type[c as usize].clamp(0, 2) as usize };
+    let t = if d.motif_by_type[t].0.is_empty() { 0 } else { t };
+    let (ms, cum) = &d.motif_by_type[t];
+    if ms.is_empty() {
+        return None;
+    }
+    let total = *cum.last().unwrap();
+    let mut best: Option<(f64, usize, i32, i32, i32)> = None;
+    'draw: for _ in 0..16 {
+        let r = rng.f64() * total;
+        let m = ms[cum.partition_point(|&w| w <= r).min(cum.len() - 1)];
+        let rows = &d.motif_rows[d.motif_start[m]..d.motif_start[m + 1]];
+        let (_, ay, ax, az) = rows[rng.below(rows.len())];         // that part of the pattern goes at the cell
+        let (oy, ox, oz) = (cy - ay, cx - ax, cz - az);
+        let mut wrong = 0f64;
+        let mut col = 0f64;
+        for &(k, dy, dx, dz) in rows {
+            let o = &d.opts[k];
+            let (y, x, z) = (oy + dy, ox + dx, oz + dz);
+            if y < 0 || x < 0 || z < 0 || y + o.h > d.h || x + o.w > d.x || z + o.d > d.z {
+                continue 'draw;
+            }
+            let colour = d.colour_for(o, y, x, z, &mut filler.colour_counts);
+            col += d.colour_cost(o, y, x, z, colour);
+            for &(py, px, pz, bits, occ) in &o.cells {
+                let t = d.tbits[d.idx(y + py, x + px, z + pz)];
+                if occ >= 0.5 && t == 0 {
+                    continue 'draw;                                   // solid where the object is not
+                }
+                wrong += miss((bits ^ t).count_ones());
+            }
+        }
+        let score = -(d.w_cov * wrong + d.w_col * col);
+        if best.map_or(true, |b| score > b.0) {
+            best = Some((score, m, oy, ox, oz));
+        }
+    }
+    let (_, m, oy, ox, oz) = best?;
+    let rows = d.motif_rows[d.motif_start[m]..d.motif_start[m + 1]].to_vec();
+    let mut owners: Vec<usize> = Vec::new();
+    for &(k, dy, dx, dz) in &rows {
+        for &(py, px, pz, _, _) in &d.opts[k].cells {
+            let j = st.owner[d.idx(oy + dy + py, ox + dx + px, oz + dz + pz)];
+            if j >= 0 && !owners.contains(&(j as usize)) {
+                owners.push(j as usize);
+            }
+        }
+    }
+    let mut freed: Vec<(i32, i32, i32)> = Vec::new();
+    let mut removed = Vec::new();
+    for j in owners {
+        let it = *st.item(j);
+        for &(py, px, pz, _, _) in &d.opts[it.opt].cells {
+            freed.push((it.y + py, it.x + px, it.z + pz));
+        }
+        removed.push(st.remove(j));
+    }
+    let mut added = Vec::new();
+    for &(k, dy, dx, dz) in &rows {
+        let o = &d.opts[k];
+        let colour = d.colour_for(o, oy + dy, ox + dx, oz + dz, &mut filler.colour_counts);
+        added.push(st.add(Item { opt: k, colour, y: oy + dy, x: ox + dx, z: oz + dz }));
+    }
+    freed.retain(|&(y, x, z)| st.owner[d.idx(y, x, z)] < 0 && d.want[d.idx(y, x, z)]);
+    added.extend(filler.fill(st, rng, freed));
+    Some(Undo::Retile { added, removed })
+}
+
+/// Translations the target may repeat under, (dy, dx, dz): one stud along x or z, rising or falling up to a brick
+/// (a stair or a slanted surface repeats so), or straight up a plate to a brick (a wall's courses).
+const ECHO_T: [(i32, i32, i32); 17] = [(-3, 1, 0), (-2, 1, 0), (-1, 1, 0), (0, 1, 0), (1, 1, 0), (2, 1, 0), (3, 1, 0),
+    (-3, 0, 1), (-2, 0, 1), (-1, 0, 1), (0, 0, 1), (1, 0, 1), (2, 0, 1), (3, 0, 1), (1, 0, 0), (2, 0, 0), (3, 0, 0)];
+
+/// The target's self-similarity: for every wanted cell and translation t, whether the 3x3x3 cells around it match
+/// those around it + t -- sample masks within 6 % of the window's samples, the colours that show within the colour
+/// cap (12 when it is off).  Runs of such cells are where the target repeats, whatever the object.
+fn self_similarity(d: &Data) -> Vec<u32> {
+    let n = d.tbits.len();
+    let col_tol = if d.col_max > 0.0 { d.col_max } else { 12.0 };
+    let max_diff = (27.0 * 64.0 * 0.06) as u32;
+    let at = |y: i32, x: i32, z: i32| if d.inside(y, x, z) { Some(d.idx(y, x, z)) } else { None };
+    let mut sim = vec![0u32; n];
+    for c in 0..n {
+        if !d.want[c] || d.fill[c] < 0.5 {
+            continue;
+        }
+        let ci = c as i32;
+        let (y, x, z) = (ci / (d.x * d.z), (ci / d.z) % d.x, ci % d.z);
+        'tr: for (k, &(ty, tx, tz)) in ECHO_T.iter().enumerate() {
+            let (mut diff, mut ok) = (0u32, false);
+            for oy in -1..=1 {
+                for ox in -1..=1 {
+                    for oz in -1..=1 {
+                        let p = at(y + oy, x + ox, z + oz);
+                        let q = at(y + ty + oy, x + tx + ox, z + tz + oz);
+                        if oy == 0 && ox == 0 && oz == 0 {
+                            ok = q.map_or(false, |q| d.want[q] && d.fill[q] >= 0.5 && d.same_part(c, q));
+                            if !ok { continue 'tr; }
+                        }
+                        let (bp, bq) = (p.map_or(0, |p| d.tbits[p]), q.map_or(0, |q| d.tbits[q]));
+                        diff += (bp ^ bq).count_ones();
+                        if diff > max_diff { continue 'tr; }
+                        if let (Some(p), Some(q)) = (p, q) {
+                            if d.visible[p] && d.visible[q] && d.tcolour[p] >= 0 && d.tcolour[q] >= 0 {
+                                let (a, b) = (&d.tlab[3 * p..3 * p + 3], &d.tlab[3 * q..3 * q + 3]);
+                                let e = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt() as f64;
+                                if e > col_tol { continue 'tr; }
+                            }
+                        }
+                    }
+                }
+            }
+            if ok { sim[c] |= 1 << k; }
+        }
+    }
+    let wanted = (0..n).filter(|&c| d.want[c] && d.fill[c] >= 0.5).count();
+    eprintln!("self-similarity: {} of {} wanted cells repeat along some translation, {:.1} translations each",
+              sim.iter().filter(|&&b| b != 0).count(), wanted,
+              sim.iter().map(|b| b.count_ones() as f64).sum::<f64>() / wanted.max(1) as f64);
+    sim
+}
+
+/// Echo: a part copied along a run where the target repeats (Data::sim), every copy at the stride that keeps copies
+/// apart; the parts in the copies' way go, their other cells are filled again, and the energy decides as for any move.
+/// Where the target repeats the build can then change a whole run at once instead of row by row.
+fn echo(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
+    let d = st.d;
+    if d.sim.is_empty() || d.want_cells.is_empty() {
+        return None;
+    }
+    let j = st.owner[st.pick_cell(rng) as usize];
+    if j < 0 {
+        return None;
+    }
+    let tpl = *st.item(j as usize);
+    let o = &d.opts[tpl.opt];
+    let a = (tpl.y + o.first.0, tpl.x + o.first.1, tpl.z + o.first.2);
+    let ks: Vec<usize> = (0..ECHO_T.len()).filter(|&k| d.sim[d.idx(a.0, a.1, a.2)] >> k & 1 == 1).collect();
+    if ks.is_empty() {
+        return None;
+    }
+    let k = ks[rng.below(ks.len())];
+    let t = ECHO_T[k];
+    let stride = if t.1 != 0 { o.w } else if t.2 != 0 { o.d } else { (o.h + t.0 - 1) / t.0 };
+    // a copy n strides away: every unit step on the way between matching cells, the copy inside the grid and the
+    // target, off locked cells
+    let fits = |n: i32| -> bool {
+        let s = n.signum();
+        for u in 0..n.abs() * stride {
+            let from = if s > 0 { u } else { -(u + 1) };
+            let (y, x, z) = (a.0 + from * t.0, a.1 + from * t.1, a.2 + from * t.2);
+            if !d.inside(y, x, z) || d.sim[d.idx(y, x, z)] >> k & 1 == 0 { return false; }
+        }
+        let (oy, ox, oz) = (tpl.y + n * stride * t.0, tpl.x + n * stride * t.1, tpl.z + n * stride * t.2);
+        if oy < 0 || ox < 0 || oz < 0 || oy + o.h > d.h || ox + o.w > d.x || oz + o.d > d.z { return false; }
+        o.cells.iter().all(|&(cy, cx, cz, _, occ)| {
+            let c = d.idx(oy + cy, ox + cx, oz + cz);
+            !(occ >= 0.5 && d.tbits[c] == 0) && (d.lock.is_empty() || !d.lock[c])
+        })
+    };
+    const REACH: i32 = 6;
+    let fwd = (1..=REACH).take_while(|&n| fits(n)).count() as i32;
+    let back = (1..=REACH).take_while(|&n| fits(-n)).count() as i32;
+    if fwd + back == 0 {
+        return None;
+    }
+    let (nf, nb) = loop {
+        let (f, b) = (rng.below(fwd as usize + 1) as i32, rng.below(back as usize + 1) as i32);
+        if f + b > 0 { break (f, b); }
+    };
+    let ns: Vec<i32> = (-nb..=nf).filter(|&n| n != 0).collect();
+    let mut owners: Vec<usize> = Vec::new();
+    for &n in &ns {
+        for &(cy, cx, cz, _, _) in &o.cells {
+            let i = st.owner[d.idx(tpl.y + n * stride * t.0 + cy, tpl.x + n * stride * t.1 + cx, tpl.z + n * stride * t.2 + cz)];
+            if i >= 0 && i != j && !owners.contains(&(i as usize)) {
+                owners.push(i as usize);
+            }
+        }
+    }
+    let mut freed: Vec<(i32, i32, i32)> = Vec::new();
+    let mut removed = Vec::new();
+    for i in owners {
+        let it = *st.item(i);
+        for &(py, px, pz, _, _) in &d.opts[it.opt].cells {
+            freed.push((it.y + py, it.x + px, it.z + pz));
+        }
+        removed.push(st.remove(i));
+    }
+    let mut added = Vec::new();
+    for &n in &ns {
+        let (y, x, z) = (tpl.y + n * stride * t.0, tpl.x + n * stride * t.1, tpl.z + n * stride * t.2);
+        let colour = d.colour_for(o, y, x, z, &mut filler.colour_counts);
+        added.push(st.add(Item { opt: tpl.opt, colour, y, x, z }));
+    }
+    freed.retain(|&(y, x, z)| st.owner[d.idx(y, x, z)] < 0 && d.want[d.idx(y, x, z)]);
+    added.extend(filler.fill(st, rng, freed));
+    Some(Undo::Retile { added, removed })
+}
+
+/// Phase: plate rafts back into bricks.  An error-guided window a few studs wide and 6-9 plates tall takes the course
+/// phase (y mod 3) most brick-height parts around it start at (a random one when there are none); its plates go, and
+/// the freed cells are covered first by plain bricks on that phase (bottom up, the longest that fits under a random
+/// length cap, so shorter bricks get proposed too), then by the filler.  The energy decides as for any move.
+fn phase(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
+    const BRICK: i32 = 0;
+    const PLATE: i32 = 1;
+    let d = st.d;
+    if d.want_cells.is_empty() {
+        return None;
+    }
+    let c = st.pick_cell(rng);
+    let (cy, cx, cz) = (c / (d.x * d.z), (c / d.z) % d.x, c % d.z);
+    let hy = 6 + rng.below(4) as i32;
+    let (hx, hz) = (1 + rng.below(3) as i32, 1 + rng.below(3) as i32);
+    let y0 = (cy - rng.below(hy as usize) as i32).max(0);
+    let (y1, (x0, x1), (z0, z1)) = ((y0 + hy).min(d.h), ((cx - hx + 1).max(0), (cx + hx).min(d.x)), ((cz - hz + 1).max(0), (cz + hz).min(d.z)));
+    // votes: cells of parts a multiple of 3 plates tall, by the phase they start at, over the window and 2 studs round
+    let (mut votes, mut plates) = ([0usize; 3], Vec::new());
+    let g = st.next_gen();
+    for y in y0..y1 {
+        for x in (x0 - 2).max(0)..(x1 + 2).min(d.x) {
+            for z in (z0 - 2).max(0)..(z1 + 2).min(d.z) {
+                let j = st.owner[d.idx(y, x, z)];
+                if j < 0 || st.mark[j as usize] == g {
+                    continue;
+                }
+                st.mark[j as usize] = g;
+                let it = st.item(j as usize);
+                let o = &d.opts[it.opt];
+                if o.h % 3 == 0 {
+                    votes[it.y.rem_euclid(3) as usize] += o.cells.len();
+                } else if o.boxk == PLATE && o.h == 1 && x >= x0 && x < x1 && z >= z0 && z < z1 {
+                    plates.push(j as usize);
+                }
+            }
+        }
+    }
+    if plates.len() < 3 {
+        return None;
+    }
+    let best = *votes.iter().max().unwrap();
+    let ph = if best == 0 { rng.below(3) as i32 } else { (0..3).find(|&p| votes[p] == best).unwrap() as i32 };
+    let mut freed = std::collections::HashSet::new();
+    let mut removed = Vec::with_capacity(plates.len());
+    for j in plates {
+        let it = st.remove(j);
+        for &(py, px, pz, _, _) in &d.opts[it.opt].cells {
+            freed.insert((it.y + py, it.x + px, it.z + pz));
+        }
+        removed.push(it);
+    }
+    for y in y0..y1 {
+        for x in x0..x1 {
+            for z in z0..z1 {
+                if d.want[d.idx(y, x, z)] && st.owner[d.idx(y, x, z)] < 0 {
+                    freed.insert((y, x, z));
+                }
+            }
+        }
+    }
+    let cap = [2, 3, 4, 6, 8, 16][rng.below(6)];
+    let mut bricks: Vec<(i32, usize)> = d.boxes.iter().filter(|(b, _)| b.0 == BRICK && b.1 == 3 && b.2.max(b.3) <= cap)
+        .map(|(b, &k)| (b.2 * b.3, k)).collect();
+    bricks.sort_unstable_by(|a, b| b.cmp(a));
+    let mut cells: Vec<(i32, i32, i32)> = freed.iter().copied().collect();
+    cells.sort_unstable();
+    let mut added = Vec::new();
+    for &(y, x, z) in &cells {
+        if (y - ph).rem_euclid(3) != 0 || st.owner[d.idx(y, x, z)] >= 0 {
+            continue;
+        }
+        for &(_, k) in &bricks {
+            let o = &d.opts[k];
+            let (oy, ox, oz) = (y - o.first.0, x - o.first.1, z - o.first.2);
+            if o.cells.iter().all(|&(a, b, e, _, _)| freed.contains(&(oy + a, ox + b, oz + e)) && st.owner[d.idx(oy + a, ox + b, oz + e)] < 0) {
+                let colour = d.colour_for(o, oy, ox, oz, &mut filler.colour_counts);
+                added.push(st.add(Item { opt: k, colour, y: oy, x: ox, z: oz }));
+                break;
+            }
+        }
+    }
+    if added.is_empty() {                                   // no brick fits: not this move's business
+        for r in removed { st.add(r); }
+        return None;
+    }
+    cells.retain(|&(y, x, z)| st.owner[d.idx(y, x, z)] < 0);
+    added.extend(filler.fill(st, rng, cells));
+    Some(Undo::Retile { added, removed })
+}
+
+/// A cell's sample mask mirrored across x (sx -> 3 - sx) or z (sz -> 3 - sz); bit sy*16 + sx*4 + sz.
+fn mirror_bits(b: u64, axis: usize) -> u64 {
+    if axis == 0 {
+        let b = (b & 0x0F0F_0F0F_0F0F_0F0F) << 4 | (b >> 4) & 0x0F0F_0F0F_0F0F_0F0F;
+        (b & 0x00FF_00FF_00FF_00FF) << 8 | (b >> 8) & 0x00FF_00FF_00FF_00FF
+    } else {
+        let b = (b & 0x5555_5555_5555_5555) << 1 | (b >> 1) & 0x5555_5555_5555_5555;
+        (b & 0x3333_3333_3333_3333) << 2 | (b >> 2) & 0x3333_3333_3333_3333
+    }
+}
+
+/// The cell (y, x, z) mirrored across plane (axis, s).
+fn mirror_cell((axis, s): (usize, i32), y: i32, x: i32, z: i32) -> (i32, i32, i32) {
+    if axis == 0 { (y, s - x, z) } else { (y, x, s - z) }
+}
+
+const MIRROR_PLANES: usize = 4; // per axis, at most, without parts
+const MIRROR_BITS: usize = 8;   // per part, at most (its own planes and its pairs', best score first): msym is a u8
+const MIRROR_MIN: f64 = 0.25;   // a plane counts when this share of the target's samples maps onto the target
+const MIRROR_PART_MIN: usize = 27; // a part's planes need this many wanted cells (one 3x3x3 window): below, the score is noise
+const MIRROR_PAIR_SIZE: f64 = 0.5; // two parts pair only within 2x of each other's wanted cells: a mirror image has its size
+// part-aware per-cell test: differing / compared samples (both sides) at most this.  One face of a full window a
+// sub-sample (1/4 cell) off differs in 9*16 of 2*27*64 samples, 4 %, two faces 8 %; past 10 % the shape differs, not
+// the voxelisation (watermill roof pair: ratios < 10 % or > 25 %).  The global test's 6 % of 27*64 is 3 % of both sides.
+const MIRROR_PART_TOL: f64 = 0.10;
+
+/// The target's mirror symmetry about vertical planes x = s/2 and z = s/2 (half-stud lattice): first the planes
+/// under which much of the target maps onto itself (MIRROR_MIN of its samples; local maxima, the best MIRROR_PLANES
+/// per axis), then per cell whether the 3x3x3 cells around it match the mirrored cells around its mirror cell, with
+/// the tolerances of self_similarity.  Wherever the mesh is symmetric, whatever the object.  `parts`: the same per
+/// mesh part (Data::cell_part) -- its samples onto its own samples, the best plane per axis -- and per pair of parts of
+/// a size (SAMesh splits a mirror-image pair: two roof halves) A's samples onto B's, the best plane per axis, valid for
+/// A's cells (image in B) and B's; the per-cell test then compares only the window's cells in the part whose mirror
+/// cell is in the image's part, others don't care, within MIRROR_PART_TOL of the compared samples (colour cap kept).
+/// Returns the planes, per group (part, or one group) its (plane index, the group its cells' images lie in), and per
+/// cell the bits of its group's entries.  `glob`: the global run's bits, to report beside the parts' (stderr).
+fn mirror_symmetry(d: &Data, parts: bool, glob: &[u8]) -> (Vec<(usize, i32)>, Vec<Vec<(usize, i32)>>, Vec<u8>) {
+    let n = d.tbits.len();
+    let group = |c: usize| if parts { d.group(c) } else { 0 };
+    let solid = |c: usize| d.want[c] && d.fill[c] >= 0.5;
+    let at = |y: i32, x: i32, z: i32| if d.inside(y, x, z) { Some(d.idx(y, x, z)) } else { None };
+    let yxz = |c: usize| { let c = c as i32; (c / (d.x * d.z), (c / d.z) % d.x, c % d.z) };
+    let mb: [Vec<u64>; 2] = [d.tbits.iter().map(|&b| mirror_bits(b, 0)).collect(), d.tbits.iter().map(|&b| mirror_bits(b, 1)).collect()];
+    let n_group = (0..n).map(|c| group(c) + 1).max().unwrap_or(0).max(1) as usize;
+    let mut members: Vec<Vec<usize>> = vec![Vec::new(); n_group];
+    for c in (0..n).filter(|&c| d.tbits[c] != 0 && group(c) >= 0) {
+        members[group(c) as usize].push(c);
+    }
+    let size: Vec<usize> = (0..n_group).map(|g| members[g].iter().filter(|&&c| solid(c)).count()).collect();
+    let total: Vec<u64> = members.iter().map(|m| m.iter().map(|&c| d.tbits[c].count_ones() as u64).sum()).collect();
+    // share of g's (and h's) samples mapping onto h's under each plane of the axis: the local maxima >= MIRROR_MIN, best first
+    let best = |g: usize, h: usize, axis: usize| -> Vec<(usize, f64)> {
+        let len = if axis == 0 { d.x } else { d.z };
+        let score: Vec<f64> = (0..2 * len - 1).map(|s| {
+            let mut m = 0u64;
+            for &c in &members[g] {
+                let (y, x, z) = yxz(c);
+                let (y, x, z) = mirror_cell((axis, s), y, x, z);
+                if let Some(q) = at(y, x, z) {
+                    if group(q) == h as i32 { m += (d.tbits[c] & mb[axis][q]).count_ones() as u64; }
+                }
+            }
+            m as f64 / total[g].max(total[h]).max(1) as f64
+        }).collect();
+        let mut b: Vec<(usize, f64)> = (0..score.len()).filter(|&s| score[s] >= MIRROR_MIN
+            && (s == 0 || score[s] >= score[s - 1]) && (s + 1 == score.len() || score[s] > score[s + 1])).map(|s| (s, score[s])).collect();
+        b.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        b
+    };
+    let mut planes: Vec<(usize, i32)> = Vec::new();
+    let mut cand: Vec<Vec<(usize, i32, f64)>> = vec![Vec::new(); n_group]; // per group: (plane, image group, score)
+    let big: Vec<usize> = (0..n_group).filter(|&g| !parts || size[g] >= MIRROR_PART_MIN).collect();
+    for &g in &big {
+        for axis in 0..2 {
+            for (s, sc) in best(g, g, axis).into_iter().take(if parts { 1 } else { MIRROR_PLANES }) {
+                if !parts {
+                    eprintln!("mirror plane {} = {:.1} studs: {:.0} % of the target's samples map onto the target",
+                              ["x", "z"][axis], s as f64 / 2.0, 100.0 * sc);
+                }
+                cand[g].push((planes.len(), g as i32, sc));
+                planes.push((axis, s as i32));
+            }
+        }
+    }
+    let mut pairs: Vec<String> = Vec::new();
+    for (i, &g) in big.iter().enumerate() {
+        for &h in big[i + 1..].iter().filter(|&&h| parts && size[g].min(size[h]) as f64 >= MIRROR_PAIR_SIZE * size[g].max(size[h]) as f64) {
+            for axis in 0..2 {
+                for (s, sc) in best(g, h, axis).into_iter().take(1) {
+                    pairs.push(format!("mirror pair parts {} / {}: {} = {:.1}, {:.0} %", g, h, ["x", "z"][axis], s as f64 / 2.0, 100.0 * sc));
+                    cand[g].push((planes.len(), h as i32, sc));
+                    cand[h].push((planes.len(), g as i32, sc));
+                    planes.push((axis, s as i32));
+                }
+            }
+        }
+    }
+    let gplanes: Vec<Vec<(usize, i32)>> = cand.into_iter().map(|mut v| {
+        if parts { v.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap()); } // without parts bit k is plane k (the report)
+        v.into_iter().take(MIRROR_BITS).map(|(p, h, _)| (p, h)).collect()
+    }).collect();
+    let col_tol = if d.col_max > 0.0 { d.col_max } else { 12.0 };
+    let max_diff = (27.0 * 64.0 * 0.06) as u32;
+    let mut msym = vec![0u8; n];
+    for c in (0..n).filter(|&c| solid(c) && group(c) >= 0) {
+        let (y, x, z) = yxz(c);
+        let g = group(c);
+        'pl: for (k, &(pi, h)) in gplanes[g as usize].iter().enumerate() {
+            let pl = planes[pi];
+            let (my, mx, mz) = mirror_cell(pl, y, x, z);
+            if at(my, mx, mz).map_or(true, |q| !solid(q) || group(q) != h) { continue; }
+            let (mut diff, mut cmp) = (0u32, 0u32);
+            for oy in -1..=1 {
+                for ox in -1..=1 {
+                    for oz in -1..=1 {
+                        let p = at(y + oy, x + ox, z + oz);
+                        let (qy, qx, qz) = mirror_cell(pl, y + oy, x + ox, z + oz);
+                        let q = at(qy, qx, qz);
+                        // with parts only a cell of the part whose mirror cell is in the image's part counts, the rest
+                        // don't care (where the part's outline is not mirrored, its cells' own test fails: no image cell)
+                        if parts && !(p.map_or(false, |p| group(p) == g) && q.map_or(false, |q| group(q) == h)) { continue; }
+                        let (bp, bq) = (p.map_or(0, |p| d.tbits[p]), q.map_or(0, |q| mb[pl.0][q]));
+                        diff += (bp ^ bq).count_ones();
+                        cmp += bp.count_ones() + bq.count_ones();
+                        if !parts && diff > max_diff { continue 'pl; }
+                        if let (Some(p), Some(q)) = (p, q) {
+                            if d.visible[p] && d.visible[q] && d.tcolour[p] >= 0 && d.tcolour[q] >= 0 {
+                                let (a, b) = (&d.tlab[3 * p..3 * p + 3], &d.tlab[3 * q..3 * q + 3]);
+                                let e = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt() as f64;
+                                if e > col_tol { continue 'pl; }
+                            }
+                        }
+                    }
+                }
+            }
+            if parts && diff as f64 > MIRROR_PART_TOL * cmp as f64 { continue; }
+            msym[c] |= 1 << k;
+        }
+    }
+    let wanted = (0..n).filter(|&c| solid(c)).count();
+    let hit = |c: usize| solid(c) && msym[c] != 0;
+    if !parts {
+        eprintln!("mirror symmetry: {} of {} wanted cells match their mirror image about some plane ({})",
+                  (0..n).filter(|&c| hit(c)).count(), wanted,
+                  planes.iter().enumerate().map(|(k, &(a, s))| format!("{} = {:.1}: {}", ["x", "z"][a], s as f64 / 2.0,
+                      msym.iter().filter(|&&b| b >> k & 1 == 1).count())).collect::<Vec<_>>().join(", "));
+    } else {
+        // a cell with a bit whose image lies in its own part, against any bit (pairs too)
+        let own = |c: usize| gplanes[group(c) as usize].iter().enumerate().any(|(k, e)| msym[c] >> k & 1 == 1 && e.1 == group(c));
+        let (mut cnt, mut ocnt, mut gcnt) = (vec![0usize; n_group], vec![0usize; n_group], vec![0usize; n_group]);
+        for c in (0..n).filter(|&c| solid(c) && group(c) >= 0) {
+            cnt[group(c) as usize] += hit(c) as usize;
+            ocnt[group(c) as usize] += own(c) as usize;
+            gcnt[group(c) as usize] += (!glob.is_empty() && glob[c] != 0) as usize;
+        }
+        let with = (0..n_group).filter(|&g| !gplanes[g].is_empty()).count();
+        eprintln!("mirror symmetry by part: {} of {} wanted cells match their mirror image in their part or its mirror pair \
+                   ({} in their own part; with the global planes' cells: {}); {} of {} parts (>= {} wanted cells: {}) have a \
+                   plane, {} pairs", cnt.iter().sum::<usize>(), wanted, ocnt.iter().sum::<usize>(),
+                  (0..n).filter(|&c| hit(c) || (solid(c) && !glob.is_empty() && glob[c] != 0)).count(), with, n_group,
+                  MIRROR_PART_MIN, big.len(), pairs.len());
+        for l in &pairs { eprintln!("{}", l); }
+        let mut order: Vec<usize> = (0..n_group).collect();
+        order.sort_by_key(|&g| std::cmp::Reverse(size[g]));
+        for &g in order.iter().take(12) {
+            eprintln!("  part {:>2}: {:>5} wanted cells, {:>5} symmetric ({:>3.0} %; own part {:>5}; global planes {:>5})  planes {}",
+                      g, size[g], cnt[g], 100.0 * cnt[g] as f64 / size[g].max(1) as f64, ocnt[g], gcnt[g],
+                      gplanes[g].iter().filter(|e| e.1 == g as i32)
+                          .map(|&(pi, _)| format!("{} = {:.1}", ["x", "z"][planes[pi].0], planes[pi].1 as f64 / 2.0))
+                          .collect::<Vec<_>>().join(", "));
+        }
+    }
+    (planes, gplanes, msym)
+}
+
+/// Mirror: a part's mirror image (the same part turned, or its chiral counterpart: Data::mirror_opt) placed across a
+/// plane the target is mirror-symmetric about around the part (Data::msym on all its target cells; with parts the image
+/// lands in the part or its mirror pair); the parts in the image's way go (the part itself too when it straddles the
+/// plane), their other cells are filled again, and the energy decides as for any move.
+fn mirror(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
+    let d = st.d;
+    if d.msym.is_empty() || d.mirror_planes.is_empty() {
+        return None;
+    }
+    let j = st.owner[st.pick_cell(rng) as usize];
+    if j < 0 {
+        return None;
+    }
+    let tpl = *st.item(j as usize);
+    let o = &d.opts[tpl.opt];
+    let a = d.idx(tpl.y + o.first.0, tpl.x + o.first.1, tpl.z + o.first.2);
+    let g = d.group(a);
+    let ks: Vec<usize> = (0..8).filter(|&k| d.msym[a] >> k & 1 == 1).collect();
+    if ks.is_empty() {
+        return None;
+    }
+    let k = ks[rng.below(ks.len())];
+    let pl = d.mirror_planes[d.gplanes[g as usize][k].0];
+    let m = d.mirror_opt[tpl.opt][pl.0];
+    if m < 0 {
+        return None;
+    }
+    let (m, mo) = (m as usize, &d.opts[m as usize]);
+    if (mo.h, mo.w, mo.d) != (o.h, o.w, o.d) || !o.cells.iter().all(|&(cy, cx, cz, _, _)| {
+        let c = d.idx(tpl.y + cy, tpl.x + cx, tpl.z + cz);
+        d.tbits[c] == 0 || (d.group(c) == g && d.msym[c] >> k & 1 == 1)
+    }) {
+        return None;
+    }
+    // the image's origin: the box's far corner along the axis, mirrored
+    let (y, x, z) = mirror_cell(pl, tpl.y, tpl.x + if pl.0 == 0 { o.w - 1 } else { 0 }, tpl.z + if pl.0 == 1 { o.d - 1 } else { 0 });
+    if (m, y, x, z) == (tpl.opt, tpl.y, tpl.x, tpl.z)
+        || y < 0 || x < 0 || z < 0 || y + mo.h > d.h || x + mo.w > d.x || z + mo.d > d.z
+        || !mo.cells.iter().all(|&(cy, cx, cz, _, occ)| {
+            let c = d.idx(y + cy, x + cx, z + cz);
+            !(occ >= 0.5 && d.tbits[c] == 0) && (d.lock.is_empty() || !d.lock[c])
+        }) {
+        return None;
+    }
+    let mut owners: Vec<usize> = Vec::new();
+    for &(cy, cx, cz, _, _) in &mo.cells {
+        let i = st.owner[d.idx(y + cy, x + cx, z + cz)];
+        if i >= 0 && !owners.contains(&(i as usize)) {
+            owners.push(i as usize);
+        }
+    }
+    let mut freed: Vec<(i32, i32, i32)> = Vec::new();
+    let mut removed = Vec::new();
+    for i in owners {
+        let it = *st.item(i);
+        for &(py, px, pz, _, _) in &d.opts[it.opt].cells {
+            freed.push((it.y + py, it.x + px, it.z + pz));
+        }
+        removed.push(st.remove(i));
+    }
+    let colour = d.colour_for(mo, y, x, z, &mut filler.colour_counts);
+    let mut added = vec![st.add(Item { opt: m, colour, y, x, z })];
+    freed.retain(|&(y, x, z)| st.owner[d.idx(y, x, z)] < 0 && d.want[d.idx(y, x, z)]);
+    added.extend(filler.fill(st, rng, freed));
+    Some(Undo::Retile { added, removed })
+}
+
+const MOVES: [&str; 20] = ["sideways", "masonry", "hinge", "swap", "re-top", "split", "stack", "merge", "retile", "pattern", "re-solve", "orient", "edge run", "curve fit", "echo", "mirror", "phase", "prop", "plan", "infill"];
+
+/// Infill: clear a window (error-guided) and refill it part by part with the infill model -- each free wanted cell in
+/// fill order asks the model, given the parts around it now (those just placed included), which option goes there;
+/// the filler's geometric candidates are drawn in proportion to exp(style * logit + fit).  The energy decides.
+fn infill(st: &mut State, filler: &mut Filler, rng: &mut Rng) -> Option<Undo> {
+    let d = st.d;
+    let inf = d.inf.as_ref()?;
+    if d.want_cells.is_empty() {
+        return None;
+    }
+    let c = st.pick_cell(rng);
+    let (cy, cx, cz) = (c / (d.x * d.z), (c / d.z) % d.x, c % d.z);
+    let hy = if rng.f64() < 0.5 { 1 } else { 3 };                     // retile's window: from the cell up, its supports kept
+    let (hx, hz) = (1 + rng.below(3) as i32, 1 + rng.below(3) as i32);
+    let (removed, mut cells) = clear_window(st, (cy, (cy + hy).min(d.h)), ((cx - hx + 1).max(0), (cx + hx).min(d.x)),
+                                            ((cz - hz + 1).max(0), (cz + hz).min(d.z)));
+    cells.retain(|&(y, x, z)| d.want[d.idx(y, x, z)]);
+    cells.sort_unstable();
+    cells.dedup();
+    let mut added = Vec::new();
+    let mut cands = Vec::new();
+    if std::env::var("E2L_INF_FILLER").is_ok() {                     // diagnostics: the same window, the filler's refill
+        added = filler.fill(st, rng, cells.clone());
+        return Some(Undo::Retile { added, removed });
+    }
+    for (y, x, z) in cells {
+        if st.owner[d.idx(y, x, z)] >= 0 {
+            continue;
+        }
+        filler.candidates(st, y, x, z, None, 16, &mut cands);
+        if cands.is_empty() {
+            continue;
+        }
+        let (ctx, shape) = infill_inputs(d, st, inf, y, x, z);
+        let h0 = inf.encode(&ctx, &shape);
+        // diagnostics: E2L_INF_DUMP=1 prints one call's inputs and logits for a parity check against torch
+        static DUMPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if std::env::var("E2L_INF_DUMP").is_ok() && ctx.len() >= 5 && !DUMPED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            let ls: Vec<usize> = (0..inf.n_lab + 1).step_by(97).collect();
+            eprintln!("INFDUMP {:?} | {:?} | {:?} | {:?}", ctx, shape, ls, ls.iter().map(|&l| inf.logit(&h0, l)).collect::<Vec<_>>());
+            eprintln!("INFSCALE style {} w_sup {} w_cov {}", d.style, d.w_sup, d.w_cov);
+        }
+        // as Filler::fill, with the model's logit in place of the statistics score
+        let mut scored: Vec<(f64, f64, usize, i32, i32, i32, i32)> = Vec::with_capacity(cands.len());
+        for &(_, k, oy, ox, oz, resid) in &cands {
+            let (_, fit, colour) = filler.score(st, None, k, oy, ox, oz, resid);
+            let l = if d.opt_label[k] >= 0 { d.opt_label[k] as usize } else { inf.n_lab };
+            scored.push((d.style * inf.logit(&h0, l) as f64, fit, k, oy, ox, oz, colour));
+        }
+        let best_stat = scored.iter().map(|s| s.0).fold(f64::NEG_INFINITY, f64::max);
+        let mut sc: Vec<f64> = scored.iter().map(|s| s.0 + s.1).collect();
+        let f = d.fill[d.idx(y, x, z)];
+        if f < 0.5 {                                                   // a barely-wanted cell may stay empty
+            sc.push(best_stat - d.w_cov * f * f);
+        }
+        let m = sc.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let ws: Vec<f64> = sc.iter().map(|s| (s - m).exp()).collect();
+        let mut r = rng.f64() * ws.iter().sum::<f64>();
+        let pick = ws.iter().position(|&w| { r -= w; r < 0.0 }).unwrap_or(ws.len() - 1);
+        if pick < scored.len() {
+            let (_, _, k, oy, ox, oz, colour) = scored[pick];
+            added.push(st.add(Item { opt: k, colour, y: oy, x: ox, z: oz }));
+        }
+    }
+    if added.is_empty() && removed.is_empty() {
+        return None;
+    }
+    Some(Undo::Retile { added, removed })
+}
+
+/// The moves gradient-guided proposals choose among: those the fixed mix draws at all.
+fn gg_arms(d: &Data) -> Vec<usize> {
+    let mut a = vec![1, 2, 3, 4, 5, 6, 7, 8];
+    for (p, m) in [(d.p_resolve, 10), (d.p_orient, 11), (d.p_echo, 14), (d.p_mirror, 15), (d.p_phase, 16), (d.p_infill, 19)] {
+        if p > 0.0 { a.push(m); }
+    }
+    a
+}
+
+fn propose(st: &mut State, filler: &mut Filler, groups: &[Vec<usize>], boxes: &[Vec<usize>], rng: &mut Rng) -> Option<(usize, Undo)> {
+    if !st.d.snot_by_opt.is_empty() && rng.f64() < 0.05 {        // only drawn when sideways building is on
+        if let Some(u) = snot_face(st, rng) {
+            return Some((0, u));
+        }
+    }
+    if st.d.p_motif > 0.0 && rng.f64() < st.d.p_motif {
+        return motif(st, filler, rng).map(|u| (9, u));
+    }
+    if rng.f64() < 0.002 {                                         // tree search: rare, each call tries many chains
+        if let Some(u) = plan(st, filler, rng) {
+            return Some((18, u));
+        }
+    }
+    if rng.f64() < 0.03 {
+        if let Some(u) = prop(st, filler, rng) {
+            return Some((17, u));
+        }
+    }
+    if st.d.p_infill > 0.0 && rng.f64() < st.d.p_infill {
+        if let Some(u) = infill(st, filler, rng) {
+            return Some((19, u));
+        }
+    }
     let r = rng.f64();
-    if r < 0.1 { swap(st, rng) }
-    else if r < 0.55 { merge(st, rng) }
-    else { retile(st, filler, rng) }
+    st.gg_arm = None;
+    if st.d.gg && !st.guide_cum.is_empty() && rng.f64() < st.d.p_guide {
+        // gradient-guided: the cell from the error map (the gradient's size), the move from what that error layer
+        // is (its direction): each move's energy removed per second at cells of that layer so far, a tenth uniform
+        let k = st.guide_cum.partition_point(|&w| w <= rng.f64() * st.guide_cum.last().unwrap()).min(st.guide_cum.len() - 1);
+        let l = st.guide_layer[k] as usize;
+        let arms = gg_arms(st.d);
+        let rate = |m: usize| { let g = st.gg[l * MOVES.len() + m]; (g[0] + 1.0) / (g[1] + 1e-3) };
+        let m = if rng.f64() < 0.1 { arms[rng.below(arms.len())] } else {
+            let tot: f64 = arms.iter().map(|&m| rate(m)).sum();
+            let mut x = rng.f64() * tot;
+            *arms.iter().find(|&&m| { x -= rate(m); x <= 0.0 }).unwrap_or(arms.last().unwrap())
+        };
+        st.focus.set(st.guide_cells[k] as i32);
+        st.gg_arm = Some((l, m));
+        let u = match m {
+            1 => masonry_shift(st, rng).map(|u| (1, u)), 2 => hinge_swap(st, rng).map(|u| (2, u)), 3 => swap(st, rng).map(|u| (3, u)),
+            4 => retop(st, groups, rng).map(|u| (4, u)), 5 => split(st, rng).map(|u| (5, u)), 6 => stack(st, rng).map(|u| (6, u)),
+            7 => merge(st, rng).map(|u| (7, u)), 10 => resolve(st, filler, rng), 11 => orient(st, filler, boxes, rng).map(|u| (11, u)),
+            14 => echo(st, filler, rng).map(|u| (14, u)), 15 => mirror(st, filler, rng).map(|u| (15, u)),
+            16 => phase(st, filler, rng).map(|u| (16, u)), 19 => infill(st, filler, rng).map(|u| (19, u)),
+            _ => retile(st, filler, rng).map(|u| (8, u)),
+        };
+        st.focus.set(-1);
+        return u;
+    }
+    let (m, u) = if r < 0.02 { (1, masonry_shift(st, rng)) }
+    else if r < 0.05 { (2, hinge_swap(st, rng)) }
+    else if r < 0.12 { (3, swap(st, rng)) }
+    else if r < 0.17 { (4, retop(st, groups, rng)) }
+    else if r < 0.21 { (5, split(st, rng)) }
+    else if r < 0.24 { (6, stack(st, rng)) }
+    else if r < 0.60 { (7, merge(st, rng)) }
+    else if r < 0.60 + st.d.p_resolve { return resolve(st, filler, rng) }
+    else if r < 0.60 + st.d.p_resolve + st.d.p_orient { (11, orient(st, filler, boxes, rng)) }
+    else if r < 0.60 + st.d.p_resolve + st.d.p_orient + st.d.p_echo { (14, echo(st, filler, rng)) }
+    else if r < 0.60 + st.d.p_resolve + st.d.p_orient + st.d.p_echo + st.d.p_mirror { (15, mirror(st, filler, rng)) }
+    else if r < 0.60 + st.d.p_resolve + st.d.p_orient + st.d.p_echo + st.d.p_mirror + st.d.p_phase { (16, phase(st, filler, rng)) }
+    else { (8, retile(st, filler, rng)) };
+    u.map(|u| (m, u))
 }
 
 // ---------------------------------------------------------------------------
@@ -1466,7 +4737,36 @@ unsafe fn run(p: &Problem) -> i32 {
     let d = Data::from(p);
     let mut st = State::new(&d);
     let mut rng = Rng::new(p.seed);
-    let mut filler = Filler { colour_counts: vec![0; d.n_col.max(1)] };
+    let mut filler = Filler::new(&d);
+    // multi-scale warm-start: pre-populate state with coarse placements
+    let n_init = p.n_init.max(0) as usize;
+    if n_init > 0 {
+        let init_opt = v(p.init_opt, n_init);
+        let init_colour = v(p.init_colour, n_init);
+        let init_y = v(p.init_y, n_init);
+        let init_x = v(p.init_x, n_init);
+        let init_z = v(p.init_z, n_init);
+        for i in 0..n_init {
+            let opt = init_opt[i] as usize;
+            if opt >= d.opts.len() {
+                continue;
+            }
+            let o = &d.opts[opt];
+            let (y, x, z) = (init_y[i], init_x[i], init_z[i]);
+            let ok = o.cells.iter().all(|&(cy, cx, cz, _, _)| {
+                let yy = y + cy;
+                let xx = x + cx;
+                let zz = z + cz;
+                // not only wanted cells: the walk itself may place a part partly outside the target (an overhang)
+                yy >= 0 && yy < d.h && xx >= 0 && xx < d.x && zz >= 0 && zz < d.z
+                    && st.owner[d.idx(yy, xx, zz)] < 0
+            });
+            if ok {
+                let colour = if d.recolour { d.colour_for(o, y, x, z, &mut filler.colour_counts) } else { init_colour[i] };
+                st.add(Item { opt, colour, y, x, z });
+            }
+        }
+    }
     let cells: Vec<(i32, i32, i32)> = d
         .want_cells
         .iter()
@@ -1474,14 +4774,21 @@ unsafe fn run(p: &Problem) -> i32 {
             let c = c as i32;
             (c / (d.x * d.z), (c / d.z) % d.x, c % d.z)
         })
+        .filter(|&(y, x, z)| st.owner[d.idx(y, x, z)] < 0 && (d.lock.is_empty() || !d.lock[d.idx(y, x, z)]))
         .collect();
-    filler.fill(&mut st, &mut rng, cells);
+    if !d.recolour {                                                   // recolouring keeps the parts as they are
+        filler.fill(&mut st, &mut rng, cells);
+    }
     let mut e = st.energy();
     let mut history = vec![e];
     let mut deltas = Vec::new();
+    let groups = retop_groups(&d);
+    let boxes = box_groups(&d);
     for _ in 0..p.warmup {
         // measure the scale, change nothing
-        if let Some(u) = propose(&mut st, &mut filler, &mut rng) {
+        let hits = st.lock_hits;
+        if let Some((_, u)) = propose(&mut st, &mut filler, &groups, &boxes, &mut rng) {
+            if st.lock_hits != hits { undo(&mut st, u); continue; }
             deltas.push((st.energy() - e).abs());
             undo(&mut st, u);
         }
@@ -1500,23 +4807,145 @@ unsafe fn run(p: &Problem) -> i32 {
     };
     let (t_start, t_final) = (scale * p.t_start_share, scale * p.t_final_share);
     let mut accepted = 0i64;
+    let (mut w_prop, mut w_acc, mut w_de) = (0i64, 0i64, 0f64);
+    let mut w_terms = [0f64; 8];  // shape, outline, colour, statistics, unsupported, bare side connectors, exposed studs, size+joints
+    let terms = |st: &State| -> [f64; 8] {
+        let d = st.d;
+        [d.w_cov * st.fid, d.w_sil * st.sil as f64 / (SUB * SUB) as f64, d.w_col * st.col, st.style_loss(),
+         d.w_sup * st.n_unsup as f64, d.w_side * st.bare as f64, d.w_bare_top * st.n_bare_top,
+         d.w_size * st.size_kl() + d.w_sideways * st.sideways_kl() + d.w_stack * st.stack_kl() + d.w_surf * st.surf_kl()]
+    };
     let iters = p.iters.max(0);
+    let (mut n_prop, mut n_acc) = ([0i64; MOVES.len()], [0i64; MOVES.len()]);
+    let watch_move = std::env::var("E2L_WATCH_MOVE").ok().and_then(|n| MOVES.iter().position(|&m| m == n));
+    // early stopping (E2L_STALL=f, 0 / unset: off): past 30 % of the run, once a twentieth of it lowers the energy by less
+    // than f of itself, the rest of the cooling is squeezed into one more twentieth, from the temperature reached to t_final
+    let stall = std::env::var("E2L_STALL").ok().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+    let win = (iters / 20).max(1);
+    let (mut end, mut quench, mut e_mark) = (iters, None::<(i64, f64)>, e);
     for it in 0..iters {
-        let t = t_start * (t_final / t_start).powf(it as f64 / (iters - 1).max(1) as f64);
-        let u = match propose(&mut st, &mut filler, &mut rng) {
+        if it >= end {
+            eprintln!("early stop: quench from {} of {} iterations, done at {}", quench.map_or(0, |q| q.0), iters, end);
+            break;
+        }
+        let t = match quench {
+            None => t_start * (t_final / t_start).powf(it as f64 / (iters - 1).max(1) as f64),
+            Some((q0, tq)) => tq * (t_final / tq).powf((it - q0) as f64 / (end - q0 - 1).max(1) as f64),
+        };
+        if stall > 0.0 && quench.is_none() && it > 0 && it % win == 0 {
+            if it >= iters * 3 / 10 && e_mark - e < stall * e.abs() {
+                quench = Some((it, t));
+                end = (it + win).min(iters);
+            }
+            e_mark = e;
+        }
+        if p.w_big_end >= 0.0 {
+            filler.w_big = d.w_big + (p.w_big_end - d.w_big) * it as f64 / (iters - 1).max(1) as f64;
+        }
+        if d.p_guide > 0.0 && p.guide_every > 0 && it % p.guide_every as i64 == 0 {
+            if let (Some(cb), true) = (p.v14_cb, p.v14_share > 0.0 && p.v14_every > 0) {
+                if (it / p.guide_every as i64) % p.v14_every as i64 == 0 {
+                    let live = st.live.clone();
+                    let col = |f: &dyn Fn(&Item) -> i32| live.iter().map(|&i| f(st.item(i))).collect::<Vec<i32>>();
+                    let (o, c, y, x, z) = (col(&|t| t.opt as i32), col(&|t| t.colour), col(&|t| t.y), col(&|t| t.x), col(&|t| t.z));
+                    let mut out = vec![0f64; live.len()];
+                    cb(live.len() as i32, o.as_ptr(), c.as_ptr(), y.as_ptr(), x.as_ptr(), z.as_ptr(), out.as_mut_ptr());
+                    st.v14 = live.iter().zip(&out).filter(|p| *p.1 > 0.0).map(|(&i, &b)| { let t = st.item(i); ((t.opt, t.y, t.x, t.z), b) }).collect();
+                    st.v14_share = p.v14_share.clamp(0.0, 0.9);
+                }
+            }
+            if let (Some(cb), Some(net)) = (p.mlm_cb, d.net.as_ref()) {
+                if p.v14_every > 0 && (it / p.guide_every as i64) % (2 * p.v14_every as i64) == 0 {
+                    let mut items = Vec::with_capacity(st.live.len() * 7);
+                    for &i in &st.live {
+                        let t = st.item(i);
+                        let o = &d.opts[t.opt];
+                        items.extend_from_slice(&[net.opt_out[t.opt], t.y, t.x, t.z, o.h, o.w, o.d]);
+                    }
+                    // surface cells only (a wanted cell with a side open): the inside is never seen, the net ranks there
+                    let cells: Vec<i32> = d.want_cells.iter().filter(|&&c| {
+                        let (y, x, z) = ((c / (d.x * d.z) as usize) as i32, ((c / d.z as usize) % d.x as usize) as i32, (c % d.z as usize) as i32);
+                        [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)].iter()
+                            .any(|&(a, b, e)| !d.inside(y + a, x + b, z + e) || !d.want[d.idx(y + a, x + b, z + e)])
+                    }).map(|&c| c as i32).collect();
+                    st.mlm_lp = vec![0f32; cells.len() * net.n_c];
+                    cb(st.live.len() as i32, items.as_ptr(), cells.len() as i32, cells.as_ptr(), st.mlm_lp.as_mut_ptr());
+                    st.mlm_row = vec![-1; d.tbits.len()];
+                    for (r, &c) in cells.iter().enumerate() {
+                        st.mlm_row[c as usize] = r as i32;
+                    }
+                    st.mlm_max = st.mlm_lp.chunks(net.n_c).map(|r| r.iter().cloned().fold(f32::NEG_INFINITY, f32::max)).collect();
+                    st.w_mlm = p.w_mlm * d.style;
+                    st.mlm_e = st.live.iter().map(|&i| st.mlm_cost(st.item(i))).sum();
+                    e = st.energy();                                   // the term's table changed
+                }
+            }
+            st.refresh_guide(&filler.floor);
+        }
+        let before = if d.opt_watch.is_empty() { [0f64; 8] } else { terms(&st) };
+        let hits = st.lock_hits;
+        let fid_before = st.fid;
+        let (t0, e0) = (std::time::Instant::now(), e);
+        let gg_note = |st: &mut State, e: f64| if let Some((l, m)) = st.gg_arm.take() {
+            let g = &mut st.gg[l * MOVES.len() + m];
+            g[0] += (e0 - e).max(0.0);
+            g[1] += t0.elapsed().as_secs_f64();
+        };
+        let (m, u) = match propose(&mut st, &mut filler, &groups, &boxes, &mut rng) {
             Some(u) => u,
-            None => continue,
+            None => { gg_note(&mut st, e); continue }
+        };
+        if st.lock_hits != hits { undo(&mut st, u); gg_note(&mut st, e); continue; }
+        n_prop[m] += 1;
+        if d.fid_cap > 0.0 && st.fid > d.fid_cap && st.fid > fid_before {
+            undo(&mut st, u);                                          // past the shape budget: not an option
+            gg_note(&mut st, e);
+            continue;
+        }
+        // diagnostics: E2L_WATCH_MOVE=<move name> watches that move, else moves adding a watched option
+        let watched = !d.opt_watch.is_empty() && match (&watch_move, &u) {
+            (Some(w), _) => *w == m,
+            (None, Undo::Retile { added, .. }) => added.iter().any(|&i| st.items[i].map_or(false, |it| d.opt_watch[it.opt])),
+            _ => false,
         };
         let e2 = st.energy();
+        if watched {
+            w_prop += 1; w_de += e2 - e;
+            let after = terms(&st);
+            for k in 0..8 { w_terms[k] += after[k] - before[k]; }
+        }
         if e2 <= e || rng.f64() < (-(e2 - e) / t).exp() {
             e = e2;
             accepted += 1;
+            n_acc[m] += 1;
+            if watched { w_acc += 1; }
         } else {
             undo(&mut st, u);
         }
+        gg_note(&mut st, e);
         if p.log_every > 0 && (it + 1) % p.log_every == 0 {
             history.push(e);
         }
+    }
+    { use std::sync::atomic::Ordering::Relaxed; let p: Vec<usize> = PLAN_STATS.iter().map(|a| a.load(Relaxed)).collect();
+      eprintln!("plan: calls {} root without child {} nothing grounds {} found {}", p[0], p[1], p[2], p[3]); }
+    eprintln!("moves (proposed / accepted):{}", (0..MOVES.len()).filter(|&m| n_prop[m] > 0)
+        .map(|m| format!("  {} {} / {} ({:.1} %)", MOVES[m], n_prop[m], n_acc[m], 100.0 * n_acc[m] as f64 / n_prop[m] as f64))
+        .collect::<String>());
+    if d.gg {
+        for (l, name) in ["shape", "colour", "support", "statistics", "realism"].iter().enumerate() {
+            let mut r: Vec<(f64, usize)> = gg_arms(&d).into_iter().map(|m| { let g = st.gg[l * MOVES.len() + m]; (g[0] / g[1].max(1e-9), m) }).collect();
+            r.sort_by(|a, b| b.0.total_cmp(&a.0));
+            eprintln!("guided moves at {} errors (energy removed per second): {}", name, r.iter().take(4).map(|&(v, m)| format!("{} {:.0}", MOVES[m], v)).collect::<Vec<_>>().join(", "));
+        }
+    }
+    if !d.opt_watch.is_empty() {
+        let live_w = st.live.iter().filter(|&&i| d.opt_watch[st.item(i).opt]).count();
+        eprintln!("watched options: proposed in {} moves, accepted {} ({:.1} %), mean energy change {:.2}; in the final build {}",
+                  w_prop, w_acc, 100.0 * w_acc as f64 / w_prop.max(1) as f64, w_de / w_prop.max(1) as f64, live_w);
+        let m = w_prop.max(1) as f64;
+        eprintln!("  mean change per term: shape {:.1}  outline {:.1}  colour {:.1}  statistics {:.1}  unsupported {:.1}  bare side connectors {:.1}  exposed studs {:.1}  size+joints {:.1}",
+                  w_terms[0] / m, w_terms[1] / m, w_terms[2] / m, w_terms[3] / m, w_terms[4] / m, w_terms[5] / m, w_terms[6] / m, w_terms[7] / m);
     }
     // outputs
     let n = st.live.len().min(p.out_cap as usize);
@@ -1529,9 +4958,53 @@ unsafe fn run(p: &Problem) -> i32 {
         *p.out_z.add(k) = it.z;
     }
     *p.out_n = n as i32;
+    if std::env::var("E2L_CHECK_BLAME").is_ok() {
+        // diagnostics: each part's chain-rule share of the statistics against the exact change on removing it
+        let stats = |st: &State| st.style_loss() + d.w_surf * st.surf_kl() + d.w_size * st.size_kl() + d.w_stack * st.stack_kl();
+        let ids: Vec<usize> = st.live.iter().copied().step_by((st.live.len() / 40).max(1)).take(40).collect();
+        let (mut sx, mut sy, mut sxy, mut sxx, mut syy, mut m) = (0f64, 0f64, 0f64, 0f64, 0f64, 0f64);
+        for i in ids {
+            let pred = st.stat_blame(i);
+            let e0 = stats(&st);
+            let it = st.remove(i);
+            let exact = e0 - stats(&st);
+            st.add(it);
+            sx += pred; sy += exact; sxy += pred * exact; sxx += pred * pred; syy += exact * exact; m += 1.0;
+        }
+        let r = (m * sxy - sx * sy) / ((m * sxx - sx * sx).sqrt() * (m * syy - sy * sy).sqrt());
+        eprintln!("chain-rule blame vs exact removal over {} parts: correlation {:.3}, mean {:.1} vs {:.1}", m, r, sx / m, sy / m);
+    }
+    {
+        // how much of the shape + direction error is above what no part can remove (Filler::floor)
+        let (cell, _) = st.error_map();
+        let (mut sd, mut fl, mut head) = (0f64, 0f64, 0f64);
+        for c in 0..d.tbits.len() {
+            let e = cell[c * N_ERR] + cell[c * N_ERR + 3];
+            sd += e;
+            if filler.floor[c].is_finite() {
+                fl += filler.floor[c].min(e);
+                head += (e - filler.floor[c]).max(0.0);
+            }
+        }
+        eprintln!("shape + direction error {:.0}: floor (no part does better) {:.0}, headroom {:.0} ({:.0} %), no part fits {:.0}",
+                  sd, fl, head, 100.0 * head / sd.max(1e-9), sd - fl - head);
+    }
+    if !p.err_cell.is_null() {
+        let (cell, item) = st.error_map();
+        for (k, v) in cell.iter().enumerate() {
+            *p.err_cell.add(k) = *v;
+        }
+        if !p.err_item.is_null() {
+            for (k, &i) in st.live.iter().take(n).enumerate() {
+                for l in 0..N_ERR {
+                    *p.err_item.add(k * N_ERR + l) = item[i * N_ERR + l];
+                }
+            }
+        }
+    }
     let kl = st.kl();
     let info = [
-        e,
+        e - st.w_mlm * st.mlm_e,                                   // comparable with runs without the masked-model term
         accepted as f64 / iters.max(1) as f64,
         t_start,
         kl,
@@ -1555,6 +5028,13 @@ unsafe fn run(p: &Problem) -> i32 {
         st.sil as f64 / (SUB * SUB) as f64,
         st.content(),
         st.style_loss(),
+        if d.paths4_enabled() { st.kl3.value() } else { 0.0 },
+        if d.paths4_enabled() { st.kl3.entropy() } else { 0.0 },
+        if d.paths4_enabled() && !st.kl3.pref.is_empty() && st.kl3.n > 1e-9 {
+            -st.kl3.s_plogc + st.kl3.tot_pref * st.kl3.n.ln()
+        } else { 0.0 },
+        st.size_kl() / (st.live.len().max(1) as f64),                  // size-class KL to real sets
+        st.n_ungr as f64,
     ];
     for (k, v) in info.iter().enumerate().take(INFO_LEN) {
         *p.info.add(k) = *v;
@@ -1583,5 +5063,5 @@ pub unsafe extern "C" fn e2l_sample(p: *const Problem) -> i32 {
 /// The layout version: Python checks it before calling.
 #[no_mangle]
 pub extern "C" fn e2l_abi() -> i32 {
-    12
+    29
 }

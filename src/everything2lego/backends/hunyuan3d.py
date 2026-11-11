@@ -65,11 +65,46 @@ def _get_device() -> str:
     return "cpu"
 
 
+def _dinov2_old_keys() -> None:
+    """Hunyuan's checkpoint holds its DINOv2 image encoder under transformers 4 names; transformers 5 renamed the
+    attention (attention.attention.query -> attention.q_proj, ...) and split the SwiGLU's weights_in (silu(first
+    half) * second half) into gate_proj / up_proj.  Rename them as the encoder loads."""
+    from transformers.models.dinov2 import modeling_dinov2 as m
+    if not hasattr(m, "Dinov2SwiGLUFFN") or not hasattr(m.Dinov2SwiGLUFFN(_Cfg()), "gate_proj"):
+        return                                           # transformers 4: the checkpoint's own names
+    ren = {"attention.attention.query.": "attention.q_proj.", "attention.attention.key.": "attention.k_proj.",
+           "attention.attention.value.": "attention.v_proj.", "attention.output.dense.": "attention.o_proj.",
+           "mlp.weights_out.": "mlp.down_proj."}
+
+    def hook(sd, prefix, *_):
+        for k in [k for k in sd if k.startswith(prefix)]:
+            for old, new in ren.items():
+                if old in k:
+                    sd[k.replace(old, new)] = sd.pop(k); break
+            else:
+                if "mlp.weights_in." in k:
+                    g, u = sd.pop(k).chunk(2, dim=0)
+                    sd[k.replace("weights_in", "gate_proj")], sd[k.replace("weights_in", "up_proj")] = g, u
+    init = m.Dinov2Model.__init__
+    if getattr(init, "_e2l", False):
+        return
+
+    def __init__(self, *a, **kw):
+        init(self, *a, **kw); self._register_load_state_dict_pre_hook(hook)
+    __init__._e2l = True
+    m.Dinov2Model.__init__ = __init__
+
+
+class _Cfg:                                              # the least config Dinov2SwiGLUFFN builds from
+    hidden_size, mlp_ratio = 8, 4
+
+
 def _load_pipeline():
     global _PIPE
     if _PIPE is not None:
         return _PIPE
     Hunyuan3DDiTFlowMatchingPipeline, _ = _import_hunyuan3d()
+    _dinov2_old_keys()
     warnings.filterwarnings("ignore", category=FutureWarning)
     _PIPE = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
         DEFAULT_REPO,
