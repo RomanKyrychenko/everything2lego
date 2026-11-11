@@ -17,14 +17,18 @@ photo  ──►  Hunyuan3D  ──►  colored mesh  ──►  semantic pipeli
 ```
 
 <p align="center">
-<img src="examples/gallery/watermill_38k_parts.png" width="45%"/>
-<img src="examples/gallery/watermill_12k_parts.png" width="45%"/>
+<img src="examples/gallery/watermill_sampler.png" width="60%"/>
 </p>
 
-<p align="center"><em>Left: watermill at 80 studs (38K parts, very detailed).
-Right: same watermill at 56 studs with hollow interior (12K parts, still
-recognizable).  Both were reconstructed from one photo via Hunyuan3D-2mini,
-then passed through the semantic + soft-train pipeline.</em></p>
+<p align="center"><em>The watermill mesh built by the statistics sampler (the test-panel recipe, 32 studs):
+1,509 parts in about nine minutes on a laptop.</em></p>
+
+<p align="center">
+<img src="examples/gallery/mesh_panel.png" width="100%"/>
+</p>
+
+<p align="center"><em>The nine test meshes every change is checked on, built with the same settings,
+two views each.</em></p>
 
 ---
 
@@ -118,6 +122,41 @@ reference it mirrors.  Build it once per architecture:
 .venv/bin/python -m everything2lego.native build
 ```
 
+The Python wrapper and the library share an ABI number (`native.ABI`, now
+29); after pulling changes to `native/sampler/src/lib.rs`, rebuild, or the
+sampler refuses the stale library.
+
+#### How the annealer chooses moves
+
+Each step proposes a move (retile, re-solve, merge, swap, orient, plan,
+prop, ...) and the energy accepts or rejects it.  By default the choice is
+guided rather than uniform:
+
+- **Where:** with probability `--guide` (0.6 in the panel recipe) a move
+  starts at a cell drawn in proportion to its local error: shape and
+  direction above what any part could fix, colour, support, statistics
+  (each part's chain-rule share of the whole-build terms), and realism.
+- **Which move:** the cell's largest error picks the move. For each kind
+  of error, the annealer learns during the run how much energy each move
+  removes per second there, and draws moves by that rate (a tenth stay
+  uniform).  `E2L_GG=0` turns this off.
+- **Realism:** four times per run the V14 judge
+  (`tools/learn/v14_blame.py`) scores the build's 50-part pieces; each
+  part's blame above the median is the realism error, worth
+  `--v14-share` (default 0.25) of the guide's weight.  Skipped when the V14
+  model file is not on disk.  The energy still decides every move.
+
+On the 9-mesh test panel these defaults, at 1M iterations, build in half
+the time of the earlier 2M uniform setting with the same shape error.
+
+Off by default, kept for experiments:
+
+| Flag / variable | What it does |
+|---|---|
+| `E2L_STALL=0.001` | Early stopping: once a twentieth of a run lowers the energy by less than this share, the rest of the cooling is squeezed into one more twentieth. |
+| `--mlm`, `--mlm-weight W` | The masked part model (`tools/learn/mlm_parts.py`) ranks the filler's parts; with a weight, each part's regret under it also enters the energy. |
+| `--infill-share P` | An infill move: clear a window and refill it part by part with the infill model (`tools/learn/infill_model.py`, run in Rust). |
+
 ### Learning
 
 Three data pipelines feed the sampler:
@@ -137,6 +176,16 @@ Three data pipelines feed the sampler:
   moment matching on degraded real-shape targets, once pooled and once
   per object kind.  Content and style weights are each floored so neither
   drifts to zero.
+- `tools/learn/v14_train.py` trains V14, a judge of whether a 50-part
+  piece comes from a real set (every part, by learnt embedding plus
+  category and connector features); `v14_blame.py` turns it into the
+  per-part blame the guide uses.
+- `tools/learn/mlm_parts.py` and `tools/learn/infill_model.py` train
+  BERT-style models that guess a part from the parts all around it (shape
+  class, or the builder's own part and rotation), on holes cut into the
+  official models.  They guess better than the proposal network (top-5
+  0.81 with a hole cut around the part, against 0.67), but have not yet
+  improved the builds.
 
 ### Recipe builder (older)
 
