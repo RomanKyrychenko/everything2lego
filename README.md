@@ -17,14 +17,18 @@ photo  ──►  Hunyuan3D  ──►  colored mesh  ──►  semantic pipeli
 ```
 
 <p align="center">
-<img src="examples/gallery/watermill_38k_parts.png" width="45%"/>
-<img src="examples/gallery/watermill_12k_parts.png" width="45%"/>
+<img src="examples/gallery/watermill_sampler.png" width="60%"/>
 </p>
 
-<p align="center"><em>Left: watermill at 80 studs (38K parts, very detailed).
-Right: same watermill at 56 studs with hollow interior (12K parts, still
-recognizable).  Both were reconstructed from one photo via Hunyuan3D-2mini,
-then passed through the semantic + soft-train pipeline.</em></p>
+<p align="center"><em>The watermill mesh built by the statistics sampler (the test-panel recipe, 32 studs):
+1,509 parts in about nine minutes on a laptop.</em></p>
+
+<p align="center">
+<img src="examples/gallery/mesh_panel.png" width="100%"/>
+</p>
+
+<p align="center"><em>The nine test meshes every change is checked on, built with the same settings,
+two views each.</em></p>
 
 ---
 
